@@ -64,3 +64,5 @@ jobs:
           if-no-files-found: error
           compression-level: 6
           retention-days: 1
+
+# Temporary public-run marker: 2026-07-15.
