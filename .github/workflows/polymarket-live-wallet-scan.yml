@@ -18,8 +18,16 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --disable-pip-version-check requests
-      - run: python scratch/scan_copyable_wallets.py
+      - name: Run scanner and preserve diagnostics
+        shell: bash
+        run: |
+          mkdir -p output
+          set +e
+          python scratch/scan_copyable_wallets.py > output/run.log 2>&1
+          echo $? > output/exit_code.txt
+          exit 0
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: polymarket-live-wallet-scan
           path: output/
