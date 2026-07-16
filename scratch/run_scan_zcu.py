@@ -62,6 +62,10 @@ if count != 1:
     raise RuntimeError(f"Expected one fetch_market_map replacement, got {count}")
 
 source = source.replace(
+    'boards, candidates = fetch_leaderboards()',
+    f'boards, candidates_all = fetch_leaderboards()\n    candidates = {{"{TARGET}": candidates_all["{TARGET}"]}}',
+)
+source = source.replace(
     'top = analyzed[0] if analyzed else None',
     f'top = next((x for x in analyzed if x.get("wallet") == "{TARGET}"), None)',
 )
