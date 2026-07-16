@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
+import time
 import urllib.request
 from datetime import datetime, timezone
 
@@ -72,24 +73,28 @@ SCENES = [
 ARTWORKS = {
     "light.jpg": {
         "url": "https://upload.wikimedia.org/wikipedia/commons/5/5d/Dividing_Light_from_Darkness.jpg",
+        "fallback_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5d/Dividing_Light_from_Darkness.jpg/1280px-Dividing_Light_from_Darkness.jpg",
         "title": "Separation of Light from Darkness",
         "artist": "Michelangelo",
         "status": "public domain",
     },
     "sun_moon.jpg": {
         "url": "https://upload.wikimedia.org/wikipedia/commons/3/3c/Michelangelo%2C_Creation_of_the_Sun%2C_Moon%2C_and_Plants_01.jpg",
+        "fallback_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3c/Michelangelo%2C_Creation_of_the_Sun%2C_Moon%2C_and_Plants_01.jpg/1280px-Michelangelo%2C_Creation_of_the_Sun%2C_Moon%2C_and_Plants_01.jpg",
         "title": "The Creation of the Sun, Moon, and Plants",
         "artist": "Michelangelo",
         "status": "public domain",
     },
     "adam.jpg": {
         "url": "https://upload.wikimedia.org/wikipedia/commons/5/5b/Michelangelo_-_Creation_of_Adam_%28cropped%29.jpg",
+        "fallback_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5b/Michelangelo_-_Creation_of_Adam_%28cropped%29.jpg/1280px-Michelangelo_-_Creation_of_Adam_%28cropped%29.jpg",
         "title": "The Creation of Adam",
         "artist": "Michelangelo",
         "status": "public domain",
     },
     "animals.jpg": {
         "url": "https://upload.wikimedia.org/wikipedia/commons/8/87/Jacopo_Tintoretto_%E2%80%94_Creation_of_the_Animals.jpg",
+        "fallback_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/87/Jacopo_Tintoretto_%E2%80%94_Creation_of_the_Animals.jpg/1280px-Jacopo_Tintoretto_%E2%80%94_Creation_of_the_Animals.jpg",
         "title": "The Creation of the Animals",
         "artist": "Tintoretto",
         "status": "public domain",
@@ -105,13 +110,31 @@ def sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-def download(url: str, destination: pathlib.Path) -> None:
-    request = urllib.request.Request(
-        url,
-        headers={"User-Agent": "GenesisVideoBuilder/1.0 (GitHub Actions)"},
-    )
-    with urllib.request.urlopen(request, timeout=180) as response:
-        destination.write_bytes(response.read())
+def download(urls: list[str], destination: pathlib.Path) -> str:
+    if destination.exists() and destination.stat().st_size > 1024:
+        print(f"Artwork already present: {destination} ({destination.stat().st_size} bytes)", flush=True)
+        return "preexisting"
+    last_error = None
+    for url in urls:
+        for attempt in range(1, 5):
+            try:
+                print(f"Downloading {destination.name}, attempt {attempt}: {url}", flush=True)
+                request = urllib.request.Request(
+                    url,
+                    headers={"User-Agent": "Mozilla/5.0 GenesisVideoBuilder/1.1"},
+                )
+                with urllib.request.urlopen(request, timeout=180) as response:
+                    payload = response.read()
+                if len(payload) < 1024:
+                    raise RuntimeError(f"download too small: {len(payload)} bytes")
+                destination.write_bytes(payload)
+                print(f"Downloaded {destination.name}: {len(payload)} bytes", flush=True)
+                return url
+            except Exception as exc:
+                last_error = exc
+                print(f"Download failed: {type(exc).__name__}: {exc}", flush=True)
+                time.sleep(attempt * 2)
+    raise RuntimeError(f"Unable to download {destination.name}: {last_error}")
 
 
 model = pathlib.Path("kokoro-v1.0.onnx")
@@ -119,36 +142,31 @@ voices = pathlib.Path("voices-v1.0.bin")
 if not model.exists() or not voices.exists():
     raise FileNotFoundError("Kokoro model files were not downloaded")
 
+print("Loading Kokoro model", flush=True)
 kokoro = Kokoro(str(model), str(voices))
-requested_voice = "am_onyx"
+requested_voice = "am_michael"
 actual_voice = requested_voice
-voice_fallback = None
 records = []
 
-for scene in SCENES:
-    try:
-        samples, sample_rate = kokoro.create(
-            scene["script"], voice=actual_voice, speed=0.94, lang="en-us"
-        )
-    except Exception as exc:
-        if actual_voice == "am_michael":
-            raise
-        voice_fallback = f"{type(exc).__name__}: {exc}"
-        actual_voice = "am_michael"
-        samples, sample_rate = kokoro.create(
-            scene["script"], voice=actual_voice, speed=0.94, lang="en-us"
-        )
-
+for index, scene in enumerate(SCENES, 1):
+    print(f"Generating narration {index}/10: {scene['id']}", flush=True)
+    tts_text = scene["script"].replace("—", ", ").replace("–", "-")
+    samples, sample_rate = kokoro.create(
+        tts_text, voice=actual_voice, speed=0.94, lang="en-us"
+    )
     samples = np.asarray(samples, dtype=np.float32)
     if samples.ndim > 1:
         samples = samples.mean(axis=-1)
     peak = float(np.max(np.abs(samples))) if samples.size else 0.0
     if peak > 0.98:
         samples = samples * (0.98 / peak)
-
     output = AUDIO / f"{scene['id']}.wav"
     sf.write(output, samples, int(sample_rate), subtype="PCM_16")
     info = sf.info(output)
+    print(
+        f"Wrote {output}: {info.duration:.3f}s, {info.samplerate}Hz, {info.channels}ch",
+        flush=True,
+    )
     records.append(
         {
             **scene,
@@ -164,12 +182,13 @@ for scene in SCENES:
 art_records = []
 for filename, metadata in ARTWORKS.items():
     destination = ART / filename
-    download(metadata["url"], destination)
+    source_used = download([metadata["url"], metadata["fallback_url"]], destination)
     art_records.append(
         {
             "file": str(destination.relative_to(ROOT)),
             "bytes": destination.stat().st_size,
             "sha256": sha256(destination),
+            "source_used": source_used,
             **metadata,
         }
     )
@@ -179,7 +198,6 @@ manifest = {
     "engine": "kokoro-onnx / Kokoro-82M v1.0",
     "requested_voice": requested_voice,
     "actual_voice": actual_voice,
-    "fallback_reason": voice_fallback,
     "language": "en-us",
     "speed": 0.94,
     "scene_count": len(records),
@@ -205,4 +223,4 @@ print(json.dumps({
     "voice": actual_voice,
     "total_narration_seconds": manifest["total_narration_seconds"],
     "art_count": len(art_records),
-}, indent=2))
+}, indent=2), flush=True)
