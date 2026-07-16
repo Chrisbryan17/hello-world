@@ -1,0 +1,66 @@
+name: Genesis Video Assets
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/genesis-video-assets.yml
+      - scripts/generate_genesis_assets.py
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out generator
+        uses: actions/checkout@v4
+
+      - name: Install Kokoro runtime
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install kokoro-onnx soundfile numpy
+
+      - name: Download Kokoro model files
+        run: |
+          wget -q --show-progress https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
+          wget -q --show-progress https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
+
+      - name: Generate narration and retrieve public-domain art
+        run: python scripts/generate_genesis_assets.py
+
+      - name: Verify and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find genesis-assets/audio -maxdepth 1 -type f -name '*.wav' | wc -l)" -eq 10
+          test "$(find genesis-assets/art -maxdepth 1 -type f -name '*.jpg' | wc -l)" -eq 4
+          python - <<'PY'
+          import json, pathlib, soundfile as sf
+          root = pathlib.Path('genesis-assets')
+          manifest = json.loads((root / 'manifest.json').read_text())
+          assert manifest['scene_count'] == 10
+          assert len(manifest['artworks']) == 4
+          for wav in sorted((root / 'audio').glob('*.wav')):
+              info = sf.info(wav)
+              assert info.channels == 1, (wav, info.channels)
+              assert info.frames > 0
+          print('Verified ten clean mono Kokoro scenes and four artwork files')
+          PY
+          zip -r -9 genesis-video-assets.zip genesis-assets >/dev/null
+          unzip -t genesis-video-assets.zip
+          sha256sum genesis-video-assets.zip > genesis-video-assets.zip.sha256
+
+      - name: Upload verified asset bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: genesis-video-assets
+          path: |
+            genesis-video-assets.zip
+            genesis-video-assets.zip.sha256
+            genesis-assets/manifest.json
+            genesis-assets/storyboard.json
+          if-no-files-found: error
+          retention-days: 1
