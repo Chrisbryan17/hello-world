@@ -2,6 +2,7 @@
 import json, re, time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote
 import requests
 
 WALLET='0xd02b6d910a38479c3125308fc4737a46509cd6df'
@@ -63,9 +64,9 @@ gamma=[]
 missing=sorted(set(slug)-set(winners))
 for n,cid in enumerate(missing,1):
     try:
-        arr=get(GAMMA+'/markets',{'slug':slug[cid]})
-        if not arr: continue
-        m=arr[0]; gamma.append(m)
+        m=get(GAMMA+'/markets/slug/'+quote(slug[cid],safe=''))
+        if not isinstance(m,dict) or not m: continue
+        gamma.append(m)
         outs=m.get('outcomes',[]); prices=m.get('outcomePrices',[])
         if isinstance(outs,str): outs=json.loads(outs)
         if isinstance(prices,str): prices=json.loads(prices)
