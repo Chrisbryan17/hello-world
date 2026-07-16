@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - .github/workflows/genesis-more-paintings.yml
+      - scripts/retrieve_genesis_paintings.py
 
 permissions:
   contents: read
@@ -14,85 +15,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Check out retrieval script
+        uses: actions/checkout@v4
+
       - name: Install image validation dependency
         run: python3 -m pip install --quiet pillow
 
       - name: Retrieve public-domain Genesis artworks
+        run: python3 scripts/retrieve_genesis_paintings.py
+
+      - name: Verify and package
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p genesis-more-paintings/art
-          python3 - <<'PY'
-          import hashlib, json, pathlib, urllib.parse, urllib.request
-          from PIL import Image
-
-          items = [
-              ("earth_waters", "File:Separation of the Earth from the Waters.png", "Michelangelo", "The Separation of the Earth and Waters", "public domain"),
-              ("creation_eve", "File:The Creation of Eve (1).png", "Michelangelo", "The Creation of Eve", "public domain"),
-              ("garden_eve", "File:The Garden of Eden with the Creation of Eve (Jan Brueghel the Younger).jpg", "Jan Brueghel the Younger", "The Garden of Eden with the Creation of Eve", "public domain"),
-              ("world_expulsion", "File:The Creation of the World and the Expulsion from Paradise MET Paradise0236.jpg", "Giovanni di Paolo", "The Creation of the World and the Expulsion from Paradise", "CC0"),
-              ("world_lesueur", "File:Eustache Le Sueur - The Creation of the World.jpg", "Eustache Le Sueur", "The Creation of the World", "public domain"),
-              ("adam_naming", "File:Adam in the Garden of Eden, Naming the Animals MET DT5631.jpg", "Joachim Wtewael", "Adam in the Garden of Eden, Naming the Animals", "CC0"),
-              ("garden_animals", "File:Garden of Eden; Creation of the Animals MET DP801707.jpg", "Anonymous Netherlandish", "Garden of Eden; Creation of the Animals", "CC0"),
-              ("world_roos", "File:The Creation of the World (Cajetan Roos)-WUS02198.jpg", "Cajetan Roos", "The Creation of the World", "CC0"),
-          ]
-
-          root = pathlib.Path("genesis-more-paintings")
-          art = root / "art"
-          api = "https://commons.wikimedia.org/w/api.php"
-          opener = urllib.request.build_opener()
-          opener.addheaders = [("User-Agent", "GenesisFilmBuilder/2.1 (GitHub Actions)")]
-          manifest = []
-
-          for slug, title, artist, artwork_title, license_name in items:
-              qs = urllib.parse.urlencode({
-                  "action": "query",
-                  "format": "json",
-                  "prop": "imageinfo",
-                  "iiprop": "url|size|mime|sha1",
-                  "titles": title,
-              })
-              with opener.open(api + "?" + qs, timeout=120) as response:
-                  data = json.load(response)
-              page = next(iter(data["query"]["pages"].values()))
-              info = page["imageinfo"][0]
-              ext = pathlib.Path(urllib.parse.urlparse(info["url"]).path).suffix.lower()
-              if ext not in {".jpg", ".jpeg", ".png"}:
-                  ext = ".jpg"
-              out = art / f"{slug}{ext}"
-              with opener.open(info["url"], timeout=240) as response:
-                  out.write_bytes(response.read())
-              with Image.open(out) as im:
-                  im.verify()
-              with Image.open(out) as im:
-                  width, height = im.size
-              digest = hashlib.sha256(out.read_bytes()).hexdigest()
-              manifest.append({
-                  "slug": slug,
-                  "file": str(out.relative_to(root)),
-                  "commons_title": title,
-                  "artist": artist,
-                  "title": artwork_title,
-                  "license": license_name,
-                  "source_url": info["descriptionurl"],
-                  "original_url": info["url"],
-                  "width": width,
-                  "height": height,
-                  "bytes": out.stat().st_size,
-                  "sha256": digest,
-              })
-              print(f"Downloaded {slug}: {width}x{height} {out.stat().st_size} bytes")
-
-          if len(manifest) != 8:
-              raise RuntimeError(f"Expected 8 paintings, found {len(manifest)}")
-          if any(x["width"] < 800 or x["height"] < 700 for x in manifest):
-              raise RuntimeError("A painting is below minimum render dimensions")
-          (root / "manifest.json").write_text(json.dumps({"count": len(manifest), "paintings": manifest}, indent=2) + "\n", encoding="utf-8")
-          PY
-
+          test "$(find genesis-more-paintings/art -maxdepth 1 -type f | wc -l)" -eq 8
           zip -r -9 genesis-more-paintings.zip genesis-more-paintings >/dev/null
           unzip -t genesis-more-paintings.zip
-          test "$(find genesis-more-paintings/art -maxdepth 1 -type f | wc -l)" -eq 8
           sha256sum genesis-more-paintings.zip > genesis-more-paintings.zip.sha256
 
       - name: Upload verified paintings
