@@ -14,6 +14,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Install image validation dependency
+        run: python3 -m pip install --quiet pillow
+
       - name: Retrieve public-domain Genesis artworks
         shell: bash
         run: |
@@ -38,7 +41,7 @@ jobs:
           art = root / "art"
           api = "https://commons.wikimedia.org/w/api.php"
           opener = urllib.request.build_opener()
-          opener.addheaders = [("User-Agent", "GenesisFilmBuilder/2.0 (GitHub Actions)")]
+          opener.addheaders = [("User-Agent", "GenesisFilmBuilder/2.1 (GitHub Actions)")]
           manifest = []
 
           for slug, title, artist, artwork_title, license_name in items:
