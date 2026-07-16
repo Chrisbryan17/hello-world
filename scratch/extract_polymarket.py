@@ -10,11 +10,14 @@ DATA='https://data-api.polymarket.com'
 GAMMA='https://gamma-api.polymarket.com'
 OUT=Path('output'); OUT.mkdir(exist_ok=True)
 s=requests.Session(); s.headers['User-Agent']='monthly-backtest-extractor/1.0'
+request_count=0
 
 def get(url, params=None):
+    global request_count
     delay=1
     for i in range(8):
         try:
+            request_count+=1
             r=s.get(url,params=params,timeout=60)
             if r.status_code in (429,500,502,503,504): raise RuntimeError(f'{r.status_code} {r.text[:200]}')
             r.raise_for_status(); return r.json()
@@ -28,6 +31,16 @@ def key(x):
 def is_btc(x):
     return str(x.get('title','')).startswith('Bitcoin Up or Down -') and re.search(r'btc-updown-(5m|15m)-\d{10}$',str(x.get('slug','')))
 
+def fetch_interval(a,b,depth=0):
+    page=get(DATA+'/trades',{'user':WALLET,'limit':1000,'offset':0,'takerOnly':'false','start':a,'end':b})
+    print('SLICE',datetime.fromtimestamp(a,timezone.utc).isoformat(),datetime.fromtimestamp(b,timezone.utc).isoformat(),'DEPTH',depth,'ROWS',len(page),flush=True)
+    if len(page)<1000:
+        return page
+    if a>=b:
+        raise RuntimeError(f'one-second interval still capped at 1000: {a}')
+    mid=(a+b)//2
+    return fetch_interval(a,mid,depth+1)+fetch_interval(mid+1,b,depth+1)
+
 end=int(time.time()); start=end-30*86400
 rows=[]
 cur=datetime.fromtimestamp(start,timezone.utc).replace(hour=0,minute=0,second=0,microsecond=0)
@@ -35,20 +48,13 @@ last=datetime.fromtimestamp(end,timezone.utc)
 while cur<=last:
     a=max(start,int(cur.timestamp())); b=min(end,int((cur+timedelta(days=1)).timestamp())-1)
     if a<=b:
-        offset=0; day_rows=[]
-        while True:
-            page=get(DATA+'/trades',{'user':WALLET,'limit':1000,'offset':offset,'takerOnly':'false','start':a,'end':b})
-            day_rows.extend(page)
-            print('DAY_PAGE',cur.date(),'OFFSET',offset,'ROWS',len(page),flush=True)
-            if len(page)<1000: break
-            offset+=1000
-            if offset>10000: raise RuntimeError(f'daily offset limit exceeded for {cur.date()}')
+        day_rows=fetch_interval(a,b)
         print('DAY_TOTAL',cur.date(),'ROWS',len(day_rows),flush=True)
         rows.extend(day_rows)
     cur+=timedelta(days=1)
 uniq={key(x):x for x in rows}
 trades=sorted([x for x in uniq.values() if start<=int(x.get('timestamp',0))<=end and is_btc(x)],key=lambda x:(int(x.get('timestamp',0)),str(x.get('transactionHash','')),str(x.get('asset',''))))
-print('BTC_TRADES',len(trades),flush=True)
+print('BTC_TRADES',len(trades),'REQUESTS',request_count,flush=True)
 
 closed=[]; offset=0
 while True:
@@ -88,6 +94,6 @@ for n,cid in enumerate(missing,1):
 (OUT/'closed_positions.json').write_text(json.dumps(closed,indent=2),encoding='utf-8')
 (OUT/'gamma_markets.json').write_text(json.dumps(gamma,indent=2),encoding='utf-8')
 (OUT/'resolutions.json').write_text(json.dumps(winners,indent=2),encoding='utf-8')
-meta={'wallet':WALLET,'start_epoch':start,'end_epoch':end,'generated_utc':datetime.fromtimestamp(end,timezone.utc).isoformat(),'trade_count':len(trades),'condition_count':len(set(str(x.get('conditionId')) for x in trades)),'resolved_count':len(set(str(x.get('conditionId')) for x in trades)&set(winners)),'unresolved_condition_ids':sorted(set(slug)-set(winners))}
+meta={'wallet':WALLET,'start_epoch':start,'end_epoch':end,'generated_utc':datetime.fromtimestamp(end,timezone.utc).isoformat(),'trade_count':len(trades),'condition_count':len(set(str(x.get('conditionId')) for x in trades)),'resolved_count':len(set(str(x.get('conditionId')) for x in trades)&set(winners)),'request_count':request_count,'unresolved_condition_ids':sorted(set(slug)-set(winners))}
 (OUT/'metadata.json').write_text(json.dumps(meta,indent=2),encoding='utf-8')
 print('META',json.dumps(meta),flush=True)
