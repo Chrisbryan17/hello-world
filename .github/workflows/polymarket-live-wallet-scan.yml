@@ -23,7 +23,7 @@ jobs:
         run: |
           mkdir -p output
           set +e
-          python scratch/scan_copyable_wallets.py > output/run.log 2>&1
+          python scratch/run_scan_v2.py > output/run.log 2>&1
           echo $? > output/exit_code.txt
           exit 0
       - uses: actions/upload-artifact@v4
