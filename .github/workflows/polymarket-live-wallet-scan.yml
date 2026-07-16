@@ -1,0 +1,26 @@
+name: Polymarket Live Wallet Scan
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - run: python scratch/scan_copyable_wallets.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: polymarket-live-wallet-scan
+          path: output/
+          retention-days: 3
