@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
+import time
+import traceback
 import urllib.parse
 import urllib.request
 
@@ -22,16 +24,30 @@ ITEMS = [
 ROOT = pathlib.Path("genesis-more-paintings")
 ART = ROOT / "art"
 API = "https://commons.wikimedia.org/w/api.php"
+ERROR = ROOT / "error.txt"
 
 
 def sha256(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def open_retry(opener: urllib.request.OpenerDirector, url: str, timeout: int):
+    last = None
+    for attempt in range(1, 5):
+        try:
+            return opener.open(url, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            print(f"Attempt {attempt} failed for {url}: {type(exc).__name__}: {exc}", flush=True)
+            if attempt < 4:
+                time.sleep(2.5 * attempt)
+    raise RuntimeError(f"All retries failed for {url}: {last}")
+
+
 def main() -> None:
     ART.mkdir(parents=True, exist_ok=True)
     opener = urllib.request.build_opener()
-    opener.addheaders = [("User-Agent", "GenesisFilmBuilder/2.2 (GitHub Actions)")]
+    opener.addheaders = [("User-Agent", "GenesisFilmBuilder/2.3 (https://github.com/Chrisbryan17/hello-world)")]
     manifest = []
 
     for slug, title, artist, artwork_title, license_name in ITEMS:
@@ -41,19 +57,23 @@ def main() -> None:
             "format": "json",
             "prop": "imageinfo",
             "iiprop": "url|size|mime|sha1",
+            "iiurlwidth": "2400",
             "titles": title,
         })
-        with opener.open(API + "?" + qs, timeout=120) as response:
+        with open_retry(opener, API + "?" + qs, 120) as response:
             data = json.load(response)
         page = next(iter(data["query"]["pages"].values()))
         if "missing" in page or "imageinfo" not in page:
             raise RuntimeError(f"Commons file title did not resolve: {title}; page={page}")
         info = page["imageinfo"][0]
-        ext = pathlib.Path(urllib.parse.urlparse(info["url"]).path).suffix.lower()
+        source_url = info.get("thumburl") or info["url"]
+        ext = pathlib.Path(urllib.parse.urlparse(source_url).path).suffix.lower()
+        if ext not in {".jpg", ".jpeg", ".png"}:
+            ext = pathlib.Path(urllib.parse.urlparse(info["url"]).path).suffix.lower()
         if ext not in {".jpg", ".jpeg", ".png"}:
             ext = ".jpg"
         out = ART / f"{slug}{ext}"
-        with opener.open(info["url"], timeout=240) as response:
+        with open_retry(opener, source_url, 240) as response:
             out.write_bytes(response.read())
         with Image.open(out) as image:
             image.verify()
@@ -68,8 +88,9 @@ def main() -> None:
             "artist": artist,
             "title": artwork_title,
             "license": license_name,
-            "source_url": info["descriptionurl"],
+            "source_url": info.get("descriptionurl", ""),
             "original_url": info["url"],
+            "download_url": source_url,
             "width": width,
             "height": height,
             "bytes": out.stat().st_size,
@@ -87,4 +108,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:  # noqa: BLE001
+        ROOT.mkdir(parents=True, exist_ok=True)
+        ERROR.write_text(traceback.format_exc(), encoding="utf-8")
+        print(ERROR.read_text(encoding="utf-8"), flush=True)
+        raise
