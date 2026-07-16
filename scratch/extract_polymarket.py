@@ -35,10 +35,16 @@ last=datetime.fromtimestamp(end,timezone.utc)
 while cur<=last:
     a=max(start,int(cur.timestamp())); b=min(end,int((cur+timedelta(days=1)).timestamp())-1)
     if a<=b:
-        page=get(DATA+'/trades',{'user':WALLET,'limit':10000,'offset':0,'takerOnly':'false','start':a,'end':b})
-        print('DAY',cur.date(),'ROWS',len(page),flush=True)
-        if len(page)>=10000: raise RuntimeError('daily 10k cap reached')
-        rows.extend(page)
+        offset=0; day_rows=[]
+        while True:
+            page=get(DATA+'/trades',{'user':WALLET,'limit':1000,'offset':offset,'takerOnly':'false','start':a,'end':b})
+            day_rows.extend(page)
+            print('DAY_PAGE',cur.date(),'OFFSET',offset,'ROWS',len(page),flush=True)
+            if len(page)<1000: break
+            offset+=1000
+            if offset>10000: raise RuntimeError(f'daily offset limit exceeded for {cur.date()}')
+        print('DAY_TOTAL',cur.date(),'ROWS',len(day_rows),flush=True)
+        rows.extend(day_rows)
     cur+=timedelta(days=1)
 uniq={key(x):x for x in rows}
 trades=sorted([x for x in uniq.values() if start<=int(x.get('timestamp',0))<=end and is_btc(x)],key=lambda x:(int(x.get('timestamp',0)),str(x.get('transactionHash','')),str(x.get('asset',''))))
