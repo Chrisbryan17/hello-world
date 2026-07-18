@@ -1,0 +1,78 @@
+name: Asteria Kokoro narration
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "asteria-kokoro/**"
+      - ".github/workflows/asteria-kokoro-narration.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthesize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Kokoro dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends espeak-ng
+          python -m pip install --upgrade pip
+          python -m pip install "kokoro-onnx==0.5.0" "soundfile>=0.12,<0.14" "numpy>=1.26,<3"
+
+      - name: Download Kokoro model and voices from GitHub Releases
+        run: |
+          mkdir -p asteria-kokoro/models
+          wget --progress=dot:giga \
+            https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx \
+            -O asteria-kokoro/models/kokoro-v1.0.int8.onnx
+          wget --progress=dot:giga \
+            https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin \
+            -O asteria-kokoro/models/voices-v1.0.bin
+          sha256sum asteria-kokoro/models/*
+
+      - name: Synthesize narration
+        run: |
+          python asteria-kokoro/synthesize_narration.py \
+            --script asteria-kokoro/asteria_narration.json \
+            --model asteria-kokoro/models/kokoro-v1.0.int8.onnx \
+            --voices asteria-kokoro/models/voices-v1.0.bin \
+            --out asteria-kokoro/output
+
+      - name: Validate outputs
+        run: |
+          test -s asteria-kokoro/output/asteria_kokoro_narration.wav
+          test -s asteria-kokoro/output/narration_timeline.json
+          python - <<'PY'
+          import json
+          import soundfile as sf
+          from pathlib import Path
+          out = Path("asteria-kokoro/output")
+          data, rate = sf.read(out / "asteria_kokoro_narration.wav")
+          timeline = json.loads((out / "narration_timeline.json").read_text())
+          assert rate == 24000
+          assert len(data) / rate > 120
+          assert len(timeline["scenes"]) == 9
+          print({"sample_rate": rate, "duration": len(data) / rate, "scenes": 9})
+          PY
+
+      - name: Upload narration artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: asteria-kokoro-narration
+          path: asteria-kokoro/output/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 6
