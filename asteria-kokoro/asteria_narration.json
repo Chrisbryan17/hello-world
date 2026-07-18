@@ -1,0 +1,53 @@
+{
+  "project": "Asteria-X1 and PetalCatch-X1",
+  "voice": "am_michael",
+  "speed": 1.02,
+  "sample_rate": 24000,
+  "scenes": [
+    {
+      "id": "01_intro",
+      "title": "A reusable demonstrator designed as one system",
+      "text": "This is Asteria X one, a one metre, non-combustive reusable flight demonstrator, paired with the PetalCatch X one recovery platform. The objective is not to imitate a conventional landing pad. It is to design the vehicle, capture interface, energy absorbers, sensors, controls, and turnaround process as one integrated system."
+    },
+    {
+      "id": "02_vehicle",
+      "title": "Vehicle architecture",
+      "text": "The demonstrator uses a central structural body with removable service panels, an avionics compartment, guarded electric lift modules, motor controllers, wiring conduits, and a reinforced circumferential capture belt. The lift modules sit above the belt so the lower vehicle can enter the capture throat without the propulsors striking the funnel or its tendons. The belt transfers capture loads into the main frame instead of concentrating them at one small hook."
+    },
+    {
+      "id": "03_platform",
+      "title": "PetalCatch platform",
+      "text": "PetalCatch is built around a braced base frame, four masts, upper guide rails, a suspended lower throat ring, and a three dimensional cable funnel. The wide opening increases the allowable lateral error. As the vehicle descends, the sloped tendons guide the capture belt toward the centre. Outriggers and anchor plates widen the support polygon, while gussets and diagonal braces carry loads into the floor."
+    },
+    {
+      "id": "04_approach",
+      "title": "Approach and alignment",
+      "text": "During the approach, the vehicle remains above the web until its lower body is aligned with the throat. Relative position can be estimated with platform cameras or ranging sensors, while the vehicle provides attitude and altitude estimates. The passive funnel geometry performs the basic centring action. Active control improves accuracy, but the platform is not allowed to depend on one sensor or one software command to prevent a fall."
+    },
+    {
+      "id": "05_capture",
+      "title": "Capture sequence",
+      "text": "At engagement, four reinforced saddles on the capture belt contact dedicated cable sectors. The vehicle continues downward only a short distance. The web deflects, the throat ring moves, and the cable paths pull through external pulleys. This converts the vehicle's vertical motion into controlled extension of the energy absorbers. The propulsors remain outside the funnel, and the lower body retains clearance through the centre opening."
+    },
+    {
+      "id": "06_load_path",
+      "title": "Load transfer and damping",
+      "text": "The key engineering question is the load path. Force travels from the capture belt into the vehicle frame, then through the saddles and tendons to the throat ring, pulleys, load cells, dampers, masts, braces, outriggers, and anchors. Four separate spring damper channels share the arrest load. Load cells provide measured tension for the digital twin and reveal imbalance, a damaged sector, or a developing structural problem after repeated captures."
+    },
+    {
+      "id": "07_faults",
+      "title": "Fault tolerance and safety",
+      "text": "The system is intentionally sectorised. A single unavailable cable sector must not release the vehicle. Mechanical geometry provides passive retention, while the controller monitors tension, displacement, mast strain, vibration, and contact state. A separate emergency stop and safety controller can disable the lift system independently of the main flight computer. Early tests remain tethered and use a weighted dummy before any powered capture attempt."
+    },
+    {
+      "id": "08_turnaround",
+      "title": "Inspection and rapid reuse",
+      "text": "After capture, the vehicle is secured, power is isolated, and each load channel is checked against its expected signature. Replaceable wear surfaces, absorber cartridges, and modular electronics reduce repair time. The platform can then reset its cable lengths and throat position for the next test. Asteria X one is a physical research demonstrator: it proves capture dynamics, structural load paths, controls, fault handling, and reuse before any larger vehicle is considered."
+    },
+    {
+      "id": "09_close",
+      "title": "What the program proves",
+      "text": "The design moves landing mass and energy absorption away from the vehicle and into reusable ground equipment. The result is a broader capture volume, distributed loads, replaceable platform hardware, and a common interface that can be tested repeatedly. The next milestones are instrumented dummy drops, tethered hover tests, low energy captures, one sector fault tests, and a fifty cycle reuse campaign correlated against the digital twin."
+    }
+  ]
+}
