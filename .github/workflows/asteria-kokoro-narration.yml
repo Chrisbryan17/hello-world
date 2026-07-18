@@ -14,7 +14,7 @@ permissions:
 jobs:
   synthesize:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout branch
@@ -27,13 +27,15 @@ jobs:
 
       - name: Install Kokoro dependencies
         run: |
+          set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends espeak-ng
+          sudo apt-get install -y --no-install-recommends espeak-ng ffmpeg
           python -m pip install --upgrade pip
           python -m pip install "kokoro-onnx==0.5.0" "soundfile>=0.12,<0.14" "numpy>=1.26,<3"
 
       - name: Download Kokoro model and voices from GitHub Releases
         run: |
+          set -euxo pipefail
           mkdir -p asteria-kokoro/models
           wget --progress=dot:giga \
             https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx \
@@ -41,20 +43,31 @@ jobs:
           wget --progress=dot:giga \
             https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin \
             -O asteria-kokoro/models/voices-v1.0.bin
+          test -s asteria-kokoro/models/kokoro-v1.0.int8.onnx
+          test -s asteria-kokoro/models/voices-v1.0.bin
           sha256sum asteria-kokoro/models/*
 
       - name: Synthesize narration
         run: |
+          set -euxo pipefail
+          rm -rf asteria-kokoro/output
           python asteria-kokoro/synthesize_narration.py \
             --script asteria-kokoro/asteria_narration.json \
             --model asteria-kokoro/models/kokoro-v1.0.int8.onnx \
             --voices asteria-kokoro/models/voices-v1.0.bin \
             --out asteria-kokoro/output
+          ffmpeg -hide_banner -loglevel error -y \
+            -i asteria-kokoro/output/asteria_kokoro_narration.wav \
+            -codec:a libmp3lame -q:a 2 \
+            asteria-kokoro/output/asteria_kokoro_narration.mp3
 
       - name: Validate outputs
         run: |
+          set -euxo pipefail
           test -s asteria-kokoro/output/asteria_kokoro_narration.wav
+          test -s asteria-kokoro/output/asteria_kokoro_narration.mp3
           test -s asteria-kokoro/output/narration_timeline.json
+          test -s asteria-kokoro/output/scene_titles.srt
           python - <<'PY'
           import json
           import soundfile as sf
@@ -62,11 +75,15 @@ jobs:
           out = Path("asteria-kokoro/output")
           data, rate = sf.read(out / "asteria_kokoro_narration.wav")
           timeline = json.loads((out / "narration_timeline.json").read_text())
+          assert timeline["engine"] == "Kokoro ONNX"
+          assert timeline["voice"] == "am_michael"
           assert rate == 24000
-          assert len(data) / rate > 120
-          assert len(timeline["scenes"]) == 9
-          print({"sample_rate": rate, "duration": len(data) / rate, "scenes": 9})
+          assert len(data) / rate > 180
+          assert len(timeline["scenes"]) == 12
+          assert all(scene["duration_seconds"] > 8 for scene in timeline["scenes"])
+          print({"sample_rate": rate, "duration": len(data) / rate, "scenes": 12})
           PY
+          sha256sum asteria-kokoro/output/* > asteria-kokoro/output/SHA256SUMS.txt
 
       - name: Upload narration artifact
         uses: actions/upload-artifact@v4
