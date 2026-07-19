@@ -1,0 +1,1 @@
+Inspect public BTC five-minute high-frequency episode schema and coverage.
