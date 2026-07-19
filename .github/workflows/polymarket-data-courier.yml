@@ -1,0 +1,58 @@
+name: Polymarket Public Data Courier
+
+on:
+  push:
+    branches:
+      - courier/polymarket-5m-data
+    paths:
+      - .github/workflows/polymarket-data-courier.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/polymarket-data-courier.yml
+  workflow_dispatch:
+
+jobs:
+  courier:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download public CC0 parquet archive
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "huggingface_hub[hf_xet]"
+          mkdir -p courier/polymarket-5m courier/wheels
+          python - <<'PY'
+          from huggingface_hub import snapshot_download
+          snapshot_download(
+              repo_id="kachoio/polymarket-5-minute-crypto-up-down-markets",
+              repo_type="dataset",
+              local_dir="courier/polymarket-5m",
+              allow_patterns=["*.parquet", "README.md"],
+          )
+          PY
+
+      - name: Bundle offline parquet reader
+        run: |
+          python -m pip download --only-binary=:all: --no-deps --dest courier/wheels pyarrow==18.1.0
+          find courier -type f -print0 | sort -z | xargs -0 sha256sum > courier/SHA256SUMS.txt
+          du -sh courier
+
+      - name: Upload courier artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: polymarket-public-data-courier
+          path: courier
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
