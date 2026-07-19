@@ -1,0 +1,1 @@
+Fetch verified public Binance BTCUSDT and SOLUSDT one-second archives for June 2026.
