@@ -1,0 +1,43 @@
+name: Fetch Binance Public 1s Data
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: [BTCUSDT, SOLUSDT]
+        month: [2026-04, 2026-05]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download and verify public monthly archive
+        env:
+          SYMBOL: ${{ matrix.symbol }}
+          MONTH: ${{ matrix.month }}
+        run: |
+          set -euo pipefail
+          name="${SYMBOL}-1s-${MONTH}.zip"
+          base="https://data.binance.vision/data/spot/monthly/klines/${SYMBOL}/1s"
+          curl --fail --location --retry 5 --retry-all-errors "${base}/${name}" -o "${name}"
+          curl --fail --location --retry 5 --retry-all-errors "${base}/${name}.CHECKSUM" -o "${name}.CHECKSUM"
+          sha256sum -c "${name}.CHECKSUM"
+          unzip -t "${name}"
+          ls -lh "${name}" "${name}.CHECKSUM"
+      - name: Upload public monthly archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: binance-${{ matrix.symbol }}-1s-${{ matrix.month }}
+          path: |
+            ${{ matrix.symbol }}-1s-${{ matrix.month }}.zip
+            ${{ matrix.symbol }}-1s-${{ matrix.month }}.zip.CHECKSUM
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
