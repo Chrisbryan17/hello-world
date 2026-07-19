@@ -1,0 +1,41 @@
+name: Fetch Binance BTC Feb Mar 1s
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/fetch-binance-btc-feb-mar.yml
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        month: [2026-02, 2026-03]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download and verify public Binance archive
+        env:
+          MONTH: ${{ matrix.month }}
+        run: |
+          set -euo pipefail
+          name="BTCUSDT-1s-${MONTH}.zip"
+          base="https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1s"
+          curl --fail --location --retry 5 --retry-all-errors "${base}/${name}" -o "${name}"
+          curl --fail --location --retry 5 --retry-all-errors "${base}/${name}.CHECKSUM" -o "${name}.CHECKSUM"
+          sha256sum -c "${name}.CHECKSUM"
+          unzip -t "${name}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binance-BTCUSDT-1s-${{ matrix.month }}
+          path: |
+            BTCUSDT-1s-${{ matrix.month }}.zip
+            BTCUSDT-1s-${{ matrix.month }}.zip.CHECKSUM
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
