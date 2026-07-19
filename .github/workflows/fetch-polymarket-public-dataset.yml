@@ -15,6 +15,10 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        coin: [btc, eth, sol, xrp, doge, bnb, hype]
     env:
       HF_XET_HIGH_PERFORMANCE: '1'
     steps:
@@ -27,25 +31,29 @@ jobs:
       - name: Install downloader
         run: python -m pip install --upgrade huggingface_hub hf_xet
 
-      - name: Download public CC0 archive
+      - name: Download public CC0 coin archive
+        env:
+          COIN: ${{ matrix.coin }}
         run: |
           python - <<'PY'
+          import os
           from huggingface_hub import snapshot_download
+          coin = os.environ['COIN']
           snapshot_download(
               repo_id='kachoio/polymarket-5-minute-crypto-up-down-markets',
               repo_type='dataset',
-              local_dir='polymarket-5m',
-              allow_patterns=['*_markets.parquet', '*_ticks.parquet', 'README.md'],
+              local_dir=f'polymarket-5m-{coin}',
+              allow_patterns=[f'{coin}_markets.parquet', f'{coin}_ticks.parquet', 'README.md'],
           )
           PY
-          find polymarket-5m -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
-          du -sh polymarket-5m
+          find "polymarket-5m-${COIN}" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
+          du -sh "polymarket-5m-${COIN}"
 
-      - name: Upload public dataset artifact
+      - name: Upload public coin artifact
         uses: actions/upload-artifact@v4
         with:
-          name: polymarket-5m-public-dataset
-          path: polymarket-5m
+          name: polymarket-5m-${{ matrix.coin }}
+          path: polymarket-5m-${{ matrix.coin }}
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
