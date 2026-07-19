@@ -6,38 +6,33 @@ on:
   workflow_dispatch:
 
 jobs:
-  fetch:
+  inspect-trent:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 30
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        symbol: [BTCUSDT, SOLUSDT]
-        month: [2026-06]
     steps:
       - uses: actions/checkout@v4
-      - name: Download and verify public monthly archive
-        env:
-          SYMBOL: ${{ matrix.symbol }}
-          MONTH: ${{ matrix.month }}
-        run: |
-          set -euo pipefail
-          name="${SYMBOL}-1s-${MONTH}.zip"
-          base="https://data.binance.vision/data/spot/monthly/klines/${SYMBOL}/1s"
-          curl --fail --location --retry 5 --retry-all-errors "${base}/${name}" -o "${name}"
-          curl --fail --location --retry 5 --retry-all-errors "${base}/${name}.CHECKSUM" -o "${name}.CHECKSUM"
-          sha256sum -c "${name}.CHECKSUM"
-          unzip -t "${name}"
-          ls -lh "${name}" "${name}.CHECKSUM"
-      - name: Upload public monthly archive
-        uses: actions/upload-artifact@v4
+      - uses: actions/setup-python@v5
         with:
-          name: binance-${{ matrix.symbol }}-1s-${{ matrix.month }}
-          path: |
-            ${{ matrix.symbol }}-1s-${{ matrix.month }}.zip
-            ${{ matrix.symbol }}-1s-${{ matrix.month }}.zip.CHECKSUM
-          compression-level: 0
-          retention-days: 1
-          if-no-files-found: error
+          python-version: '3.11'
+      - run: python -m pip install --quiet huggingface_hub hf_xet pyarrow pandas
+      - name: Inspect one BTC5m episode
+        run: |
+          python - <<'PY'
+          from huggingface_hub import list_repo_files, hf_hub_download
+          import pyarrow.parquet as pq, pandas as pd
+          repo='trentmkelly/polymarket_crypto_derivatives'
+          files=list_repo_files(repo, repo_type='dataset')
+          matches=sorted(p for p in files if p.startswith('btc5m_') and p.endswith('/steps.parquet'))
+          print('btc5m step files',len(matches))
+          print('first',matches[:3]);print('last',matches[-3:])
+          p=hf_hub_download(repo, matches[0], repo_type='dataset')
+          pf=pq.ParquetFile(p)
+          print('schema',pf.schema)
+          df=pd.read_parquet(p)
+          print('shape',df.shape)
+          print('HEAD',df.head(5).to_json(orient='records'))
+          print('TAIL',df.tail(5).to_json(orient='records'))
+          print(df.dtypes)
+          PY
