@@ -1,0 +1,38 @@
+name: Fetch Binance Public 1s Data
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  inspect-trent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --quiet huggingface_hub hf_xet pyarrow pandas
+      - name: Inspect one BTC5m episode
+        run: |
+          python - <<'PY'
+          from huggingface_hub import list_repo_files, hf_hub_download
+          import pyarrow.parquet as pq, pandas as pd
+          repo='trentmkelly/polymarket_crypto_derivatives'
+          files=list_repo_files(repo, repo_type='dataset')
+          matches=sorted(p for p in files if p.startswith('btc5m_') and p.endswith('/steps.parquet'))
+          print('btc5m step files',len(matches))
+          print('first',matches[:3]);print('last',matches[-3:])
+          p=hf_hub_download(repo, matches[0], repo_type='dataset')
+          pf=pq.ParquetFile(p)
+          print('schema',pf.schema)
+          df=pd.read_parquet(p)
+          print('shape',df.shape)
+          print('HEAD',df.head(5).to_json(orient='records'))
+          print('TAIL',df.tail(5).to_json(orient='records'))
+          print(df.dtypes)
+          PY
