@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         symbol: [BTCUSDT, SOLUSDT]
-        month: [2026-04, 2026-05]
+        month: [2026-06]
     steps:
       - uses: actions/checkout@v4
       - name: Download and verify public monthly archive
