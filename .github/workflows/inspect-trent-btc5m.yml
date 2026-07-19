@@ -19,7 +19,7 @@ jobs:
       - run: python -m pip install --quiet huggingface_hub hf_xet pyarrow pandas
       - name: Inspect one BTC5m episode
         run: |
-          python - <<'PY'
+          python - <<'PY' > trent_btc5m_inspection.txt
           from huggingface_hub import list_repo_files, hf_hub_download
           import pyarrow.parquet as pq, pandas as pd
           repo='trentmkelly/polymarket_crypto_derivatives'
@@ -32,7 +32,13 @@ jobs:
           print('schema',pf.schema)
           df=pd.read_parquet(p)
           print('shape',df.shape)
-          print(df.head(5).to_json(orient='records'))
-          print(df.tail(5).to_json(orient='records'))
+          print('HEAD',df.head(5).to_json(orient='records'))
+          print('TAIL',df.tail(5).to_json(orient='records'))
           print(df.dtypes)
           PY
+          cat trent_btc5m_inspection.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trent-btc5m-inspection
+          path: trent_btc5m_inspection.txt
+          retention-days: 1
