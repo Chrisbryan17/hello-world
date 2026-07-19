@@ -1,0 +1,40 @@
+name: Debug Trent BTC5m Shard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/debug-trent-shard.yml
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      HF_XET_HIGH_PERFORMANCE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --quiet huggingface_hub hf_xet pyarrow pandas numpy
+      - name: Capture shard traceback
+        run: |
+          set +e
+          python scripts/compact_trent_btc5m.py --shard 0 --shards 64 --workers 8 > trent_debug.log 2>&1
+          echo $? > trent_debug.status
+          cat trent_debug.log
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trent-btc5m-debug
+          path: |
+            trent_debug.log
+            trent_debug.status
+            trent_btc5m_compact_shard_*.parquet
+            trent_btc5m_manifest_shard_*.json
+          if-no-files-found: warn
+          retention-days: 1
