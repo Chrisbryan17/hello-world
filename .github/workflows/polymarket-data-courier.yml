@@ -42,17 +42,37 @@ jobs:
           )
           PY
 
-      - name: Bundle offline parquet reader
+      - name: Bundle offline parquet reader and checksums
         run: |
           python -m pip download --only-binary=:all: --no-deps --dest courier/wheels pyarrow==18.1.0
           find courier -type f -print0 | sort -z | xargs -0 sha256sum > courier/SHA256SUMS.txt
           du -sh courier
 
-      - name: Upload courier artifact
+      - name: Upload BTC ETH SOL bundle
         uses: actions/upload-artifact@v4
         with:
-          name: polymarket-public-data-courier
-          path: courier
+          name: polymarket-data-core
+          path: |
+            courier/polymarket-5m/btc_*.parquet
+            courier/polymarket-5m/eth_*.parquet
+            courier/polymarket-5m/sol_*.parquet
+            courier/polymarket-5m/README.md
+            courier/wheels/*
+            courier/SHA256SUMS.txt
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload XRP DOGE BNB HYPE bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: polymarket-data-alts
+          path: |
+            courier/polymarket-5m/xrp_*.parquet
+            courier/polymarket-5m/doge_*.parquet
+            courier/polymarket-5m/bnb_*.parquet
+            courier/polymarket-5m/hype_*.parquet
+            courier/SHA256SUMS.txt
           compression-level: 0
           retention-days: 7
           if-no-files-found: error
