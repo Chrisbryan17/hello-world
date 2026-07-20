@@ -113,16 +113,20 @@ jobs:
               ticks_files = parquet_list(by_config['ticks'])
               spot_files = parquet_list(by_config['spot_prices'])
 
+              # In this source, start_ts is listing/creation time. For a five-minute
+              # contract, the active prediction window starts exactly end_ts - 300.
               con.execute(f"""
                   CREATE OR REPLACE TABLE selected_markets AS
                   SELECT market_id, question, crypto, timeframe, volume, resolution,
-                         start_ts, end_ts, closed_ts, condition_id,
+                         start_ts AS creation_ts,
+                         CAST(end_ts - 300 AS BIGINT) AS start_ts,
+                         end_ts, closed_ts, condition_id,
                          up_token_id, down_token_id, slug, fee_rate_bps
                   FROM read_parquet({markets_files}, union_by_name=true)
                   WHERE crypto = 'BTC'
                     AND timeframe = '5-minute'
-                    AND start_ts >= {START_S}
-                    AND start_ts < {END_S}
+                    AND end_ts - 300 >= {START_S}
+                    AND end_ts - 300 < {END_S}
               """)
               market_count = con.execute('SELECT count(*) FROM selected_markets').fetchone()[0]
               if market_count == 0:
@@ -171,6 +175,7 @@ jobs:
               summary = {
                   'holdout_start_utc': '2026-04-01T00:00:00Z',
                   'holdout_end_utc_exclusive': '2026-04-08T00:00:00Z',
+                  'market_clock': 'active start = source end_ts - 300 seconds',
                   'market_count': int(market_count),
                   'downloaded_bytes': int(sum(Path(row['local_path']).stat().st_size for row in manifest)),
                   'converted_file_count': len(manifest),
