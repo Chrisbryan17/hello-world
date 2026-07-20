@@ -1,0 +1,58 @@
+name: Extract Aliplayer April BTC5m Markets
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --quiet requests pandas pyarrow
+      - name: Download markets metadata and filter frozen active window
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json, requests, pandas as pd
+          url = 'https://huggingface.co/datasets/aliplayer1/polymarket-crypto-updown/resolve/refs%2Fconvert%2Fparquet/markets/train/0000.parquet'
+          response = requests.get(url, timeout=300)
+          response.raise_for_status()
+          Path('markets-all.parquet').write_bytes(response.content)
+          frame = pd.read_parquet('markets-all.parquet')
+          frame['active_start_ts'] = pd.to_numeric(frame['end_ts'], errors='coerce') - 300
+          selected = frame.loc[
+              frame['crypto'].astype(str).str.upper().eq('BTC')
+              & frame['timeframe'].astype(str).eq('5-minute')
+              & frame['active_start_ts'].between(1775001600, 1775606399)
+          ].copy()
+          selected = selected.rename(columns={'start_ts':'creation_ts'})
+          selected['start_ts'] = selected['active_start_ts'].astype('int64')
+          selected = selected.drop(columns=['active_start_ts']).sort_values('start_ts')
+          if selected.empty:
+              raise RuntimeError('no April 1-7 active-window BTC5m markets')
+          selected.to_parquet('aliplayer-april-btc5m-markets.parquet', index=False, compression='zstd')
+          selected[['market_id','start_ts','end_ts','up_token_id','down_token_id']].to_csv('aliplayer-april-btc5m-markets.csv', index=False)
+          summary = {
+              'count': int(len(selected)),
+              'min_market_id_numeric': int(pd.to_numeric(selected['market_id']).min()),
+              'max_market_id_numeric': int(pd.to_numeric(selected['market_id']).max()),
+              'min_start_ts': int(selected['start_ts'].min()),
+              'max_start_ts': int(selected['start_ts'].max()),
+          }
+          Path('aliplayer-april-btc5m-markets-summary.json').write_text(json.dumps(summary, indent=2))
+          print(json.dumps(summary, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliplayer-april-btc5m-markets
+          path: aliplayer-april-btc5m-markets.*
+          retention-days: 1
+          if-no-files-found: error
