@@ -25,14 +25,18 @@ jobs:
           import requests
           import pyarrow.parquet as pq
 
+          START_MS = 1775001600000 + 88000
+          END_MS = 1775606400000 + 252000
           FILES = {
               'orderbook': {
                   'url': 'https://huggingface.co/datasets/aliplayer1/polymarket-crypto-updown/resolve/refs%2Fconvert%2Fparquet/orderbook/train/0205.parquet',
                   'timestamp': 'ts_ms',
+                  'columns': ['ts_ms','market_id','token_id','outcome','best_bid','best_ask','best_bid_size','best_ask_size'],
               },
               'ticks': {
                   'url': 'https://huggingface.co/datasets/aliplayer1/polymarket-crypto-updown/resolve/refs%2Fconvert%2Fparquet/ticks/train/0203.parquet',
                   'timestamp': 'timestamp_ms',
+                  'columns': ['market_id','timestamp_ms','token_id','outcome','side','price','size_usdc','tx_hash','block_number','log_index','source','spot_price_usdt','spot_price_ts_ms'],
               },
           }
           session = requests.Session()
@@ -56,7 +60,7 @@ jobs:
 
           result = {}
           for name, spec in FILES.items():
-              first, first_headers = ranged(spec['url'], 0, 0)
+              _, first_headers = ranged(spec['url'], 0, 0)
               content_range = first_headers.get('Content-Range', '')
               if '/' not in content_range:
                   raise RuntimeError(f'missing Content-Range for {name}: {first_headers}')
@@ -74,48 +78,59 @@ jobs:
                   handle.seek(metadata_start)
                   handle.write(footer)
               parquet = pq.ParquetFile(sparse)
-              ts_index = parquet.schema.names.index(spec['timestamp'])
-              market_index = parquet.schema.names.index('market_id')
-              groups = []
+              schema_names = parquet.schema.names
+              ts_index = schema_names.index(spec['timestamp'])
+              required_indices = [schema_names.index(column) for column in spec['columns']]
+              selected_groups = []
               for index in range(parquet.metadata.num_row_groups):
                   row_group = parquet.metadata.row_group(index)
-                  ts_column = row_group.column(ts_index)
-                  ts_stats = ts_column.statistics
-                  market_column = row_group.column(market_index)
-                  market_stats = market_column.statistics
-                  min_market = None if market_stats is None else market_stats.min
-                  max_market = None if market_stats is None else market_stats.max
-                  if isinstance(min_market, bytes):
-                      min_market = min_market.decode('utf-8', errors='replace')
-                  if isinstance(max_market, bytes):
-                      max_market = max_market.decode('utf-8', errors='replace')
-                  groups.append({
+                  ts_stats = row_group.column(ts_index).statistics
+                  min_ts = None if ts_stats is None else int(ts_stats.min)
+                  max_ts = None if ts_stats is None else int(ts_stats.max)
+                  overlaps = max_ts is None or min_ts is None or (max_ts >= START_MS and min_ts < END_MS)
+                  if not overlaps:
+                      continue
+                  chunk_ranges = []
+                  for column_index in required_indices:
+                      column = row_group.column(column_index)
+                      offsets = [value for value in (column.dictionary_page_offset, column.data_page_offset) if value is not None and value >= 0]
+                      if not offsets:
+                          raise RuntimeError(f'no page offset: file={name} row_group={index} column={schema_names[column_index]}')
+                      start = min(offsets)
+                      end = start + int(column.total_compressed_size)
+                      chunk_ranges.append({
+                          'column': schema_names[column_index],
+                          'start': int(start),
+                          'end_exclusive': int(end),
+                          'compressed_size': int(column.total_compressed_size),
+                      })
+                  selected_groups.append({
                       'index': index,
-                      'num_rows': row_group.num_rows,
-                      'total_byte_size': row_group.total_byte_size,
-                      'min_timestamp': None if ts_stats is None else int(ts_stats.min),
-                      'max_timestamp': None if ts_stats is None else int(ts_stats.max),
-                      'min_market_id': min_market,
-                      'max_market_id': max_market,
+                      'num_rows': int(row_group.num_rows),
+                      'min_timestamp': min_ts,
+                      'max_timestamp': max_ts,
+                      'chunk_ranges': chunk_ranges,
                   })
               result[name] = {
                   'url': spec['url'],
                   'file_size': file_size,
                   'metadata_length': metadata_length,
+                  'metadata_start': metadata_start,
                   'num_rows': parquet.metadata.num_rows,
                   'num_row_groups': parquet.metadata.num_row_groups,
-                  'schema_names': parquet.schema.names,
-                  'row_groups': groups,
+                  'schema_names': schema_names,
+                  'selected_columns': spec['columns'],
+                  'frozen_global_start_ms': START_MS,
+                  'frozen_global_end_ms_exclusive': END_MS,
+                  'selected_row_groups': selected_groups,
               }
-              print(name, 'file_size', file_size, 'row_groups', len(groups), 'rows', parquet.metadata.num_rows)
-              for group in groups:
-                  print(name, group['index'], group['num_rows'], group['min_timestamp'], group['max_timestamp'], group['min_market_id'], group['max_market_id'])
+              print(name, 'file_size', file_size, 'all_groups', parquet.metadata.num_row_groups, 'selected_groups', len(selected_groups))
               sparse.unlink()
-          Path('aliplayer-btc5m-footer-rowgroups.json').write_text(json.dumps(result, indent=2))
+          Path('aliplayer-btc5m-footer-ranges.json').write_text(json.dumps(result, indent=2))
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: aliplayer-btc5m-footer-rowgroups
-          path: aliplayer-btc5m-footer-rowgroups.json
+          name: aliplayer-btc5m-footer-ranges
+          path: aliplayer-btc5m-footer-ranges.json
           retention-days: 1
           if-no-files-found: error
