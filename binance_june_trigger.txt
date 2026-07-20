@@ -1,1 +1,1 @@
-Fetch verified public Binance BTCUSDT and SOLUSDT one-second archives for June 2026.
+Fetch official Binance BTCUSDT one-second archives for the April-May and May-June 2026 Polymarket validation windows.
