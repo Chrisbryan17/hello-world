@@ -1,0 +1,129 @@
+name: Fetch Aliplayer BTC5m Frozen Holdout
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --quiet duckdb pandas pyarrow numpy
+      - name: Extract frozen April 1-7 UTC BTC five-minute holdout
+        run: |
+          set -euo pipefail
+          mkdir -p aliplayer-btc5m-holdout tmp
+          python - <<'PY'
+          from pathlib import Path
+          import duckdb, json
+
+          START_S = 1775001600  # 2026-04-01T00:00:00Z
+          END_S = 1775606400    # 2026-04-08T00:00:00Z exclusive
+          START_MS = START_S * 1000
+          END_MS = END_S * 1000
+          base = 'https://huggingface.co/datasets/aliplayer1/polymarket-crypto-updown/resolve/main/'
+          urls = {
+              'markets': base + 'data/markets.parquet',
+              'orderbook': base + 'data/orderbook/crypto=BTC/timeframe=5-minute/part-0.parquet',
+              'ticks': base + 'data/ticks/crypto=BTC/timeframe=5-minute/part-0.parquet',
+              'spot': base + 'data/spot_prices/part-0.parquet',
+          }
+          out = Path('aliplayer-btc5m-holdout')
+          con = duckdb.connect('tmp/extract.duckdb')
+          con.execute('INSTALL httpfs; LOAD httpfs;')
+          con.execute("SET http_timeout=600000")
+          con.execute("SET memory_limit='6GB'")
+          con.execute("SET temp_directory='tmp/duckdb-spill'")
+          con.execute("SET preserve_insertion_order=false")
+
+          con.execute(f"""
+              CREATE OR REPLACE TABLE selected_markets AS
+              SELECT market_id, question, crypto, timeframe, volume, resolution,
+                     start_ts, end_ts, closed_ts, condition_id,
+                     up_token_id, down_token_id, slug, fee_rate_bps
+              FROM read_parquet('{urls['markets']}')
+              WHERE crypto = 'BTC'
+                AND timeframe = '5-minute'
+                AND start_ts >= {START_S}
+                AND start_ts < {END_S}
+          """)
+          market_count = con.execute('SELECT count(*) FROM selected_markets').fetchone()[0]
+          if market_count == 0:
+              raise RuntimeError('frozen holdout contains zero BTC five-minute markets')
+          con.execute(f"COPY selected_markets TO '{out / 'markets.parquet'}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+
+          # Only the causal feature and execution span needed by the frozen rule:
+          # one-second prior observation before T+90 through T+240 signal,
+          # 100ms entry, 100ms maker delay, and ten-second timeout.
+          con.execute(f"""
+              COPY (
+                  SELECT o.ts_ms, o.market_id, o.token_id, o.outcome,
+                         o.best_bid, o.best_ask, o.best_bid_size, o.best_ask_size
+                  FROM read_parquet('{urls['orderbook']}') o
+                  SEMI JOIN selected_markets m USING (market_id)
+                  WHERE o.ts_ms >= {START_MS + 88_000}
+                    AND o.ts_ms < {END_MS + 252_000}
+                    AND o.ts_ms >= m.start_ts * 1000 + 88_500
+                    AND o.ts_ms <= m.start_ts * 1000 + 251_000
+              ) TO '{out / 'orderbook.parquet'}' (FORMAT PARQUET, COMPRESSION ZSTD)
+          """)
+
+          con.execute(f"""
+              COPY (
+                  SELECT t.market_id, t.timestamp_ms, t.token_id, t.outcome,
+                         t.side, t.price, t.size_usdc, t.tx_hash,
+                         t.block_number, t.log_index, t.source,
+                         t.spot_price_usdt, t.spot_price_ts_ms
+                  FROM read_parquet('{urls['ticks']}') t
+                  SEMI JOIN selected_markets m USING (market_id)
+                  WHERE t.timestamp_ms >= {START_MS + 89_000}
+                    AND t.timestamp_ms < {END_MS + 252_000}
+                    AND t.timestamp_ms >= m.start_ts * 1000 + 89_000
+                    AND t.timestamp_ms <= m.start_ts * 1000 + 251_000
+              ) TO '{out / 'ticks.parquet'}' (FORMAT PARQUET, COMPRESSION ZSTD)
+          """)
+
+          con.execute(f"""
+              COPY (
+                  SELECT ts_ms, symbol, price, source
+                  FROM read_parquet('{urls['spot']}')
+                  WHERE ts_ms >= {START_MS + 88_000}
+                    AND ts_ms < {END_MS + 252_000}
+                    AND lower(symbol) = 'btcusdt'
+                    AND lower(source) = 'binance'
+              ) TO '{out / 'spot.parquet'}' (FORMAT PARQUET, COMPRESSION ZSTD)
+          """)
+
+          summary = {
+              'holdout_start_utc': '2026-04-01T00:00:00Z',
+              'holdout_end_utc_exclusive': '2026-04-08T00:00:00Z',
+              'market_count': market_count,
+              'rows': {},
+              'ranges': {},
+              'source_urls': urls,
+          }
+          for name, col in [('markets','start_ts'),('orderbook','ts_ms'),('ticks','timestamp_ms'),('spot','ts_ms')]:
+              p = out / f'{name}.parquet'
+              count, lo, hi = con.execute(f"SELECT count(*), min({col}), max({col}) FROM read_parquet('{p}')").fetchone()
+              summary['rows'][name] = int(count)
+              summary['ranges'][name] = [None if lo is None else int(lo), None if hi is None else int(hi)]
+          (out / 'extraction_summary.json').write_text(json.dumps(summary, indent=2))
+          print(json.dumps(summary, indent=2))
+          PY
+          sha256sum aliplayer-btc5m-holdout/*.parquet | tee aliplayer-btc5m-holdout/SHA256SUMS
+          ls -lh aliplayer-btc5m-holdout
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliplayer-btc5m-frozen-holdout-2026-04-01-07
+          path: aliplayer-btc5m-holdout
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
