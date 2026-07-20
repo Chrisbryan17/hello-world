@@ -1,1 +1,1 @@
-Public-data-only trigger for BTCUSDT one-second validation windows.
+Public-data-only trigger for corrected BTCUSDT one-second validation windows.
