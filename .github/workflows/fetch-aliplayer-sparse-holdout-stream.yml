@@ -1,0 +1,274 @@
+name: Fetch Aliplayer Sparse Frozen Holdout Stream
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --quiet requests pyarrow pandas numpy
+      - name: Stream required April BTC5m Parquet chunks
+        run: |
+          set -euo pipefail
+          mkdir -p sparse-source aliplayer-btc5m-holdout
+          python - <<'PY'
+          from pathlib import Path
+          import json, struct, time, traceback
+          import pandas as pd
+          import pyarrow as pa
+          import pyarrow.parquet as pq
+          import requests
+
+          START_S, END_S = 1775001600, 1775606400
+          START_MS, END_MS = START_S * 1000, END_S * 1000
+          BASE = 'https://huggingface.co/datasets/aliplayer1/polymarket-crypto-updown/resolve/refs%2Fconvert%2Fparquet'
+          URLS = {
+              'markets': f'{BASE}/markets/train/0000.parquet',
+              'spot': f'{BASE}/spot_prices/train/0000.parquet',
+              'orderbook': f'{BASE}/orderbook/train/0205.parquet',
+              'ticks': f'{BASE}/ticks/train/0203.parquet',
+          }
+          COLS = {
+              'orderbook': ['ts_ms','market_id','token_id','outcome','best_bid','best_ask','best_bid_size','best_ask_size'],
+              'ticks': ['market_id','timestamp_ms','token_id','outcome','side','price','size_usdc'],
+          }
+          TS = {'orderbook': 'ts_ms', 'ticks': 'timestamp_ms'}
+          OUT, SRC = Path('aliplayer-btc5m-holdout'), Path('sparse-source')
+          session = requests.Session()
+          session.headers.update({'User-Agent': 'frozen-holdout-stream-extractor/1.0'})
+
+          RETRY = {429, 500, 502, 503, 504}
+
+          def open_response(url, headers=None, timeout=(60, 1200)):
+              for attempt in range(10):
+                  response = session.get(url, headers=headers or {}, stream=True, timeout=timeout, allow_redirects=True)
+                  expected = 206 if headers and 'Range' in headers else 200
+                  if response.status_code == expected:
+                      return response
+                  status = response.status_code
+                  response.close()
+                  if status in RETRY:
+                      time.sleep(min(90, 2 ** attempt))
+                      continue
+                  raise RuntimeError(f'HTTP {status}, expected {expected}, headers={headers}, url={url}')
+              raise RuntimeError(f'retries exhausted: headers={headers}, url={url}')
+
+          def range_bytes(url, start, end_inclusive):
+              response = open_response(url, {'Range': f'bytes={start}-{end_inclusive}'}, timeout=(60, 300))
+              payload = response.content
+              headers = response.headers.copy()
+              response.close()
+              expected = end_inclusive - start + 1
+              if len(payload) != expected:
+                  raise RuntimeError(f'short range: {len(payload)} != {expected}')
+              return payload, headers
+
+          def stream_range(url, start, end_exclusive, destination_handle):
+              response = open_response(url, {'Range': f'bytes={start}-{end_exclusive-1}'})
+              destination_handle.seek(start)
+              written = 0
+              for chunk in response.iter_content(chunk_size=16 * 1024 * 1024):
+                  if chunk:
+                      destination_handle.write(chunk)
+                      written += len(chunk)
+              response.close()
+              expected = end_exclusive - start
+              if written != expected:
+                  raise RuntimeError(f'short streamed range: {written} != {expected}, start={start}')
+
+          def download(url, destination):
+              response = open_response(url)
+              temporary = destination.with_suffix(destination.suffix + '.part')
+              with temporary.open('wb') as handle:
+                  for chunk in response.iter_content(chunk_size=16 * 1024 * 1024):
+                      if chunk:
+                          handle.write(chunk)
+              response.close()
+              temporary.replace(destination)
+
+          def footer(url, sparse_path):
+              _, headers = range_bytes(url, 0, 0)
+              content_range = headers.get('Content-Range', '')
+              if '/' not in content_range:
+                  raise RuntimeError(f'missing Content-Range: {content_range}')
+              file_size = int(content_range.rsplit('/', 1)[1])
+              tail, _ = range_bytes(url, file_size - 8, file_size - 1)
+              if tail[-4:] != b'PAR1':
+                  raise RuntimeError('invalid Parquet magic')
+              metadata_length = struct.unpack('<I', tail[:4])[0]
+              metadata_start = file_size - metadata_length - 8
+              footer_payload, _ = range_bytes(url, metadata_start, file_size - 1)
+              with sparse_path.open('wb') as handle:
+                  handle.write(b'PAR1')
+                  handle.truncate(file_size)
+                  handle.seek(metadata_start)
+                  handle.write(footer_payload)
+              return pq.ParquetFile(sparse_path), file_size, metadata_start
+
+          def merge_ranges(ranges, gap):
+              merged = []
+              for start, end in sorted(ranges):
+                  if not merged or start > merged[-1][1] + gap:
+                      merged.append([start, end])
+                  else:
+                      merged[-1][1] = max(merged[-1][1], end)
+              return [(start, end) for start, end in merged]
+
+          def reconstruct(name):
+              sparse = SRC / f'{name}-sparse.parquet'
+              parquet, file_size, metadata_start = footer(URLS[name], sparse)
+              names = parquet.schema.names
+              ts_index = names.index(TS[name])
+              indices = [names.index(column) for column in COLS[name]]
+              groups, ranges = [], []
+              lower_global, upper_global = START_MS + 88_000, END_MS + 252_000
+              for group_index in range(parquet.metadata.num_row_groups):
+                  group = parquet.metadata.row_group(group_index)
+                  stats = group.column(ts_index).statistics
+                  lo = None if stats is None else int(stats.min)
+                  hi = None if stats is None else int(stats.max)
+                  if lo is not None and hi is not None and (hi < lower_global or lo >= upper_global):
+                      continue
+                  groups.append(group_index)
+                  for index in indices:
+                      chunk = group.column(index)
+                      offsets = [value for value in (chunk.dictionary_page_offset, chunk.data_page_offset) if value is not None and value >= 0]
+                      if not offsets:
+                          raise RuntimeError(f'missing page offset: {name}, group={group_index}, column={names[index]}')
+                      start = min(offsets)
+                      ranges.append((int(start), int(start + chunk.total_compressed_size)))
+              merged = merge_ranges(ranges, 4096 if name == 'orderbook' else 0)
+              total = sum(end - start for start, end in merged)
+              print(f'{name}: groups={len(groups)} ranges={len(merged)} bytes={total}', flush=True)
+              with sparse.open('r+b') as handle:
+                  for sequence, (start, end) in enumerate(merged, 1):
+                      stream_range(URLS[name], start, end, handle)
+                      if sequence == 1 or sequence % 50 == 0 or sequence == len(merged):
+                          print(f'{name}: streamed {sequence}/{len(merged)} ranges', flush=True)
+                      time.sleep(0.03)
+              return {
+                  'path': sparse,
+                  'groups': groups,
+                  'columns': COLS[name],
+                  'file_size': file_size,
+                  'metadata_start': metadata_start,
+                  'range_count': len(merged),
+                  'downloaded_bytes': total,
+              }
+
+          def filter_batches(name, info, market_starts):
+              source = pq.ParquetFile(info['path'])
+              output = OUT / f'{name}.parquet'
+              writer = None
+              rows, observed = 0, set()
+              batch_size = 50 if name == 'orderbook' else 40
+              for offset in range(0, len(info['groups']), batch_size):
+                  group_ids = info['groups'][offset:offset + batch_size]
+                  table = source.read_row_groups(group_ids, columns=info['columns'], use_threads=True)
+                  frame = table.to_pandas(split_blocks=True, self_destruct=True)
+                  frame['market_id'] = frame['market_id'].astype(str)
+                  frame = frame.loc[frame['market_id'].isin(market_starts)]
+                  if frame.empty:
+                      continue
+                  base = frame['market_id'].map(market_starts).astype('int64') * 1000
+                  timestamp = pd.to_numeric(frame[TS[name]], errors='coerce')
+                  lower = 88_500 if name == 'orderbook' else 89_000
+                  frame = frame.loc[timestamp.ge(base + lower) & timestamp.le(base + 251_000)]
+                  if frame.empty:
+                      continue
+                  frame[TS[name]] = pd.to_numeric(frame[TS[name]], errors='raise').astype('int64')
+                  table_out = pa.Table.from_pandas(frame, preserve_index=False)
+                  if writer is None:
+                      writer = pq.ParquetWriter(output, table_out.schema, compression='zstd')
+                  writer.write_table(table_out)
+                  rows += len(frame)
+                  observed.update(frame['market_id'].unique())
+                  print(f'{name}: filtered groups {min(offset+batch_size,len(info["groups"]))}/{len(info["groups"])} rows={rows}', flush=True)
+              if writer is None:
+                  raise RuntimeError(f'{name} produced zero filtered rows')
+              writer.close()
+              return {'rows': int(rows), 'markets': int(len(observed))}
+
+          try:
+              markets_all, spot_all = SRC / 'markets.parquet', SRC / 'spot.parquet'
+              download(URLS['markets'], markets_all)
+              download(URLS['spot'], spot_all)
+
+              markets = pd.read_parquet(markets_all)
+              markets['active_start'] = pd.to_numeric(markets['end_ts'], errors='coerce') - 300
+              selected = markets.loc[
+                  markets['crypto'].astype(str).str.upper().eq('BTC')
+                  & markets['timeframe'].astype(str).eq('5-minute')
+                  & markets['active_start'].ge(START_S)
+                  & markets['active_start'].lt(END_S)
+              ].copy()
+              if selected.empty:
+                  raise RuntimeError('zero frozen markets')
+              selected = selected.rename(columns={'start_ts': 'creation_ts'})
+              selected['start_ts'] = selected['active_start'].astype('int64')
+              selected = selected.drop(columns=['active_start']).sort_values('start_ts')
+              selected['market_id'] = selected['market_id'].astype(str)
+              selected.to_parquet(OUT / 'markets.parquet', index=False, compression='zstd')
+              starts = dict(zip(selected['market_id'], selected['start_ts']))
+
+              spot = pd.read_parquet(spot_all, columns=['ts_ms','symbol','price','source'])
+              spot['ts_ms'] = pd.to_numeric(spot['ts_ms'], errors='coerce')
+              spot = spot.loc[
+                  spot['ts_ms'].ge(START_MS + 88_000)
+                  & spot['ts_ms'].lt(END_MS + 252_000)
+                  & spot['symbol'].astype(str).str.lower().eq('btcusdt')
+                  & spot['source'].astype(str).str.lower().eq('binance')
+              ].copy()
+              if spot.empty:
+                  raise RuntimeError('zero frozen spot rows')
+              spot.to_parquet(OUT / 'spot.parquet', index=False, compression='zstd')
+
+              sources, outputs = {}, {}
+              for name in ('orderbook','ticks'):
+                  sources[name] = reconstruct(name)
+                  outputs[name] = filter_batches(name, sources[name], starts)
+
+              summary = {
+                  'holdout_start_utc': '2026-04-01T00:00:00Z',
+                  'holdout_end_utc_exclusive': '2026-04-08T00:00:00Z',
+                  'market_clock': 'active start = end_ts - 300',
+                  'market_count': int(len(selected)),
+                  'spot_rows': int(len(spot)),
+                  'source_ranges': {
+                      name: {
+                          'file_size': info['file_size'],
+                          'metadata_start': info['metadata_start'],
+                          'range_count': info['range_count'],
+                          'downloaded_bytes': info['downloaded_bytes'],
+                          'selected_group_count': len(info['groups']),
+                          'selected_columns': info['columns'],
+                      } for name, info in sources.items()
+                  },
+                  'output': outputs,
+              }
+              (OUT / 'extraction_summary.json').write_text(json.dumps(summary, indent=2))
+              print(json.dumps(summary, indent=2))
+          except Exception:
+              (OUT / 'EXTRACTION_ERROR.txt').write_text(traceback.format_exc())
+              raise
+          PY
+          sha256sum aliplayer-btc5m-holdout/*.parquet | tee aliplayer-btc5m-holdout/SHA256SUMS || true
+          ls -lh aliplayer-btc5m-holdout
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aliplayer-sparse-stream-frozen-holdout-2026-04-01-07
+          path: aliplayer-btc5m-holdout
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
