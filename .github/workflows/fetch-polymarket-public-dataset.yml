@@ -1,4 +1,4 @@
-name: Fetch Independent BTC5m 100ms Steps Fast
+name: Fetch Independent BTC5m 100ms One-Day Probe
 
 on:
   push:
@@ -12,7 +12,7 @@ on:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
     permissions:
       contents: read
     env:
@@ -24,38 +24,36 @@ jobs:
           python-version: '3.11'
       - name: Install downloader
         run: python -m pip install --quiet --upgrade huggingface_hub hf_xet
-      - name: Download untouched March 21-23 BTC5m steps
+      - name: Download untouched March 23 BTC5m steps
         run: |
           set -euo pipefail
-          mkdir -p trent-btc5m-steps-fast
+          mkdir -p trent-btc5m-probe
           python - <<'PY'
           from concurrent.futures import ThreadPoolExecutor, as_completed
           from pathlib import Path
           import json, shutil
           from huggingface_hub import list_repo_files, hf_hub_download
           repo='trentmkelly/polymarket_crypto_derivatives'
-          files=list_repo_files(repo, repo_type='dataset')
-          selected=sorted(p for p in files if p.startswith('btc5m_') and p.endswith('/steps.parquet') and any(f'2026-03-{d:02d}' in p for d in range(21,24)))
-          print('selected',len(selected),selected[:2],selected[-2:]); assert len(selected)>=700,len(selected)
-          out=Path('trent-btc5m-steps-fast')
+          selected=sorted(p for p in list_repo_files(repo,repo_type='dataset') if p.startswith('btc5m_') and p.endswith('/steps.parquet') and '2026-03-23' in p)
+          print('selected',len(selected),selected[:2],selected[-2:]);assert len(selected)>=250,len(selected)
+          out=Path('trent-btc5m-probe')
           def one(p):
               src=hf_hub_download(repo_id=repo,filename=p,repo_type='dataset')
               dst=out/p.split('/')[0]/'steps.parquet';dst.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(src,dst);return p,dst.stat().st_size
           rows=[]
-          with ThreadPoolExecutor(max_workers=32) as ex:
-              fs=[ex.submit(one,p) for p in selected]
-              for i,f in enumerate(as_completed(fs),1):
+          with ThreadPoolExecutor(max_workers=64) as ex:
+              for i,f in enumerate(as_completed([ex.submit(one,p) for p in selected]),1):
                   rows.append(f.result())
-                  if i%100==0:print('downloaded',i,flush=True)
+                  if i%50==0:print('downloaded',i,flush=True)
           (out/'manifest.json').write_text(json.dumps({'repo':repo,'files':[p for p,_ in rows],'count':len(rows)},indent=2));print('bytes',sum(s for _,s in rows))
           PY
-          find trent-btc5m-steps-fast -name steps.parquet | wc -l
-          du -sh trent-btc5m-steps-fast
-      - name: Upload independent steps
+          find trent-btc5m-probe -name steps.parquet | wc -l
+          du -sh trent-btc5m-probe
+      - name: Upload independent steps probe
         uses: actions/upload-artifact@v4
         with:
-          name: trent-btc5m-steps-2026-03-21-23
-          path: trent-btc5m-steps-fast
+          name: trent-btc5m-steps-2026-03-23
+          path: trent-btc5m-probe
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
