@@ -1,0 +1,79 @@
+name: Inspect Aliplayer BTC5m Row Groups
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --quiet pyarrow fsspec requests
+      - name: Read only Parquet footer metadata
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import fsspec
+          import pyarrow.parquet as pq
+
+          files = {
+              'orderbook': {
+                  'url': 'https://huggingface.co/datasets/aliplayer1/polymarket-crypto-updown/resolve/refs%2Fconvert%2Fparquet/orderbook/train/0205.parquet',
+                  'timestamp': 'ts_ms',
+              },
+              'ticks': {
+                  'url': 'https://huggingface.co/datasets/aliplayer1/polymarket-crypto-updown/resolve/refs%2Fconvert%2Fparquet/ticks/train/0203.parquet',
+                  'timestamp': 'timestamp_ms',
+              },
+          }
+          result = {}
+          for name, spec in files.items():
+              print('OPEN', name, flush=True)
+              with fsspec.open(spec['url'], 'rb', block_size=8 * 1024 * 1024, cache_type='readahead') as handle:
+                  parquet = pq.ParquetFile(handle)
+                  schema_names = parquet.schema.names
+                  column_index = schema_names.index(spec['timestamp'])
+                  groups = []
+                  for index in range(parquet.metadata.num_row_groups):
+                      row_group = parquet.metadata.row_group(index)
+                      column = row_group.column(column_index)
+                      stats = column.statistics
+                      groups.append({
+                          'index': index,
+                          'num_rows': row_group.num_rows,
+                          'total_byte_size': row_group.total_byte_size,
+                          'file_offset': column.file_offset,
+                          'data_page_offset': column.data_page_offset,
+                          'dictionary_page_offset': column.dictionary_page_offset,
+                          'compressed_size': column.total_compressed_size,
+                          'min_timestamp': None if stats is None else int(stats.min),
+                          'max_timestamp': None if stats is None else int(stats.max),
+                      })
+                  result[name] = {
+                      'url': spec['url'],
+                      'file_size': parquet.metadata.serialized_size,
+                      'num_rows': parquet.metadata.num_rows,
+                      'num_row_groups': parquet.metadata.num_row_groups,
+                      'schema_names': schema_names,
+                      'row_groups': groups,
+                  }
+                  print(name, 'rows', parquet.metadata.num_rows, 'row_groups', parquet.metadata.num_row_groups)
+                  for group in groups:
+                      print(name, group['index'], group['num_rows'], group['min_timestamp'], group['max_timestamp'])
+          Path('aliplayer-btc5m-rowgroups.json').write_text(json.dumps(result, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliplayer-btc5m-rowgroups
+          path: aliplayer-btc5m-rowgroups.json
+          retention-days: 1
+          if-no-files-found: error
