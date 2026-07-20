@@ -1,0 +1,1 @@
+Public-data-only trigger for explicit-range BTC5m Parquet footer inspection.
