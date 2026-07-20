@@ -1,0 +1,110 @@
+name: Inspect Aliplayer BTC5m Footer
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --quiet pyarrow requests
+      - name: Read Parquet footer with explicit HTTP ranges
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json, struct, time
+          import requests
+          import pyarrow.parquet as pq
+
+          FILES = {
+              'orderbook': {
+                  'url': 'https://huggingface.co/datasets/aliplayer1/polymarket-crypto-updown/resolve/refs%2Fconvert%2Fparquet/orderbook/train/0205.parquet',
+                  'timestamp': 'ts_ms',
+              },
+              'ticks': {
+                  'url': 'https://huggingface.co/datasets/aliplayer1/polymarket-crypto-updown/resolve/refs%2Fconvert%2Fparquet/ticks/train/0203.parquet',
+                  'timestamp': 'timestamp_ms',
+              },
+          }
+          session = requests.Session()
+          session.headers.update({'User-Agent': 'parquet-footer-audit/1.0'})
+
+          def ranged(url, start, end):
+              headers = {'Range': f'bytes={start}-{end}'}
+              for attempt in range(8):
+                  response = session.get(url, headers=headers, stream=True, timeout=(60, 180), allow_redirects=True)
+                  if response.status_code == 206:
+                      payload = response.content
+                      response.close()
+                      return payload, response.headers
+                  status = response.status_code
+                  response.close()
+                  if status in {429, 500, 502, 503, 504}:
+                      time.sleep(min(60, 2 ** attempt))
+                      continue
+                  raise RuntimeError(f'range unsupported or failed: status={status} range={headers["Range"]}')
+              raise RuntimeError(f'range request exhausted retries: {url}')
+
+          result = {}
+          for name, spec in FILES.items():
+              first, first_headers = ranged(spec['url'], 0, 0)
+              content_range = first_headers.get('Content-Range', '')
+              if '/' not in content_range:
+                  raise RuntimeError(f'missing Content-Range for {name}: {first_headers}')
+              file_size = int(content_range.rsplit('/', 1)[1])
+              tail, _ = ranged(spec['url'], file_size - 8, file_size - 1)
+              if len(tail) != 8 or tail[-4:] != b'PAR1':
+                  raise RuntimeError(f'invalid Parquet tail for {name}: {tail!r}')
+              metadata_length = struct.unpack('<I', tail[:4])[0]
+              metadata_start = file_size - metadata_length - 8
+              footer, _ = ranged(spec['url'], metadata_start, file_size - 1)
+              sparse = Path(f'{name}-metadata-only.parquet')
+              with sparse.open('wb') as handle:
+                  handle.write(b'PAR1')
+                  handle.truncate(file_size)
+                  handle.seek(metadata_start)
+                  handle.write(footer)
+              parquet = pq.ParquetFile(sparse)
+              column_index = parquet.schema.names.index(spec['timestamp'])
+              groups = []
+              for index in range(parquet.metadata.num_row_groups):
+                  row_group = parquet.metadata.row_group(index)
+                  column = row_group.column(column_index)
+                  stats = column.statistics
+                  groups.append({
+                      'index': index,
+                      'num_rows': row_group.num_rows,
+                      'total_byte_size': row_group.total_byte_size,
+                      'min_timestamp': None if stats is None else int(stats.min),
+                      'max_timestamp': None if stats is None else int(stats.max),
+                  })
+              result[name] = {
+                  'url': spec['url'],
+                  'file_size': file_size,
+                  'metadata_length': metadata_length,
+                  'num_rows': parquet.metadata.num_rows,
+                  'num_row_groups': parquet.metadata.num_row_groups,
+                  'schema_names': parquet.schema.names,
+                  'row_groups': groups,
+              }
+              print(name, 'file_size', file_size, 'row_groups', len(groups), 'rows', parquet.metadata.num_rows)
+              for group in groups:
+                  print(name, group['index'], group['num_rows'], group['min_timestamp'], group['max_timestamp'])
+              sparse.unlink()
+          Path('aliplayer-btc5m-footer-rowgroups.json').write_text(json.dumps(result, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliplayer-btc5m-footer-rowgroups
+          path: aliplayer-btc5m-footer-rowgroups.json
+          retention-days: 1
+          if-no-files-found: error
