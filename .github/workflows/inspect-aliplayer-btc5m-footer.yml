@@ -74,18 +74,29 @@ jobs:
                   handle.seek(metadata_start)
                   handle.write(footer)
               parquet = pq.ParquetFile(sparse)
-              column_index = parquet.schema.names.index(spec['timestamp'])
+              ts_index = parquet.schema.names.index(spec['timestamp'])
+              market_index = parquet.schema.names.index('market_id')
               groups = []
               for index in range(parquet.metadata.num_row_groups):
                   row_group = parquet.metadata.row_group(index)
-                  column = row_group.column(column_index)
-                  stats = column.statistics
+                  ts_column = row_group.column(ts_index)
+                  ts_stats = ts_column.statistics
+                  market_column = row_group.column(market_index)
+                  market_stats = market_column.statistics
+                  min_market = None if market_stats is None else market_stats.min
+                  max_market = None if market_stats is None else market_stats.max
+                  if isinstance(min_market, bytes):
+                      min_market = min_market.decode('utf-8', errors='replace')
+                  if isinstance(max_market, bytes):
+                      max_market = max_market.decode('utf-8', errors='replace')
                   groups.append({
                       'index': index,
                       'num_rows': row_group.num_rows,
                       'total_byte_size': row_group.total_byte_size,
-                      'min_timestamp': None if stats is None else int(stats.min),
-                      'max_timestamp': None if stats is None else int(stats.max),
+                      'min_timestamp': None if ts_stats is None else int(ts_stats.min),
+                      'max_timestamp': None if ts_stats is None else int(ts_stats.max),
+                      'min_market_id': min_market,
+                      'max_market_id': max_market,
                   })
               result[name] = {
                   'url': spec['url'],
@@ -98,7 +109,7 @@ jobs:
               }
               print(name, 'file_size', file_size, 'row_groups', len(groups), 'rows', parquet.metadata.num_rows)
               for group in groups:
-                  print(name, group['index'], group['num_rows'], group['min_timestamp'], group['max_timestamp'])
+                  print(name, group['index'], group['num_rows'], group['min_timestamp'], group['max_timestamp'], group['min_market_id'], group['max_market_id'])
               sparse.unlink()
           Path('aliplayer-btc5m-footer-rowgroups.json').write_text(json.dumps(result, indent=2))
           PY
