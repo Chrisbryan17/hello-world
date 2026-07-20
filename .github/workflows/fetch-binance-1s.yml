@@ -1,4 +1,4 @@
-name: Fetch Binance Public 1s Data
+name: Fetch Binance BTCUSDT 1s Validation Data
 
 on:
   pull_request:
@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  inspect-trent:
+  fetch-binance-btc:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     permissions:
       contents: read
     steps:
@@ -16,23 +16,56 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install --quiet huggingface_hub hf_xet pyarrow pandas
-      - name: Inspect one BTC5m episode
+      - name: Install parquet dependencies
+        run: python -m pip install --quiet pandas pyarrow
+      - name: Download and normalize official Binance 1-second klines
         run: |
+          set -euo pipefail
+          mkdir -p binance-zips binance-btc-1s
           python - <<'PY'
-          from huggingface_hub import list_repo_files, hf_hub_download
-          import pyarrow.parquet as pq, pandas as pd
-          repo='trentmkelly/polymarket_crypto_derivatives'
-          files=list_repo_files(repo, repo_type='dataset')
-          matches=sorted(p for p in files if p.startswith('btc5m_') and p.endswith('/steps.parquet'))
-          print('btc5m step files',len(matches))
-          print('first',matches[:3]);print('last',matches[-3:])
-          p=hf_hub_download(repo, matches[0], repo_type='dataset')
-          pf=pq.ParquetFile(p)
-          print('schema',pf.schema)
-          df=pd.read_parquet(p)
-          print('shape',df.shape)
-          print('HEAD',df.head(5).to_json(orient='records'))
-          print('TAIL',df.tail(5).to_json(orient='records'))
-          print(df.dtypes)
+          from datetime import date, timedelta
+          from pathlib import Path
+          import subprocess, zipfile
+          import pandas as pd
+
+          ranges = [(date(2026,4,5), date(2026,5,18)), (date(2026,5,27), date(2026,6,24))]
+          zdir = Path('binance-zips')
+          frames = []
+          cols = ['open_time','open','high','low','close','volume','close_time',
+                  'quote_volume','trade_count','taker_buy_base','taker_buy_quote','ignore']
+          for start, end in ranges:
+              day = start
+              while day <= end:
+                  ds = day.isoformat()
+                  name = f'BTCUSDT-1s-{ds}.zip'
+                  url = f'https://data.binance.vision/data/spot/daily/klines/BTCUSDT/1s/{name}'
+                  path = zdir / name
+                  subprocess.run(['curl','--fail','--location','--retry','5','--retry-all-errors',url,'-o',str(path)], check=True)
+                  with zipfile.ZipFile(path) as zf:
+                      csv_name = zf.namelist()[0]
+                      with zf.open(csv_name) as fh:
+                          df = pd.read_csv(fh, header=None, names=cols)
+                  # Binance spot archives use microseconds for recent data; older
+                  # archives used milliseconds. Normalize deterministically.
+                  unit = 'us' if int(df.open_time.iloc[0]) > 10**14 else 'ms'
+                  df['ts_utc'] = pd.to_datetime(df.open_time, unit=unit, utc=True)
+                  df['epoch_s'] = (df.ts_utc.astype('int64') // 1_000_000_000).astype('int64')
+                  frames.append(df[['epoch_s','ts_utc','open','high','low','close','volume','quote_volume','trade_count']])
+                  print(ds, len(df), df.ts_utc.min(), df.ts_utc.max(), flush=True)
+                  day += timedelta(days=1)
+          out = pd.concat(frames, ignore_index=True).sort_values('epoch_s').drop_duplicates('epoch_s', keep='last')
+          for c in ['open','high','low','close','volume','quote_volume']:
+              out[c] = pd.to_numeric(out[c], errors='coerce')
+          out.to_parquet('binance-btc-1s/BTCUSDT_1s_2026-04-05_2026-06-24.parquet', index=False, compression='zstd')
+          print('FINAL', len(out), out.ts_utc.min(), out.ts_utc.max(), out.isna().sum().to_dict())
           PY
+          sha256sum binance-btc-1s/*.parquet | tee binance-btc-1s/SHA256SUMS
+          ls -lh binance-btc-1s
+      - name: Upload normalized BTC spot artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binance-btcusdt-1s-validation-windows
+          path: binance-btc-1s
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
