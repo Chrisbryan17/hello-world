@@ -1,4 +1,4 @@
-name: Fetch Binance BTCUSDT 1s Validation Data
+name: Fetch Independent BTC5m 100ms Steps
 
 on:
   push:
@@ -12,67 +12,69 @@ on:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     permissions:
       contents: read
+    env:
+      HF_XET_HIGH_PERFORMANCE: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install parquet dependencies
-        run: python -m pip install --quiet pandas pyarrow
-      - name: Download and normalize official Binance 1-second klines
+      - name: Install downloader
+        run: python -m pip install --quiet --upgrade huggingface_hub hf_xet
+      - name: Download untouched March BTC5m steps
         run: |
           set -euo pipefail
-          mkdir -p binance-zips binance-btc-1s
+          mkdir -p trent-btc5m-steps
           python - <<'PY'
-          from datetime import date, timedelta
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from datetime import date
           from pathlib import Path
-          import subprocess, zipfile
-          import pandas as pd
+          import json, os, shutil
+          from huggingface_hub import list_repo_files, hf_hub_download
 
-          ranges = [(date(2026,4,5), date(2026,5,18)), (date(2026,5,27), date(2026,6,24))]
-          cols = ['open_time','open','high','low','close','volume','close_time',
-                  'quote_volume','trade_count','taker_buy_base','taker_buy_quote','ignore']
-          frames = []
-          raw_rows = 0
-          for start, end in ranges:
-              day = start
-              while day <= end:
-                  ds = day.isoformat()
-                  name = f'BTCUSDT-1s-{ds}.zip'
-                  url = f'https://data.binance.vision/data/spot/daily/klines/BTCUSDT/1s/{name}'
-                  path = Path('binance-zips') / name
-                  subprocess.run(['curl','--fail','--location','--retry','5','--retry-all-errors',url,'-o',str(path)], check=True)
-                  with zipfile.ZipFile(path) as zf, zf.open(zf.namelist()[0]) as fh:
-                      df = pd.read_csv(fh, header=None, names=cols)
-                  raw = pd.to_numeric(df.open_time, errors='raise').astype('int64')
-                  unit = 'us' if int(raw.iloc[0]) > 10**14 else 'ms'
-                  divisor = 1_000_000 if unit == 'us' else 1_000
-                  df['ts_utc'] = pd.to_datetime(raw, unit=unit, utc=True)
-                  df['epoch_s'] = (raw // divisor).astype('int64')
-                  raw_rows += len(df)
-                  frames.append(df[['epoch_s','ts_utc','open','high','low','close','volume','quote_volume','trade_count']])
-                  print(ds, len(df), unit, df.ts_utc.min(), df.ts_utc.max(), flush=True)
-                  day += timedelta(days=1)
-          out = pd.concat(frames, ignore_index=True).sort_values('epoch_s').drop_duplicates('epoch_s', keep='last')
-          for c in ['open','high','low','close','volume','quote_volume']:
-              out[c] = pd.to_numeric(out[c], errors='coerce')
-          assert raw_rows > 5_500_000, raw_rows
-          assert len(out) > 5_500_000, len(out)
-          assert out.epoch_s.is_monotonic_increasing
-          output = 'binance-btc-1s/BTCUSDT_1s_2026-04-05_2026-06-24.parquet'
-          out.to_parquet(output, index=False, compression='zstd')
-          print('FINAL', len(out), out.ts_utc.min(), out.ts_utc.max(), out.isna().sum().to_dict())
+          repo='trentmkelly/polymarket_crypto_derivatives'
+          files=list_repo_files(repo, repo_type='dataset')
+          start=date(2026,3,15); end=date(2026,3,23)
+          selected=[]
+          for p in files:
+              if not (p.startswith('btc5m_') and p.endswith('/steps.parquet')):
+                  continue
+              hit=None
+              for day in range(15,24):
+                  token=f'2026-03-{day:02d}'
+                  if token in p:
+                      hit=token; break
+              if hit is not None:
+                  selected.append(p)
+          selected=sorted(selected)
+          print('selected',len(selected));print('first',selected[:3]);print('last',selected[-3:])
+          assert len(selected) >= 2000, len(selected)
+          out=Path('trent-btc5m-steps')
+          def one(p):
+              src=hf_hub_download(repo_id=repo,filename=p,repo_type='dataset')
+              episode=p.split('/')[0]
+              dst=out/episode/'steps.parquet';dst.parent.mkdir(parents=True,exist_ok=True)
+              shutil.copy2(src,dst)
+              return p, dst.stat().st_size
+          rows=[]
+          with ThreadPoolExecutor(max_workers=16) as ex:
+              futures=[ex.submit(one,p) for p in selected]
+              for i,f in enumerate(as_completed(futures),1):
+                  rows.append(f.result())
+                  if i%100==0: print('downloaded',i,flush=True)
+          (out/'manifest.json').write_text(json.dumps({'repo':repo,'files':[p for p,_ in rows],'count':len(rows)},indent=2))
+          print('bytes',sum(s for _,s in rows))
           PY
-          sha256sum binance-btc-1s/*.parquet | tee binance-btc-1s/SHA256SUMS
-          ls -lh binance-btc-1s
-      - name: Upload normalized BTC spot artifact
+          find trent-btc5m-steps -name steps.parquet | wc -l
+          du -sh trent-btc5m-steps
+      - name: Upload independent steps
         uses: actions/upload-artifact@v4
         with:
-          name: binance-btcusdt-1s-validation-windows
-          path: binance-btc-1s
+          name: trent-btc5m-steps-2026-03-15-23
+          path: trent-btc5m-steps
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
