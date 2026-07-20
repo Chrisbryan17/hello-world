@@ -1,4 +1,4 @@
-name: Fetch Triggered BTC5m Depth and Events
+name: Fetch BTC5m Validation Days
 
 on:
   push:
@@ -15,6 +15,22 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        day:
+          - '2026-02-22'
+          - '2026-02-25'
+          - '2026-02-28'
+          - '2026-03-03'
+          - '2026-03-06'
+          - '2026-03-09'
+          - '2026-03-12'
+          - '2026-03-15'
+          - '2026-03-18'
+          - '2026-03-21'
+          - '2026-03-22'
+          - '2026-03-24'
     env:
       HF_XET_HIGH_PERFORMANCE: '1'
     steps:
@@ -22,54 +38,47 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install downloader
+      - name: Install public dataset downloader
         run: python -m pip install --quiet --upgrade huggingface_hub hf_xet
-      - name: Download event and depth files for triggered markets
+      - name: Download one outcome-agnostic BTC5m day
+        env:
+          DAY: ${{ matrix.day }}
         run: |
           set -euo pipefail
-          mkdir -p trent-trigger-microstructure
+          mkdir -p "trent-${DAY}"
           python - <<'PY'
           from concurrent.futures import ThreadPoolExecutor, as_completed
           from pathlib import Path
-          import json, shutil
-          from huggingface_hub import hf_hub_download
+          import json, os, shutil
+          from huggingface_hub import list_repo_files, hf_hub_download
 
-          repo='trentmkelly/polymarket_crypto_derivatives'
-          episodes=[
-            'btc5m_market1677793_2026-03-23_01-20-00_all',
-            'btc5m_market1679335_2026-03-23_04-55-00_all',
-            'btc5m_market1680130_2026-03-23_08-10-00_all',
-            'btc5m_market1681473_2026-03-23_11-10-00_all',
-            'btc5m_market1681561_2026-03-23_11-15-00_all',
-            'btc5m_market1681569_2026-03-23_11-20-00_all',
-            'btc5m_market1681623_2026-03-23_11-40-00_all',
-            'btc5m_market1682370_2026-03-23_13-30-00_all',
-            'btc5m_market1682432_2026-03-23_13-45-00_all',
-            'btc5m_market1682684_2026-03-23_14-10-00_all',
-          ]
-          files=[f'{ep}/{name}' for ep in episodes for name in ('events.parquet','book_levels.parquet')]
-          out=Path('trent-trigger-microstructure')
-          def one(p):
-              src=hf_hub_download(repo_id=repo,filename=p,repo_type='dataset')
-              dst=out/p
-              dst.parent.mkdir(parents=True,exist_ok=True)
-              shutil.copy2(src,dst)
-              return p,dst.stat().st_size
-          rows=[]
-          with ThreadPoolExecutor(max_workers=20) as ex:
-              for f in as_completed([ex.submit(one,p) for p in files]):
-                  rows.append(f.result())
-          assert len(rows)==len(files),(len(rows),len(files))
-          (out/'manifest.json').write_text(json.dumps({'repo':repo,'episodes':episodes,'files':[p for p,_ in rows]},indent=2))
-          print('files',len(rows),'bytes',sum(s for _,s in rows))
+          repo = 'trentmkelly/polymarket_crypto_derivatives'
+          day = os.environ['DAY']
+          files = list_repo_files(repo, repo_type='dataset')
+          selected = sorted(p for p in files if p.startswith('btc5m_') and f'_{day}_' in p and p.endswith('/steps.parquet'))
+          if not selected:
+              raise RuntimeError(f'no BTC5m steps found for {day}')
+          out = Path(f'trent-{day}')
+          def one(path):
+              source = hf_hub_download(repo_id=repo, filename=path, repo_type='dataset')
+              destination = out / path
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(source, destination)
+              return path, destination.stat().st_size
+          rows = []
+          with ThreadPoolExecutor(max_workers=20) as pool:
+              for future in as_completed([pool.submit(one, path) for path in selected]):
+                  rows.append(future.result())
+          rows.sort()
+          (out/'manifest.json').write_text(json.dumps({'repo': repo, 'day': day, 'count': len(rows), 'files': [p for p,_ in rows]}, indent=2))
+          print(day, 'files', len(rows), 'bytes', sum(size for _, size in rows))
           PY
-          find trent-trigger-microstructure -name '*.parquet' -printf '%p %s\n' | sort
-          du -sh trent-trigger-microstructure
-      - name: Upload triggered microstructure
+          du -sh "trent-${DAY}"
+      - name: Upload public BTC5m day
         uses: actions/upload-artifact@v4
         with:
-          name: trent-btc5m-trigger-depth-events-2026-03-23
-          path: trent-trigger-microstructure
+          name: trent-btc5m-steps-${{ matrix.day }}
+          path: trent-${{ matrix.day }}
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
