@@ -1,1 +1,1 @@
-Public-data-only trigger for the frozen April 1-7 BTC five-minute holdout extraction.
+Public-data-only trigger for the frozen April 1-7 BTC five-minute holdout extraction, join-fixed rerun.
