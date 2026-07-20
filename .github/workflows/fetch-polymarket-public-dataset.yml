@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - .github/workflows/fetch-polymarket-public-dataset.yml
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
