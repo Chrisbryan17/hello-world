@@ -1,4 +1,4 @@
-name: Fetch Multiday Triggered BTC5m Microstructure
+name: Fetch BTC5m Frozen Holdout Days
 
 on:
   push:
@@ -12,9 +12,22 @@ on:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        day:
+          - '2026-02-23'
+          - '2026-02-26'
+          - '2026-03-01'
+          - '2026-03-05'
+          - '2026-03-10'
+          - '2026-03-14'
+          - '2026-03-16'
+          - '2026-03-19'
+          - '2026-03-20'
     env:
       HF_XET_HIGH_PERFORMANCE: '1'
     steps:
@@ -22,127 +35,47 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install downloader
+      - name: Install public dataset downloader
         run: python -m pip install --quiet --upgrade huggingface_hub hf_xet
-      - name: Download public event and depth files
+      - name: Download one untouched BTC5m day
+        env:
+          DAY: ${{ matrix.day }}
         run: |
           set -euo pipefail
-          mkdir -p trent-multiday-trigger-microstructure
+          mkdir -p "trent-${DAY}"
           python - <<'PY'
           from concurrent.futures import ThreadPoolExecutor, as_completed
           from pathlib import Path
-          import json, shutil
-          from huggingface_hub import hf_hub_download
-          repo='trentmkelly/polymarket_crypto_derivatives'
-          episodes=[
-            'btc5m_market1404745_2026-02-22_00-15-00_all',
-            'btc5m_market1422830_2026-02-25_01-15-00_all',
-            'btc5m_market1422873_2026-02-25_01-30-00_all',
-            'btc5m_market1425984_2026-02-25_12-50-00_all',
-            'btc5m_market1426554_2026-02-25_14-15-00_all',
-            'btc5m_market1426610_2026-02-25_14-30-00_all',
-            'btc5m_market1427051_2026-02-25_14-50-00_all',
-            'btc5m_market1427234_2026-02-25_15-00-00_all',
-            'btc5m_market1427371_2026-02-25_15-15-00_all',
-            'btc5m_market1427931_2026-02-25_16-25-00_all',
-            'btc5m_market1428124_2026-02-25_17-00-00_all',
-            'btc5m_market1429649_2026-02-25_21-30-00_all',
-            'btc5m_market1429758_2026-02-25_21-50-00_all',
-            'btc5m_market1429805_2026-02-25_21-55-00_all',
-            'btc5m_market1452875_2026-02-28_06-40-00_all',
-            'btc5m_market1453000_2026-02-28_07-40-00_all',
-            'btc5m_market1453690_2026-02-28_10-55-00_all',
-            'btc5m_market1455726_2026-02-28_18-05-00_all',
-            'btc5m_market1460853_2026-02-28_22-55-00_all',
-            'btc5m_market1483463_2026-03-03_14-40-00_all',
-            'btc5m_market1483466_2026-03-03_14-45-00_all',
-            'btc5m_market1483751_2026-03-03_16-00-00_all',
-            'btc5m_market1483910_2026-03-03_16-25-00_all',
-            'btc5m_market1485427_2026-03-03_17-55-00_all',
-            'btc5m_market1506713_2026-03-06_12-00-00_all',
-            'btc5m_market1507167_2026-03-06_13-30-00_all',
-            'btc5m_market1507211_2026-03-06_13-50-00_all',
-            'btc5m_market1507316_2026-03-06_14-10-00_all',
-            'btc5m_market1507448_2026-03-06_14-45-00_all',
-            'btc5m_market1508172_2026-03-06_16-50-00_all',
-            'btc5m_market1529932_2026-03-09_03-50-00_all',
-            'btc5m_market1531490_2026-03-09_08-25-00_all',
-            'btc5m_market1532563_2026-03-09_13-30-00_all',
-            'btc5m_market1532580_2026-03-09_13-45-00_all',
-            'btc5m_market1532756_2026-03-09_14-25-00_all',
-            'btc5m_market1532760_2026-03-09_14-30-00_all',
-            'btc5m_market1532769_2026-03-09_14-35-00_all',
-            'btc5m_market1532775_2026-03-09_14-40-00_all',
-            'btc5m_market1533798_2026-03-09_18-25-00_all',
-            'btc5m_market1534090_2026-03-09_19-20-00_all',
-            'btc5m_market1534251_2026-03-09_20-05-00_all',
-            'btc5m_market1534642_2026-03-09_21-40-00_all',
-            'btc5m_market1534935_2026-03-09_22-35-00_all',
-            'btc5m_market1557312_2026-03-12_07-20-00_all',
-            'btc5m_market1557876_2026-03-12_10-35-00_all',
-            'btc5m_market1558924_2026-03-12_13-35-00_all',
-            'btc5m_market1559136_2026-03-12_14-40-00_all',
-            'btc5m_market1559146_2026-03-12_14-50-00_all',
-            'btc5m_market1559210_2026-03-12_15-00-00_all',
-            'btc5m_market1559371_2026-03-12_15-35-00_all',
-            'btc5m_market1559379_2026-03-12_15-45-00_all',
-            'btc5m_market1560305_2026-03-12_18-00-00_all',
-            'btc5m_market1562495_2026-03-12_23-05-00_all',
-            'btc5m_market1581639_2026-03-15_00-20-00_all',
-            'btc5m_market1585573_2026-03-15_09-05-00_all',
-            'btc5m_market1592419_2026-03-15_22-40-00_all',
-            'btc5m_market1623088_2026-03-18_03-25-00_all',
-            'btc5m_market1627082_2026-03-18_12-15-00_all',
-            'btc5m_market1628022_2026-03-18_14-55-00_all',
-            'btc5m_market1628086_2026-03-18_15-00-00_all',
-            'btc5m_market1628097_2026-03-18_15-05-00_all',
-            'btc5m_market1631728_2026-03-18_20-00-00_all',
-            'btc5m_market1632649_2026-03-18_21-40-00_all',
-            'btc5m_market1663319_2026-03-21_16-25-00_all',
-            'btc5m_market1667394_2026-03-22_00-20-00_all',
-            'btc5m_market1669695_2026-03-22_06-45-00_all',
-            'btc5m_market1676126_2026-03-22_22-20-00_all',
-            'btc5m_market1677793_2026-03-23_01-20-00_all',
-            'btc5m_market1679335_2026-03-23_04-55-00_all',
-            'btc5m_market1680130_2026-03-23_08-10-00_all',
-            'btc5m_market1681473_2026-03-23_11-10-00_all',
-            'btc5m_market1681561_2026-03-23_11-15-00_all',
-            'btc5m_market1681569_2026-03-23_11-20-00_all',
-            'btc5m_market1681623_2026-03-23_11-40-00_all',
-            'btc5m_market1682370_2026-03-23_13-30-00_all',
-            'btc5m_market1682432_2026-03-23_13-45-00_all',
-            'btc5m_market1682684_2026-03-23_14-10-00_all',
-            'btc5m_market1690502_2026-03-24_10-30-00_all',
-            'btc5m_market1691328_2026-03-24_13-30-00_all',
-            'btc5m_market1691600_2026-03-24_14-15-00_all',
-            'btc5m_market1691615_2026-03-24_14-20-00_all',
-            'btc5m_market1691732_2026-03-24_14-50-00_all',
-            'btc5m_market1693152_2026-03-24_16-45-00_all',
-            'btc5m_market1693913_2026-03-24_18-00-00_all',
-          ]
-          files=[f'{ep}/{name}' for ep in episodes for name in ('events.parquet','book_levels.parquet')]
-          out=Path('trent-multiday-trigger-microstructure')
+          import json, os, shutil
+          from huggingface_hub import list_repo_files, hf_hub_download
+
+          repo = 'trentmkelly/polymarket_crypto_derivatives'
+          day = os.environ['DAY']
+          files = list_repo_files(repo, repo_type='dataset')
+          selected = sorted(p for p in files if p.startswith('btc5m_') and f'_{day}_' in p and p.endswith('/steps.parquet'))
+          if not selected:
+              raise RuntimeError(f'no BTC5m steps found for {day}')
+          out = Path(f'trent-{day}')
           def one(path):
-              source=hf_hub_download(repo_id=repo,filename=path,repo_type='dataset')
-              destination=out/path
-              destination.parent.mkdir(parents=True,exist_ok=True)
-              shutil.copy2(source,destination)
-              return path,destination.stat().st_size
-          rows=[]
-          with ThreadPoolExecutor(max_workers=32) as pool:
-              for i,future in enumerate(as_completed([pool.submit(one,p) for p in files]),1):
+              source = hf_hub_download(repo_id=repo, filename=path, repo_type='dataset')
+              destination = out / path
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(source, destination)
+              return path, destination.stat().st_size
+          rows = []
+          with ThreadPoolExecutor(max_workers=20) as pool:
+              for future in as_completed([pool.submit(one, path) for path in selected]):
                   rows.append(future.result())
-                  if i%25==0: print('downloaded',i,'of',len(files),flush=True)
-          assert len(rows)==len(files),(len(rows),len(files))
-          (out/'manifest.json').write_text(json.dumps({'repo':repo,'episodes':episodes,'files':[p for p,_ in rows]},indent=2))
-          print('files',len(rows),'bytes',sum(size for _,size in rows))
+          rows.sort()
+          (out/'manifest.json').write_text(json.dumps({'repo': repo, 'day': day, 'count': len(rows), 'files': [p for p,_ in rows]}, indent=2))
+          print(day, 'files', len(rows), 'bytes', sum(size for _, size in rows))
           PY
-          du -sh trent-multiday-trigger-microstructure
-      - name: Upload triggered microstructure
+          du -sh "trent-${DAY}"
+      - name: Upload untouched BTC5m day
         uses: actions/upload-artifact@v4
         with:
-          name: trent-btc5m-multiday-trigger-microstructure
-          path: trent-multiday-trigger-microstructure
+          name: trent-btc5m-frozen-holdout-${{ matrix.day }}
+          path: trent-${{ matrix.day }}
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
