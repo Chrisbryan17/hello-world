@@ -1,1 +1,1 @@
-Public-data-only trigger for the sealed 29-episode holdout microstructure audit.
+Public-data-only trigger for the post-March-24 BTC5m dataset manifest audit.
