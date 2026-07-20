@@ -1,1 +1,1 @@
-Public-data-only trigger for corrected BTCUSDT one-second validation windows.
+Public-data-only trigger for untouched March 15-23 BTC5m 100ms step validation data.
