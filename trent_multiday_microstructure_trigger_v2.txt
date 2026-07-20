@@ -1,0 +1,1 @@
+Public-data-only trigger for event and full-depth files of the frozen sub-300ms validation candidates.
