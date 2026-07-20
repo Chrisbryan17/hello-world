@@ -1,0 +1,46 @@
+name: Fetch Aliplayer Converted Manifest
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --quiet requests
+      - name: Save official converted Parquet manifest
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json, requests
+          url = 'https://datasets-server.huggingface.co/parquet?dataset=aliplayer1/polymarket-crypto-updown'
+          response = requests.get(url, timeout=120)
+          response.raise_for_status()
+          payload = response.json()
+          Path('aliplayer-converted-manifest.json').write_text(json.dumps(payload, indent=2))
+          rows = payload.get('parquet_files', [])
+          with open('aliplayer-converted-manifest.tsv', 'w') as f:
+              f.write('config\tsplit\tsize\tfilename\turl\n')
+              for row in rows:
+                  f.write(f"{row.get('config')}\t{row.get('split')}\t{row.get('size')}\t{row.get('filename')}\t{row.get('url')}\n")
+          print('files', len(rows))
+          for config in sorted({r.get('config') for r in rows}):
+              subset = [r for r in rows if r.get('config') == config]
+              print(config, len(subset), sum((r.get('size') or 0) for r in subset))
+          PY
+          cat aliplayer-converted-manifest.tsv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliplayer-converted-manifest
+          path: aliplayer-converted-manifest.*
+          retention-days: 1
+          if-no-files-found: error
