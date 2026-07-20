@@ -1,0 +1,200 @@
+name: Fetch Aliplayer Converted Frozen Holdout
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --quiet requests duckdb pandas pyarrow numpy
+      - name: Download converted shards sequentially and extract frozen holdout
+        run: |
+          set -euo pipefail
+          mkdir -p converted-shards aliplayer-btc5m-holdout tmp
+          python - <<'PY'
+          from pathlib import Path
+          import json, time, traceback
+          import requests
+          import duckdb
+
+          DATASET = 'aliplayer1/polymarket-crypto-updown'
+          API = f'https://datasets-server.huggingface.co/parquet?dataset={DATASET}'
+          CONFIGS = {'markets', 'orderbook', 'ticks', 'spot_prices'}
+          START_S = 1775001600
+          END_S = 1775606400
+          START_MS = START_S * 1000
+          END_MS = END_S * 1000
+          root = Path('converted-shards')
+          out = Path('aliplayer-btc5m-holdout')
+          session = requests.Session()
+          session.headers.update({'User-Agent': 'public-research-holdout-courier/1.0'})
+
+          def request_json(url):
+              for attempt in range(8):
+                  response = session.get(url, timeout=120)
+                  if response.status_code == 200:
+                      return response.json()
+                  if response.status_code in {429, 500, 502, 503, 504}:
+                      time.sleep(min(60, 2 ** attempt))
+                      continue
+                  response.raise_for_status()
+              raise RuntimeError(f'failed JSON request after retries: {url}')
+
+          def download(url, path, expected_size=None):
+              path.parent.mkdir(parents=True, exist_ok=True)
+              if path.exists() and (expected_size is None or path.stat().st_size == expected_size):
+                  return
+              for attempt in range(8):
+                  try:
+                      with session.get(url, stream=True, timeout=(60, 600)) as response:
+                          if response.status_code in {429, 500, 502, 503, 504}:
+                              time.sleep(min(60, 2 ** attempt))
+                              continue
+                          response.raise_for_status()
+                          temporary = path.with_suffix(path.suffix + '.part')
+                          with temporary.open('wb') as handle:
+                              for chunk in response.iter_content(chunk_size=8 * 1024 * 1024):
+                                  if chunk:
+                                      handle.write(chunk)
+                          temporary.replace(path)
+                      if expected_size is not None and path.stat().st_size != expected_size:
+                          raise RuntimeError(f'size mismatch {path}: {path.stat().st_size} != {expected_size}')
+                      return
+                  except Exception:
+                      if attempt == 7:
+                          raise
+                      time.sleep(min(60, 2 ** attempt))
+              raise RuntimeError(f'failed download: {url}')
+
+          try:
+              payload = request_json(API)
+              entries = payload.get('parquet_files', payload if isinstance(payload, list) else [])
+              chosen = [row for row in entries if row.get('config') in CONFIGS and row.get('split') == 'train']
+              if not chosen:
+                  raise RuntimeError(f'no converted parquet entries found; keys={list(payload) if isinstance(payload, dict) else type(payload)}')
+              manifest = []
+              for row in chosen:
+                  config = row['config']
+                  filename = row.get('filename') or Path(row['url']).name
+                  destination = root / config / filename
+                  expected = row.get('size')
+                  print(f'DOWNLOAD {config} {filename} {expected}', flush=True)
+                  download(row['url'], destination, expected)
+                  manifest.append({**row, 'local_path': str(destination)})
+              (out / 'converted_manifest.json').write_text(json.dumps(manifest, indent=2))
+
+              by_config = {}
+              for row in manifest:
+                  by_config.setdefault(row['config'], []).append(row['local_path'])
+              for config in CONFIGS:
+                  if config not in by_config:
+                      raise RuntimeError(f'missing converted config: {config}')
+
+              con = duckdb.connect('tmp/extract-converted.duckdb')
+              con.execute("SET memory_limit='6GB'")
+              con.execute("SET temp_directory='tmp/duckdb-spill'")
+              con.execute("SET preserve_insertion_order=false")
+
+              def parquet_list(paths):
+                  return '[' + ','.join("'" + p.replace("'", "''") + "'" for p in paths) + ']'
+
+              markets_files = parquet_list(by_config['markets'])
+              orderbook_files = parquet_list(by_config['orderbook'])
+              ticks_files = parquet_list(by_config['ticks'])
+              spot_files = parquet_list(by_config['spot_prices'])
+
+              con.execute(f"""
+                  CREATE OR REPLACE TABLE selected_markets AS
+                  SELECT market_id, question, crypto, timeframe, volume, resolution,
+                         start_ts, end_ts, closed_ts, condition_id,
+                         up_token_id, down_token_id, slug, fee_rate_bps
+                  FROM read_parquet({markets_files}, union_by_name=true)
+                  WHERE crypto = 'BTC'
+                    AND timeframe = '5-minute'
+                    AND start_ts >= {START_S}
+                    AND start_ts < {END_S}
+              """)
+              market_count = con.execute('SELECT count(*) FROM selected_markets').fetchone()[0]
+              if market_count == 0:
+                  raise RuntimeError('frozen holdout contains zero BTC five-minute markets')
+              con.execute(f"COPY selected_markets TO '{out / 'markets.parquet'}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+
+              con.execute(f"""
+                  COPY (
+                      SELECT o.ts_ms, o.market_id, o.token_id, o.outcome,
+                             o.best_bid, o.best_ask, o.best_bid_size, o.best_ask_size
+                      FROM read_parquet({orderbook_files}, union_by_name=true) o
+                      INNER JOIN selected_markets m USING (market_id)
+                      WHERE o.ts_ms >= {START_MS + 88_000}
+                        AND o.ts_ms < {END_MS + 252_000}
+                        AND o.ts_ms >= m.start_ts * 1000 + 88_500
+                        AND o.ts_ms <= m.start_ts * 1000 + 251_000
+                  ) TO '{out / 'orderbook.parquet'}' (FORMAT PARQUET, COMPRESSION ZSTD)
+              """)
+
+              con.execute(f"""
+                  COPY (
+                      SELECT t.market_id, t.timestamp_ms, t.token_id, t.outcome,
+                             t.side, t.price, t.size_usdc, t.tx_hash,
+                             t.block_number, t.log_index, t.source,
+                             t.spot_price_usdt, t.spot_price_ts_ms
+                      FROM read_parquet({ticks_files}, union_by_name=true) t
+                      INNER JOIN selected_markets m USING (market_id)
+                      WHERE t.timestamp_ms >= {START_MS + 89_000}
+                        AND t.timestamp_ms < {END_MS + 252_000}
+                        AND t.timestamp_ms >= m.start_ts * 1000 + 89_000
+                        AND t.timestamp_ms <= m.start_ts * 1000 + 251_000
+                  ) TO '{out / 'ticks.parquet'}' (FORMAT PARQUET, COMPRESSION ZSTD)
+              """)
+
+              con.execute(f"""
+                  COPY (
+                      SELECT ts_ms, symbol, price, source
+                      FROM read_parquet({spot_files}, union_by_name=true)
+                      WHERE ts_ms >= {START_MS + 88_000}
+                        AND ts_ms < {END_MS + 252_000}
+                        AND lower(symbol) = 'btcusdt'
+                        AND lower(source) = 'binance'
+                  ) TO '{out / 'spot.parquet'}' (FORMAT PARQUET, COMPRESSION ZSTD)
+              """)
+
+              summary = {
+                  'holdout_start_utc': '2026-04-01T00:00:00Z',
+                  'holdout_end_utc_exclusive': '2026-04-08T00:00:00Z',
+                  'market_count': int(market_count),
+                  'downloaded_bytes': int(sum(Path(row['local_path']).stat().st_size for row in manifest)),
+                  'converted_file_count': len(manifest),
+                  'rows': {},
+                  'ranges': {},
+              }
+              for name, col in [('markets','start_ts'),('orderbook','ts_ms'),('ticks','timestamp_ms'),('spot','ts_ms')]:
+                  path = out / f'{name}.parquet'
+                  count, lo, hi = con.execute(f"SELECT count(*), min({col}), max({col}) FROM read_parquet('{path}')").fetchone()
+                  summary['rows'][name] = int(count)
+                  summary['ranges'][name] = [None if lo is None else int(lo), None if hi is None else int(hi)]
+              (out / 'extraction_summary.json').write_text(json.dumps(summary, indent=2))
+              print(json.dumps(summary, indent=2))
+          except Exception:
+              (out / 'EXTRACTION_ERROR.txt').write_text(traceback.format_exc())
+              raise
+          PY
+          sha256sum aliplayer-btc5m-holdout/*.parquet | tee aliplayer-btc5m-holdout/SHA256SUMS || true
+          ls -lh aliplayer-btc5m-holdout
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aliplayer-converted-frozen-holdout-2026-04-01-07
+          path: aliplayer-btc5m-holdout
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
