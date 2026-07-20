@@ -1,0 +1,1 @@
+Public-data-only trigger for the sealed 29-episode holdout microstructure audit.
