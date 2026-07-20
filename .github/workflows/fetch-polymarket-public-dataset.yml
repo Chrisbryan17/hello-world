@@ -36,6 +36,7 @@ jobs:
           cols = ['open_time','open','high','low','close','volume','close_time',
                   'quote_volume','trade_count','taker_buy_base','taker_buy_quote','ignore']
           frames = []
+          raw_rows = 0
           for start, end in ranges:
               day = start
               while day <= end:
@@ -46,15 +47,21 @@ jobs:
                   subprocess.run(['curl','--fail','--location','--retry','5','--retry-all-errors',url,'-o',str(path)], check=True)
                   with zipfile.ZipFile(path) as zf, zf.open(zf.namelist()[0]) as fh:
                       df = pd.read_csv(fh, header=None, names=cols)
-                  unit = 'us' if int(df.open_time.iloc[0]) > 10**14 else 'ms'
-                  df['ts_utc'] = pd.to_datetime(df.open_time, unit=unit, utc=True)
-                  df['epoch_s'] = (df.ts_utc.astype('int64') // 1_000_000_000).astype('int64')
+                  raw = pd.to_numeric(df.open_time, errors='raise').astype('int64')
+                  unit = 'us' if int(raw.iloc[0]) > 10**14 else 'ms'
+                  divisor = 1_000_000 if unit == 'us' else 1_000
+                  df['ts_utc'] = pd.to_datetime(raw, unit=unit, utc=True)
+                  df['epoch_s'] = (raw // divisor).astype('int64')
+                  raw_rows += len(df)
                   frames.append(df[['epoch_s','ts_utc','open','high','low','close','volume','quote_volume','trade_count']])
-                  print(ds, len(df), df.ts_utc.min(), df.ts_utc.max(), flush=True)
+                  print(ds, len(df), unit, df.ts_utc.min(), df.ts_utc.max(), flush=True)
                   day += timedelta(days=1)
           out = pd.concat(frames, ignore_index=True).sort_values('epoch_s').drop_duplicates('epoch_s', keep='last')
           for c in ['open','high','low','close','volume','quote_volume']:
               out[c] = pd.to_numeric(out[c], errors='coerce')
+          assert raw_rows > 5_500_000, raw_rows
+          assert len(out) > 5_500_000, len(out)
+          assert out.epoch_s.is_monotonic_increasing
           output = 'binance-btc-1s/BTCUSDT_1s_2026-04-05_2026-06-24.parquet'
           out.to_parquet(output, index=False, compression='zstd')
           print('FINAL', len(out), out.ts_utc.min(), out.ts_utc.max(), out.isna().sum().to_dict())
