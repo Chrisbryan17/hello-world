@@ -1,0 +1,1 @@
+Public-data-only trigger for April BTC5m market metadata and market-id row-group pruning.
