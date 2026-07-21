@@ -1,4 +1,4 @@
-name: Lean SimpleGraph bridge verification
+name: Lean equality-case verification
 
 on:
   pull_request:
@@ -23,7 +23,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if grep -RInE '(^|[^[:alnum:]_])(sorry|admit)([^[:alnum:]_]|$)' ErdosGyarfas BridgeTest.lean Verify.lean; then
+          if grep -RInE '(^|[^[:alnum:]_])(sorry|admit)([^[:alnum:]_]|$)' \
+              ErdosGyarfas BridgeTest.lean EqualityTest.lean Verify.lean; then
             echo 'Proof placeholder detected.' >&2
             exit 1
           fi
@@ -51,9 +52,11 @@ jobs:
       - name: Compile theorem library
         working-directory: lean-bridge
         run: lake build
-      - name: Compile bridge contract
+      - name: Compile bridge contracts
         working-directory: lean-bridge
-        run: lake env lean BridgeTest.lean
+        run: |
+          lake env lean BridgeTest.lean
+          lake env lean EqualityTest.lean
       - name: Audit theorem axiom dependencies
         working-directory: lean-bridge
         shell: bash
