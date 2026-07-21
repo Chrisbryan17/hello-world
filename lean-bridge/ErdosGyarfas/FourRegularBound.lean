@@ -71,26 +71,20 @@ theorem twoStepEndpoint_injective
   subst y'
   rfl
 
-/-- Every finite four-regular `C₄`-free simple graph has at least thirteen
-vertices. -/
+/-- Every nonempty finite four-regular `C₄`-free simple graph has at least
+thirteen vertices. -/
 theorem four_regular_noFourCycle_card_ge_thirteen
-    (J : SimpleGraph V) [DecidableRel J.Adj]
+    [Nonempty V] (J : SimpleGraph V) [DecidableRel J.Adj]
     (hReg : J.IsRegularOfDegree 4) (hC4 : NoFourCycle J) :
     13 ≤ Fintype.card V := by
   classical
-  have hNonempty : Nonempty V := by
-    by_contra hEmpty
-    letI : IsEmpty V := not_nonempty_iff.mp hEmpty
-    have := hReg.degree_eq (Classical.choice (show Nonempty V from hNonempty))
-    contradiction
-  let v : V := Classical.choice hNonempty
+  let v : V := Classical.arbitrary V
   have hCard : Fintype.card (TwoStepAt J v) ≤ Fintype.card {y : V // y ≠ v} :=
     Fintype.card_le_of_injective (twoStepEndpoint J v)
       (twoStepEndpoint_injective J v hC4)
   have hDomain : Fintype.card (TwoStepAt J v) = 12 :=
     card_twoStepAt_eq_twelve J hReg v
   have hCodomain : Fintype.card {y : V // y ≠ v} = Fintype.card V - 1 := by
-    classical
     simp
   omega
 
