@@ -1,6 +1,12 @@
 name: Lean equality-case verification
 
 on:
+  push:
+    branches:
+      - lean-equality-case
+    paths:
+      - 'lean-bridge/**'
+      - '.github/workflows/lean-equality-case.yml'
   pull_request:
     branches:
       - main
