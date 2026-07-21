@@ -144,7 +144,7 @@ noncomputable def incidenceNeighborEquiv (S : EqualityIncidence A B) (b : B) :
     ⟨S.other a.1 b a.2, by
       rw [SimpleGraph.mem_neighborSet]
       exact S.auxiliaryGraph_adj.mpr
-        ⟨S.other_ne a.1 b a.2, ⟨a.1, a.2, S.inc_other a.1 b a.2⟩⟩⟩
+        ⟨(S.other_ne a.1 b a.2).symm, ⟨a.1, a.2, S.inc_other a.1 b a.2⟩⟩⟩
   refine Equiv.ofBijective f ⟨?_, ?_⟩
   · intro a a' haa'
     apply Subtype.ext
