@@ -44,7 +44,7 @@ structure EqualityIncidence (A B : Type*) [Fintype A] [Fintype B] where
 
 namespace EqualityIncidence
 
-variable {A B : Type*} [Fintype A] [Fintype B]
+variable {A B : Type*} [Fintype A] [Fintype B] [DecidableEq B]
 
 instance (S : EqualityIncidence A B) : DecidableRel S.Inc := S.decidableInc
 
@@ -69,12 +69,14 @@ theorem mem_rightNeighbors (S : EqualityIncidence A B) {a : A} {b : B} :
 @[simp]
 theorem card_leftNeighbors (S : EqualityIncidence A B) (a : A) :
     #(S.leftNeighbors a) = 2 := by
+  unfold leftNeighbors
   rw [← Fintype.card_subtype]
   exact S.leftDegreeTwo a
 
 @[simp]
 theorem card_rightNeighbors (S : EqualityIncidence A B) (b : B) :
     #(S.rightNeighbors b) = 4 := by
+  unfold rightNeighbors
   rw [← Fintype.card_subtype]
   exact S.rightDegreeFour b
 
@@ -82,6 +84,7 @@ theorem card_rightNeighbors (S : EqualityIncidence A B) (b : B) :
 theorem existsUnique_other (S : EqualityIncidence A B)
     {a : A} {b : B} (hab : S.Inc a b) :
     ∃! c : B, c ≠ b ∧ S.Inc a c := by
+  classical
   let N := S.leftNeighbors a
   have hbN : b ∈ N := by simpa [N] using hab
   have hcard : #(N.erase b) = 1 := by
@@ -93,7 +96,8 @@ theorem existsUnique_other (S : EqualityIncidence A B)
     exact ⟨(Finset.mem_erase.mp hcMem).1, by
       exact S.mem_leftNeighbors.mp (Finset.mem_erase.mp hcMem).2⟩
   · intro d hd
-    have hdMem : d ∈ N.erase b := Finset.mem_erase.mpr ⟨hd.1, S.mem_leftNeighbors.mpr hd.2⟩
+    have hdMem : d ∈ N.erase b :=
+      Finset.mem_erase.mpr ⟨hd.1, S.mem_leftNeighbors.mpr hd.2⟩
     simpa [hc] using hdMem
 
 /-- The other right endpoint of a left incidence. -/
@@ -119,11 +123,13 @@ def auxiliaryGraph (S : EqualityIncidence A B) : SimpleGraph B where
   symm b c h := ⟨h.1.symm, by
     obtain ⟨a, hab, hac⟩ := h.2
     exact ⟨a, hac, hab⟩⟩
-  loopless b h := h.1 rfl
+  loopless := ⟨by
+    intro b h
+    exact h.1 rfl⟩
 
 instance (S : EqualityIncidence A B) : DecidableRel S.auxiliaryGraph.Adj := by
-  classical
-  dsimp [auxiliaryGraph]
+  intro b c
+  change Decidable (b ≠ c ∧ ∃ a, S.Inc a b ∧ S.Inc a c)
   infer_instance
 
 @[simp]
@@ -136,35 +142,43 @@ noncomputable def incidenceNeighborEquiv (S : EqualityIncidence A B) (b : B) :
     {a // S.Inc a b} ≃ S.auxiliaryGraph.neighborSet b := by
   let f : {a // S.Inc a b} → S.auxiliaryGraph.neighborSet b := fun a =>
     ⟨S.other a.1 b a.2, by
+      change S.other a.1 b a.2 ≠ b ∧
+        ∃ a', S.Inc a' b ∧ S.Inc a' (S.other a.1 b a.2)
       exact ⟨S.other_ne a.1 b a.2, ⟨a.1, a.2, S.inc_other a.1 b a.2⟩⟩⟩
   refine Equiv.ofBijective f ⟨?_, ?_⟩
   · intro a a' haa'
     apply Subtype.ext
     have hOther : S.other a.1 b a.2 = S.other a'.1 b a'.2 :=
       congrArg Subtype.val haa'
-    apply S.pairUnique (S.other_ne a.1 b a.2)
+    apply S.pairUnique (S.other_ne a.1 b a.2).symm
       a.2 (S.inc_other a.1 b a.2) a'.2
     simpa [hOther] using S.inc_other a'.1 b a'.2
   · intro c
-    rcases c.2 with ⟨hcb, a, hab, hac⟩
+    have hcAdj := S.auxiliaryGraph_adj.mp c.2
+    rcases hcAdj with ⟨hbc, a, hab, hac⟩
     let a' : {a // S.Inc a b} := ⟨a, hab⟩
     refine ⟨a', Subtype.ext ?_⟩
     dsimp [f, a']
-    exact (Classical.choose_spec (S.existsUnique_other hab)).2 c.1 ⟨hcb.symm, hac⟩
+    exact ((Classical.choose_spec (S.existsUnique_other hab)).2 c.1
+      ⟨hbc.symm, hac⟩).symm
 
 /-- The auxiliary graph is 4-regular. -/
 theorem auxiliaryGraph_four_regular (S : EqualityIncidence A B) :
     S.auxiliaryGraph.IsRegularOfDegree 4 := by
   intro b
   rw [← SimpleGraph.card_neighborSet_eq_degree]
-  rw [Fintype.card_congr (S.incidenceNeighborEquiv b).symm]
+  rw [← Fintype.card_congr (S.incidenceNeighborEquiv b)]
   exact S.rightDegreeFour b
 
 /-- The alternating-square exclusion makes the auxiliary graph `C₄`-free. -/
 theorem auxiliaryGraph_noFourCycle (S : EqualityIncidence A B) :
     NoFourCycle S.auxiliaryGraph := by
   intro b₀ b₁ b₂ b₃ h01 h12 h23 h30 h02 h13
-  exact S.noAlternatingSquare h02 h13 h01.2 h12.2 h23.2 h30.2
+  apply S.noAlternatingSquare h02 h13
+  · exact (S.auxiliaryGraph_adj.mp h01).2
+  · exact (S.auxiliaryGraph_adj.mp h12).2
+  · exact (S.auxiliaryGraph_adj.mp h23).2
+  · exact (S.auxiliaryGraph_adj.mp h30).2
 
 end EqualityIncidence
 
@@ -186,14 +200,16 @@ theorem four_regular_noFourCycle_card_ge_fifteen
     (h : FourRegularNoFourCycleCertificate J) :
     15 ≤ Fintype.card V := by
   by_contra hNot
+  have hAtLeastThirteen : 13 ≤ Fintype.card V := h.localThirteen
   have hAtMostFourteen : Fintype.card V ≤ 14 := by omega
   obtain ⟨T, hIncidence⟩ := h.smallOrderTriangleIncidence hAtMostFourteen
-  omega
+  have hCases : Fintype.card V = 13 ∨ Fintype.card V = 14 := by omega
+  rcases hCases with h13 | h14 <;> omega
 
 /-- End-to-end 45-vertex arithmetic conclusion once the equality incidence
 system and the local 15-vertex certificate for its auxiliary graph are supplied. -/
 theorem equality_case_forty_five
-    {A B : Type*} [Fintype A] [Fintype B]
+    {A B : Type*} [Fintype A] [Fintype B] [DecidableEq B]
     (S : EqualityIncidence A B)
     (hCard : Fintype.card A = 2 * Fintype.card B)
     (hLocal : FourRegularNoFourCycleCertificate S.auxiliaryGraph) :
