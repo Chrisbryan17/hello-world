@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   verify:
@@ -56,8 +57,29 @@ jobs:
         working-directory: lean-bridge
         run: lake exe cache get >/dev/null
       - name: Compile theorem library
+        id: build
+        continue-on-error: true
         working-directory: lean-bridge
-        run: lake build
+        shell: bash
+        run: |
+          set -o pipefail
+          lake build 2>&1 | tee build.log
+      - name: Report theorem build failure
+        if: steps.build.outcome == 'failure'
+        working-directory: lean-bridge
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo 'Lean theorem build failed:'
+            echo
+            echo '```text'
+            tail -n 220 build.log
+            echo '```'
+          } >comment.md
+          gh pr comment 35 --body-file comment.md
+          exit 1
       - name: Compile bridge contracts
         working-directory: lean-bridge
         run: |
