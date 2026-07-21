@@ -1,0 +1,67 @@
+name: Lean SimpleGraph bridge verification
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'lean-bridge/**'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Reject proof placeholders
+        working-directory: lean-bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -RInE '(^|[^[:alnum:]_])(sorry|admit)([^[:alnum:]_]|$)' ErdosGyarfas BridgeTest.lean Verify.lean; then
+            echo 'Proof placeholder detected.' >&2
+            exit 1
+          fi
+      - name: Install elan
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Install pinned Lean toolchain
+        working-directory: lean-bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          elan toolchain install "$(cat lean-toolchain)"
+          lean --version
+          lake --version
+      - name: Resolve Lake dependencies
+        working-directory: lean-bridge
+        run: lake update
+      - name: Fetch mathlib build cache
+        working-directory: lean-bridge
+        run: lake exe cache get
+      - name: Compile theorem library
+        working-directory: lean-bridge
+        run: lake build
+      - name: Compile bridge contract
+        working-directory: lean-bridge
+        run: lake env lean BridgeTest.lean
+      - name: Audit theorem axiom dependencies
+        working-directory: lean-bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$(lake env lean Verify.lean)"
+          printf '%s\n' "$output"
+          if printf '%s\n' "$output" | grep -q 'sorryAx'; then
+            echo 'sorryAx dependency detected.' >&2
+            exit 1
+          fi
