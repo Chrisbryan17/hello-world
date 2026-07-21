@@ -34,11 +34,13 @@ theorem card_twoStepAt_eq_twelve
     (hReg : J.IsRegularOfDegree 4) (v : V) :
     Fintype.card (TwoStepAt J v) = 12 := by
   classical
+  change Fintype.card
+    (Σ x : J.neighborFinset v, (J.neighborFinset x.1).erase v) = 12
   rw [Fintype.card_sigma]
   simp only [Fintype.card_coe]
   have hvMem (x : J.neighborFinset v) : v ∈ J.neighborFinset x.1 := by
-    have hxAdj : J.Adj v x.1 := by simpa using x.2
-    simpa using hxAdj.symm
+    have hxAdj : J.Adj v x.1 := (J.mem_neighborFinset v x.1).mp x.2
+    exact (J.mem_neighborFinset x.1 v).mpr hxAdj.symm
   simp_rw [Finset.card_erase_of_mem (hvMem _),
     SimpleGraph.card_neighborFinset_eq_degree, hReg.degree_eq]
   simp
@@ -61,16 +63,15 @@ theorem twoStepEndpoint_injective
   have hy : (y : V) = (y' : V) := congrArg Subtype.val hEnd
   have hx : (x : V) = (x' : V) := by
     by_contra hxx
-    have hvx : J.Adj v x := by simpa using x.2
-    have hxy : J.Adj x y := by
-      simpa using (Finset.mem_erase.mp y.2).2
-    have hx'y' : J.Adj x' y' := by
-      simpa using (Finset.mem_erase.mp y'.2).2
+    have hvx : J.Adj v x := (J.mem_neighborFinset v x.1).mp x.2
+    have hxy : J.Adj x y :=
+      (J.mem_neighborFinset x.1 y.1).mp (Finset.mem_erase.mp y.2).2
+    have hx'y' : J.Adj x' y' :=
+      (J.mem_neighborFinset x'.1 y'.1).mp (Finset.mem_erase.mp y'.2).2
     have hyx' : J.Adj y x' := by
       simpa [hy] using hx'y'.symm
-    have hx'v : J.Adj x' v := by
-      have : J.Adj v x' := by simpa using x'.2
-      exact this.symm
+    have hx'v : J.Adj x' v :=
+      ((J.mem_neighborFinset v x'.1).mp x'.2).symm
     have hvy : v ≠ (y : V) := (Finset.mem_erase.mp y.2).1.symm
     exact hC4 hvx hxy hyx' hx'v hvy hxx
   have hxx : x = x' := Subtype.ext hx
