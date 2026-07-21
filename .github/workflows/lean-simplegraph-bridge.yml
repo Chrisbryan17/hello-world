@@ -78,33 +78,8 @@ jobs:
           gh pr comment "$PR_NUMBER" --body-file comment.md
           exit 1
       - name: Compile bridge contract
-        id: contract
         working-directory: lean-bridge
-        shell: bash
-        run: |
-          set +e
-          lake env lean BridgeTest.lean >contract.log 2>&1
-          status=$?
-          echo "status=$status" >> "$GITHUB_OUTPUT"
-          cat contract.log
-          exit 0
-      - name: Report contract failure on pull request
-        if: steps.contract.outputs.status != '0'
-        working-directory: lean-bridge
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          {
-            echo 'Lean bridge contract failed:'
-            echo
-            echo '```text'
-            cat contract.log
-            echo '```'
-          } >contract-comment.md
-          gh pr comment "$PR_NUMBER" --body-file contract-comment.md
-          exit 1
+        run: lake env lean BridgeTest.lean
       - name: Audit theorem axiom dependencies
         working-directory: lean-bridge
         shell: bash
