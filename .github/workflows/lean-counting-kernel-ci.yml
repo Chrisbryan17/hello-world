@@ -1,0 +1,41 @@
+name: Lean counting-kernel verification
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'lean-ci/**'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject proof placeholders
+        working-directory: lean-ci
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -RInE '(^|[^[:alnum:]_])(sorry|admit)([^[:alnum:]_]|$)' CountingKernel Verify.lean; then
+            echo 'Proof placeholder detected.' >&2
+            exit 1
+          fi
+
+      - name: Install Lean, fetch cache, compile, and kernel-check
+        uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: lean-ci
+          build: true
+          use-mathlib-cache: true
+          leanchecker: true
+
+      - name: Print theorem axiom dependencies
+        working-directory: lean-ci
+        run: lake env lean -DwarningAsError=true Verify.lean
