@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   verify:
@@ -46,18 +47,42 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          elan toolchain install "$(cat lean-toolchain)"
+          elan toolchain install "$(cat lean-toolchain)" >/dev/null
           lean --version
           lake --version
       - name: Resolve Lake dependencies
         working-directory: lean-bridge
-        run: lake update
+        run: lake update >/dev/null
       - name: Fetch mathlib build cache
         working-directory: lean-bridge
-        run: lake exe cache get
+        run: lake exe cache get >/dev/null
       - name: Compile theorem library
+        id: build
         working-directory: lean-bridge
-        run: lake build
+        shell: bash
+        run: |
+          set +e
+          lake build >build.log 2>&1
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          tail -n 220 build.log >build-tail.log
+          exit 0
+      - name: Report build failure
+        if: steps.build.outputs.status != '0'
+        working-directory: lean-bridge
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo 'Lean equality build failed:'
+            echo
+            echo '```text'
+            cat build-tail.log
+            echo '```'
+          } >comment.md
+          gh pr comment 35 --body-file comment.md
+          exit 1
       - name: Compile bridge contracts
         working-directory: lean-bridge
         run: |
