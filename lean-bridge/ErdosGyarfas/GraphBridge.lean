@@ -29,6 +29,12 @@ def higherVertices (G : SimpleGraph V) [DecidableRel G.Adj] : Finset V :=
 def crossingGraph (G : SimpleGraph V) [DecidableRel G.Adj] : SimpleGraph V :=
   G.between (↑(cubicVertices G) : Set V) (↑(higherVertices G) : Set V)
 
+instance instDecidableRelCrossingGraph
+    (G : SimpleGraph V) [DecidableRel G.Adj] :
+    DecidableRel (crossingGraph G).Adj := by
+  dsimp [crossingGraph]
+  infer_instance
+
 @[simp]
 theorem mem_cubicVertices {G : SimpleGraph V} [DecidableRel G.Adj] {v : V} :
     v ∈ cubicVertices G ↔ G.degree v = 3 := by
@@ -74,7 +80,7 @@ theorem neighborFinset_crossing_eq_of_mem_higher
     (h : CarrStructure G) {v : V} (hv : v ∈ higherVertices G) :
     (crossingGraph G).neighborFinset v = G.neighborFinset v := by
   ext w
-  simp only [SimpleGraph.mem_neighborFinset, crossingGraph, SimpleGraph.between_adj]
+  simp only [SimpleGraph.mem_neighborFinset]
   constructor
   · rintro ⟨hvw, _⟩
     exact hvw
@@ -82,12 +88,18 @@ theorem neighborFinset_crossing_eq_of_mem_higher
     have hw : w ∈ cubicVertices G := h.neighbor_mem_cubic_of_mem_higher hv hvw
     exact ⟨hvw, Or.inr ⟨by simpa using hv, by simpa using hw⟩⟩
 
+/-- A higher vertex has the same degree in the crossing graph as in the original graph. -/
+theorem crossing_degree_eq_of_mem_higher
+    (h : CarrStructure G) {v : V} (hv : v ∈ higherVertices G) :
+    (crossingGraph G).degree v = G.degree v := by
+  change #((crossingGraph G).neighborFinset v) = #(G.neighborFinset v)
+  exact congrArg Finset.card (h.neighborFinset_crossing_eq_of_mem_higher hv)
+
 /-- A higher vertex has crossing degree at least four. -/
 theorem four_le_crossing_degree_of_mem_higher
     (h : CarrStructure G) {v : V} (hv : v ∈ higherVertices G) :
     4 ≤ (crossingGraph G).degree v := by
-  rw [SimpleGraph.degree, h.neighborFinset_crossing_eq_of_mem_higher hv,
-    SimpleGraph.card_neighborFinset_eq_degree]
+  rw [h.crossing_degree_eq_of_mem_higher hv]
   exact h.four_le_degree_of_mem_higher hv
 
 /-- A cubic vertex has at most two neighbors across the cubic/noncubic cut. -/
@@ -152,7 +164,7 @@ theorem carr_two_thirds
     SimpleGraph.isBipartiteWith_sum_degrees_eq hBip
 
   have hLower : 4 * #B ≤ ∑ v ∈ B, H.degree v := by
-    have hPointwise : ∑ _v in B, 4 ≤ ∑ v in B, H.degree v := by
+    have hPointwise : ∑ _v ∈ B, 4 ≤ ∑ v ∈ B, H.degree v := by
       apply Finset.sum_le_sum
       intro v hv
       simpa [B, H] using h.four_le_crossing_degree_of_mem_higher
@@ -160,7 +172,7 @@ theorem carr_two_thirds
     simpa [Nat.mul_comm] using hPointwise
 
   have hUpperA : ∑ v ∈ A, H.degree v ≤ 2 * #A := by
-    have hPointwise : ∑ v in A, H.degree v ≤ ∑ _v in A, 2 := by
+    have hPointwise : ∑ v ∈ A, H.degree v ≤ ∑ _v ∈ A, 2 := by
       apply Finset.sum_le_sum
       intro v hv
       simpa [A, H] using h.crossing_degree_le_two_of_mem_cubic
