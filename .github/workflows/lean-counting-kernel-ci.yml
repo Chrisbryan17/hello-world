@@ -59,6 +59,13 @@ jobs:
         working-directory: lean-ci
         run: lake build
 
-      - name: Print theorem axiom dependencies
+      - name: Audit theorem axiom dependencies
         working-directory: lean-ci
-        run: lake env lean Verify.lean
+        shell: bash
+        run: |
+          set -euo pipefail
+          lake env lean Verify.lean | tee axiom-report.txt
+          if grep -Fq 'sorryAx' axiom-report.txt; then
+            echo 'Unexpected sorryAx dependency detected.' >&2
+            exit 1
+          fi
