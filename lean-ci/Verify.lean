@@ -1,6 +1,6 @@
 import CountingKernel.Equality
 
-/- CI entry point: build imports, then report all theorem axiom dependencies. -/
+/- CI entry point: build imports, report axioms, and permit a sorryAx rejection gate. -/
 #print axioms CountingKernel.cross_edge_bounds
 #print axioms CountingKernel.fraction_form
 #print axioms CountingKernel.partition_and_cross_edges
