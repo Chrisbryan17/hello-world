@@ -1,5 +1,0 @@
-import ErdosGyarfas.TwoThirds
-
-#print axioms ErdosGyarfas.two_thirds_from_cross_edge_bounds
-#print axioms ErdosGyarfas.two_thirds_fraction_form
-#print axioms ErdosGyarfas.two_thirds_from_partition_and_cross_edges
