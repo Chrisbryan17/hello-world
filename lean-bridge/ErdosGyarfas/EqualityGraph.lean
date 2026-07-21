@@ -9,6 +9,8 @@ case. The left vertices represent cubic vertices and the right vertices
 represent the higher-degree vertices. Every left vertex has exactly two right
 neighbors, every right vertex has exactly four left neighbors, and no two left
 vertices determine the same pair of right endpoints.
+
+The development is compiled against Lean 4.29.0 and mathlib v4.29.0.
 -/
 
 namespace ErdosGyarfas
