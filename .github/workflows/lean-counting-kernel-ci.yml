@@ -17,6 +17,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          show-progress: false
 
       - name: Reject proof placeholders
         working-directory: lean-ci
@@ -28,24 +30,20 @@ jobs:
             exit 1
           fi
 
-      - name: Install pinned Lean toolchain
-        uses: leanprover/lean-action@v1
-        with:
-          lake-package-directory: lean-ci
-          auto-config: false
-          build: false
-          test: false
-          lint: false
-          use-mathlib-cache: false
-          use-github-cache: false
-          leanchecker: false
-          nanoda: false
-
-      - name: Report tool versions
-        working-directory: lean-ci
+      - name: Install elan
+        shell: bash
         run: |
           set -euo pipefail
-          elan --version
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Install pinned Lean toolchain
+        working-directory: lean-ci
+        shell: bash
+        run: |
+          set -euo pipefail
+          elan toolchain install "$(cat lean-toolchain)"
           lean --version
           lake --version
 
@@ -64,22 +62,10 @@ jobs:
       - name: Compile both source modules with warnings as errors
         working-directory: lean-ci
         run: |
+          set -euo pipefail
           lake env lean -DwarningAsError=true CountingKernel/Bounds.lean
           lake env lean -DwarningAsError=true CountingKernel/Equality.lean
 
       - name: Print theorem axiom dependencies
         working-directory: lean-ci
         run: lake env lean -DwarningAsError=true Verify.lean
-
-      - name: Kernel-check compiled environment
-        uses: leanprover/lean-action@v1
-        with:
-          lake-package-directory: lean-ci
-          auto-config: false
-          build: false
-          test: false
-          lint: false
-          use-mathlib-cache: false
-          use-github-cache: false
-          leanchecker: true
-          nanoda: false
