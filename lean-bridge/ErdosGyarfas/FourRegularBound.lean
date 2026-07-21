@@ -21,6 +21,12 @@ first and second vertices. -/
 def TwoStepAt (J : SimpleGraph V) [DecidableRel J.Adj] (v : V) :=
   Σ x : J.neighborFinset v, (J.neighborFinset x.1).erase v
 
+instance instFintypeTwoStepAt
+    (J : SimpleGraph V) [DecidableRel J.Adj] (v : V) :
+    Fintype (TwoStepAt J v) := by
+  unfold TwoStepAt
+  infer_instance
+
 /-- A regular degree-four graph has exactly twelve non-backtracking two-step
 walks from each vertex. -/
 theorem card_twoStepAt_eq_twelve
@@ -28,10 +34,11 @@ theorem card_twoStepAt_eq_twelve
     (hReg : J.IsRegularOfDegree 4) (v : V) :
     Fintype.card (TwoStepAt J v) = 12 := by
   classical
-  simp only [TwoStepAt, Fintype.card_sigma, Fintype.card_coe]
+  rw [Fintype.card_sigma]
+  simp only [Fintype.card_coe]
   have hvMem (x : J.neighborFinset v) : v ∈ J.neighborFinset x.1 := by
-    apply SimpleGraph.mem_neighborFinset.mpr
-    exact (SimpleGraph.mem_neighborFinset.mp x.2).symm
+    have hxAdj : J.Adj v x.1 := by simpa using x.2
+    simpa using hxAdj.symm
   simp_rw [Finset.card_erase_of_mem (hvMem _),
     SimpleGraph.card_neighborFinset_eq_degree, hReg.degree_eq]
   simp
@@ -54,15 +61,16 @@ theorem twoStepEndpoint_injective
   have hy : (y : V) = (y' : V) := congrArg Subtype.val hEnd
   have hx : (x : V) = (x' : V) := by
     by_contra hxx
-    have hvx : J.Adj v x := SimpleGraph.mem_neighborFinset.mp x.2
-    have hxy : J.Adj x y :=
-      SimpleGraph.mem_neighborFinset.mp (Finset.mem_erase.mp y.2).2
-    have hx'y' : J.Adj x' y' :=
-      SimpleGraph.mem_neighborFinset.mp (Finset.mem_erase.mp y'.2).2
+    have hvx : J.Adj v x := by simpa using x.2
+    have hxy : J.Adj x y := by
+      simpa using (Finset.mem_erase.mp y.2).2
+    have hx'y' : J.Adj x' y' := by
+      simpa using (Finset.mem_erase.mp y'.2).2
     have hyx' : J.Adj y x' := by
       simpa [hy] using hx'y'.symm
-    have hx'v : J.Adj x' v :=
-      (SimpleGraph.mem_neighborFinset.mp x'.2).symm
+    have hx'v : J.Adj x' v := by
+      have : J.Adj v x' := by simpa using x'.2
+      exact this.symm
     have hvy : v ≠ (y : V) := (Finset.mem_erase.mp y.2).1.symm
     exact hC4 hvx hxy hyx' hx'v hvy hxx
   have hxx : x = x' := Subtype.ext hx
