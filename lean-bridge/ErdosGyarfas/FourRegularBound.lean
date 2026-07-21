@@ -43,7 +43,8 @@ theorem card_twoStepAt_eq_twelve
     exact (J.mem_neighborFinset x.1 v).mpr hxAdj.symm
   simp_rw [Finset.card_erase_of_mem (hvMem _),
     SimpleGraph.card_neighborFinset_eq_degree, hReg.degree_eq]
-  simp
+  rw [hReg.degree_eq]
+  norm_num
 
 /-- Endpoint of a non-backtracking two-step walk, regarded as a vertex other
 than the starting point. -/
