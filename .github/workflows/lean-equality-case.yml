@@ -6,12 +6,14 @@ on:
       - lean-equality-case
     paths:
       - 'lean-bridge/**'
+      - 'release/v0.8/**'
       - '.github/workflows/lean-equality-case.yml'
   pull_request:
     branches:
       - main
     paths:
       - 'lean-bridge/**'
+      - 'release/v0.8/**'
 
 permissions:
   contents: read
@@ -106,10 +108,38 @@ jobs:
             echo 'sorryAx dependency detected.' >&2
             exit 1
           fi
-      - name: Report successful verification
-        if: success()
+
+  package-v08:
+    name: package-v0.8
+    needs: verify
+    if: github.event_name == 'push' && needs.verify.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Build and independently verify v0.8 archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFICATION_JOB_RESULT: ${{ needs.verify.result }}
+        run: |
+          set -euo pipefail
+          bash release/v0.8/build_release.sh "$RUNNER_TEMP/v0.8"
+      - name: Upload verified v0.8 bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: erdos-gyarfas-equality-v0.8-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/v0.8/*.zip
+            ${{ runner.temp }}/v0.8/*.zip.sha256
+            ${{ runner.temp }}/v0.8/*.verification.txt
+          if-no-files-found: error
+          retention-days: 90
+      - name: Report successful verification and packaging
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh pr comment 35 --body "Lean equality-case verification passed for commit \`${GITHUB_SHA}\`: placeholder scan, \`lake build\`, both contract files, axiom printout, and explicit \`sorryAx\` rejection all succeeded."
+          gh pr comment 35 --body "Lean equality-case v0.8 verification and release packaging passed for commit \`${GITHUB_SHA}\`. The full theorem build, contracts, axiom audit, explicit \`sorryAx\` rejection, deterministic archive construction, clean extraction, ZIP integrity test, exact file-set comparison, and SHA-256 manifest verification all succeeded. Artifact: \`erdos-gyarfas-equality-v0.8-${GITHUB_RUN_ID}\`."
