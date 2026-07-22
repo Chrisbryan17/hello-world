@@ -1,0 +1,47 @@
+name: Courier Independent May-June Corpus
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - research-triggers/kinzik-independent-courier.txt
+  workflow_dispatch:
+
+jobs:
+  courier:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      HF_XET_HIGH_PERFORMANCE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --quiet huggingface_hub hf_xet
+      - name: Download immutable public Parquet tables
+        run: |
+          mkdir -p kinzik-independent
+          python - <<'PY'
+          from huggingface_hub import snapshot_download
+          snapshot_download(
+              repo_id='kinzikdza/polymarket-updown-microstructure',
+              repo_type='dataset',
+              local_dir='kinzik-independent',
+              allow_patterns=[
+                  'parquet/slots.parquet',
+                  'parquet/book_snapshots.parquet',
+                  'parquet/pm_trades.parquet',
+              ],
+          )
+          PY
+          sha256sum kinzik-independent/parquet/*.parquet | tee kinzik-independent/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kinzik-independent-parquet
+          path: kinzik-independent
+          compression-level: 0
+          retention-days: 2
+          if-no-files-found: error
