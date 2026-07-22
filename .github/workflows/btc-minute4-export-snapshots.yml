@@ -29,7 +29,7 @@ jobs:
           code='\n'.join((line[10:] if line.startswith('          ') else line) for line in source[start:end])+'\n'
           code=code.replace("OUT=Path('btc-minute4-yeet-results')", "OUT=Path('btc-minute4-snapshot-export')")
           anchor="base.to_csv(OUT/'market_features.csv',index=False); grid.to_csv(OUT/'simple_exit_grid.csv',index=False);"
-          replacement="snap.to_parquet(OUT/'snapshots.parquet',index=False,compression='zstd'); base.to_csv(OUT/'market_features.csv',index=False); grid.to_csv(OUT/'simple_exit_grid.csv',index=False);"
+          replacement="snap.to_parquet(OUT/'snapshots.parquet',index=False,compression='zstd'); snap.to_csv(OUT/'snapshots.csv.gz',index=False,compression='gzip'); base.to_csv(OUT/'market_features.csv',index=False); grid.to_csv(OUT/'simple_exit_grid.csv',index=False);"
           if anchor not in code: raise RuntimeError('snapshot export anchor missing')
           code=code.replace(anchor,replacement)
           Path('/tmp/export_snapshots.py').write_text(code)
