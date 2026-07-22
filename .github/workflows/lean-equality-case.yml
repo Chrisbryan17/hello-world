@@ -96,3 +96,10 @@ jobs:
             echo 'sorryAx dependency detected.' >&2
             exit 1
           fi
+      - name: Report successful verification
+        if: success()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment 35 --body "Lean equality-case verification passed for commit \`${GITHUB_SHA}\`: placeholder scan, \`lake build\`, both contract files, axiom printout, and explicit \`sorryAx\` rejection all succeeded."
