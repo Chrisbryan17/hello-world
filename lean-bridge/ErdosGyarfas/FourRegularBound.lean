@@ -43,8 +43,7 @@ theorem card_twoStepAt_eq_twelve
     exact (J.mem_neighborFinset x.1 v).mpr hxAdj.symm
   simp_rw [Finset.card_erase_of_mem (hvMem _),
     SimpleGraph.card_neighborFinset_eq_degree, hReg.degree_eq]
-  rw [hReg.degree_eq v]
-  norm_num
+  simp [hReg.degree_eq v]
 
 /-- Endpoint of a non-backtracking two-step walk, regarded as a vertex other
 than the starting point. -/
@@ -107,6 +106,7 @@ def neighborGraph
 instance instDecidableRelNeighborGraph
     (J : SimpleGraph V) [DecidableRel J.Adj] (v : V) :
     DecidableRel (neighborGraph J v).Adj := by
+  dsimp [neighborGraph]
   infer_instance
 
 @[simp]
