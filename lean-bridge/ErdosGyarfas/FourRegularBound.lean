@@ -98,4 +98,69 @@ theorem four_regular_noFourCycle_card_ge_thirteen
     simp
   omega
 
+/-- The graph induced by the neighbors of `v`. -/
+def neighborGraph
+    (J : SimpleGraph V) [DecidableRel J.Adj] (v : V) :
+    SimpleGraph (J.neighborFinset v) :=
+  J.comap Subtype.val
+
+instance instDecidableRelNeighborGraph
+    (J : SimpleGraph V) [DecidableRel J.Adj] (v : V) :
+    DecidableRel (neighborGraph J v).Adj := by
+  infer_instance
+
+@[simp]
+theorem neighborGraph_adj
+    (J : SimpleGraph V) [DecidableRel J.Adj] (v : V)
+    {x y : J.neighborFinset v} :
+    (neighborGraph J v).Adj x y ↔ J.Adj x.1 y.1 :=
+  Iff.rfl
+
+/-- A `C₄`-free graph induces maximum degree at most one on every open
+neighborhood. -/
+theorem neighborGraph_degree_le_one
+    (J : SimpleGraph V) [DecidableRel J.Adj]
+    (hC4 : NoFourCycle J) (v : V) (x : J.neighborFinset v) :
+    (neighborGraph J v).degree x ≤ 1 := by
+  classical
+  rw [SimpleGraph.degree, Finset.card_le_one]
+  intro y hy z hz
+  apply Subtype.ext
+  by_contra hyz
+  have hxyK : (neighborGraph J v).Adj x y :=
+    ((neighborGraph J v).mem_neighborFinset x y).mp hy
+  have hxzK : (neighborGraph J v).Adj x z :=
+    ((neighborGraph J v).mem_neighborFinset x z).mp hz
+  have hvy : J.Adj v y := (J.mem_neighborFinset v y.1).mp y.2
+  have hyx : J.Adj y x := (neighborGraph_adj J v).mp hxyK |>.symm
+  have hxz : J.Adj x z := (neighborGraph_adj J v).mp hxzK
+  have hzv : J.Adj z v := ((J.mem_neighborFinset v z.1).mp z.2).symm
+  have hvx : v ≠ (x : V) := ((J.mem_neighborFinset v x.1).mp x.2).ne
+  exact hC4 hvy hyx hxz hzv hvx hyz
+
+/-- The graph induced on a neighborhood has at most two edges. -/
+theorem neighborGraph_card_edges_le_two
+    (J : SimpleGraph V) [DecidableRel J.Adj]
+    (hReg : J.IsRegularOfDegree 4) (hC4 : NoFourCycle J) (v : V) :
+    #(neighborGraph J v).edgeFinset ≤ 2 := by
+  classical
+  let K : SimpleGraph (J.neighborFinset v) := neighborGraph J v
+  have hPointwise : ∀ x : J.neighborFinset v, K.degree x ≤ 1 := by
+    intro x
+    simpa [K] using neighborGraph_degree_le_one J hC4 v x
+  have hSum : ∑ x, K.degree x ≤ 4 := by
+    calc
+      ∑ x, K.degree x ≤ ∑ _x : J.neighborFinset v, 1 := by
+        apply Finset.sum_le_sum
+        intro x hx
+        exact hPointwise x
+      _ = Fintype.card (J.neighborFinset v) := by simp
+      _ = 4 := by
+        rw [Fintype.card_coe, SimpleGraph.card_neighborFinset_eq_degree,
+          hReg.degree_eq v]
+  have hHandshake : ∑ x, K.degree x = 2 * #K.edgeFinset :=
+    K.sum_degrees_eq_twice_card_edges
+  change #K.edgeFinset ≤ 2
+  omega
+
 end ErdosGyarfas
