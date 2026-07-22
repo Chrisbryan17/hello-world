@@ -126,10 +126,13 @@ theorem outsideTwoStepEndpoint_injective
     (hC4 : NoFourCycle J) :
     Function.Injective (outsideTwoStepEndpoint J v) := by
   intro p q hpq
+  have hraw : (outsideTwoStepEndpoint J v p : V) =
+      (outsideTwoStepEndpoint J v q : V) :=
+    congrArg Subtype.val hpq
   apply Subtype.ext
   apply twoStepEndpoint_injective J v hC4
   apply Subtype.ext
-  exact congrArg Subtype.val hpq
+  simpa [outsideTwoStepEndpoint] using hraw
 
 /-- Exterior two-step walks fit injectively into the vertices outside the
 closed neighborhood. -/
