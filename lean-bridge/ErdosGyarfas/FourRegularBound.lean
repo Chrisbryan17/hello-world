@@ -148,16 +148,16 @@ theorem neighborGraph_card_edges_le_two
   have hPointwise : ∀ x : J.neighborFinset v, K.degree x ≤ 1 := by
     intro x
     simpa [K] using neighborGraph_degree_le_one J hC4 v x
-  have hSum : ∑ x, K.degree x ≤ 4 := by
-    calc
-      ∑ x, K.degree x ≤ ∑ _x : J.neighborFinset v, 1 := by
-        apply Finset.sum_le_sum
-        intro x hx
-        exact hPointwise x
-      _ = Fintype.card (J.neighborFinset v) := by simp
-      _ = 4 := by
-        rw [Fintype.card_coe, SimpleGraph.card_neighborFinset_eq_degree,
-          hReg.degree_eq v]
+  have hCardN : Fintype.card (J.neighborFinset v) = 4 := by
+    rw [Fintype.card_coe, SimpleGraph.card_neighborFinset_eq_degree,
+      hReg.degree_eq v]
+  have hOnes : (∑ _x : J.neighborFinset v, 1) = 4 := by
+    simpa using hCardN
+  have hSumLe : ∑ x, K.degree x ≤ ∑ _x : J.neighborFinset v, 1 := by
+    apply Finset.sum_le_sum
+    intro x hx
+    exact hPointwise x
+  have hSum : ∑ x, K.degree x ≤ 4 := hSumLe.trans_eq hOnes
   have hHandshake : ∑ x, K.degree x = 2 * #K.edgeFinset :=
     K.sum_degrees_eq_twice_card_edges
   change #K.edgeFinset ≤ 2
