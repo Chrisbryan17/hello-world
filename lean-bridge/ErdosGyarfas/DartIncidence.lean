@@ -74,7 +74,7 @@ theorem card_commonDartsAt_eq_four
       Fintype.card {d : J.Dart // CommonNeighborRel J v d} := by
     simpa [commonDartsAt] using
       (Fintype.card_subtype (fun d : J.Dart => CommonNeighborRel J v d)).symm
-  rw [hSubtype, Fintype.card_congr (insideTwoStepEquivCommonDart J v)]
+  rw [hSubtype, ← Fintype.card_congr (insideTwoStepEquivCommonDart J v)]
   rw [card_insideTwoStepAt_eq_twice_local_edges,
     neighborGraph_card_edges_eq_two_of_card_le_fourteen J hReg hC4 hOrder v]
   norm_num
