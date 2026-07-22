@@ -1,0 +1,59 @@
+name: Inspect Trent BTC5m Steps
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - research-triggers/inspect-trent-btc5m-steps.txt
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      HF_XET_HIGH_PERFORMANCE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --quiet pandas pyarrow huggingface_hub hf_xet
+      - name: List BTC5m steps and inspect samples
+        run: |
+          mkdir -p trent-btc5m-inspect
+          python - <<'PY'
+          from pathlib import Path
+          import json, re
+          import pandas as pd
+          import pyarrow.parquet as pq
+          from huggingface_hub import HfApi, hf_hub_download
+
+          repo='trentmkelly/polymarket_crypto_derivatives'
+          api=HfApi()
+          files=api.list_repo_files(repo_id=repo,repo_type='dataset')
+          steps=sorted(p for p in files if p.startswith('btc5m_') and p.endswith('/steps.parquet'))
+          other=sorted(p for p in files if p.startswith('btc5m_') and (p.endswith('/events.parquet') or p.endswith('/book_levels.parquet')))
+          Path('trent-btc5m-inspect/steps_manifest.txt').write_text('\n'.join(steps)+'\n')
+          summary={'repo':repo,'all_files':len(files),'btc5m_steps':len(steps),'btc5m_other':len(other),'first':steps[:5],'last':steps[-5:]}
+          samples=[]
+          for path in ([steps[0],steps[len(steps)//2],steps[-1]] if steps else []):
+              local=hf_hub_download(repo_id=repo,repo_type='dataset',filename=path)
+              pf=pq.ParquetFile(local)
+              frame=pd.read_parquet(local)
+              samples.append({'path':path,'rows':len(frame),'columns':frame.columns.tolist(),'dtypes':{c:str(t) for c,t in frame.dtypes.items()},'head':frame.head(3).astype(str).to_dict('records'),'tail':frame.tail(3).astype(str).to_dict('records')})
+          summary['samples']=samples
+          Path('trent-btc5m-inspect/summary.json').write_text(json.dumps(summary,indent=2))
+          print(json.dumps(summary,indent=2))
+          if not steps:
+              raise RuntimeError('no BTC5m steps.parquet files found')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trent-btc5m-steps-inspect
+          path: trent-btc5m-inspect
+          retention-days: 2
+          if-no-files-found: error
