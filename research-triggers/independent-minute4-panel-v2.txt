@@ -1,0 +1,1 @@
+Run the corrected nested-path independent transfer extractor with true outcomes, strikes, latency, depth, and chronological post-entry paths.
