@@ -72,10 +72,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           {
-            echo 'Lean theorem build failed:'
+            echo 'Lean theorem build failed — concise diagnostics:'
             echo
             echo '```text'
-            tail -n 220 build.log
+            grep -nE -B 2 -A 35 '(^error:|unsolved goals|Some required targets)' build.log \
+              | tail -n 260 || tail -n 120 build.log
             echo '```'
           } >comment.md
           gh pr comment 35 --body-file comment.md
