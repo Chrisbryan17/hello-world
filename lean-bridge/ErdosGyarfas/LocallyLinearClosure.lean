@@ -26,7 +26,11 @@ theorem existsUnique_third_vertex_of_is3Clique
     ∃! z : V, z ∈ s ∧ z ≠ x ∧ z ≠ y := by
   classical
   have hPairSubset : ({x, y} : Finset V) ⊆ s := by
-    simp [hx, hy]
+    intro u hu
+    simp only [Finset.mem_insert, Finset.mem_singleton] at hu
+    rcases hu with rfl | rfl
+    · exact hx
+    · exact hy
   have hDiffCard : #(s \ {x, y}) = 1 := by
     rw [Finset.card_sdiff_of_subset hPairSubset, hs.card_eq,
       Finset.card_pair hxy]
@@ -40,7 +44,10 @@ theorem existsUnique_third_vertex_of_is3Clique
     exact ⟨hz.1, hz.2.1, hz.2.2⟩
   · intro w hw
     have hwDiff : w ∈ s \ {x, y} := by
-      simp [hw.1, hw.2.1, hw.2.2]
+      exact Finset.mem_sdiff.mpr
+        ⟨hw.1, by
+          simp only [Finset.mem_insert, Finset.mem_singleton, not_or]
+          exact ⟨hw.2.1, hw.2.2⟩⟩
     rw [hzEq] at hwDiff
     simpa using hwDiff
 
@@ -76,18 +83,33 @@ theorem edgeDisjointTriangles_of_noFourCycle
     have hle := card_commonNeighborsOfDart_le_one J hC4 d
     rw [Finset.card_le_one] at hle
     exact hle z hzCommon w hwCommon
+  have hxNot : x ∉ ({y, z} : Finset V) := by
+    intro hxmem
+    simp only [Finset.mem_insert, Finset.mem_singleton] at hxmem
+    rcases hxmem with hxeq | hxeq
+    · exact hxy hxeq
+    · exact hz.2.1 hxeq.symm
+  have hyNot : y ∉ ({z} : Finset V) := by
+    intro hymem
+    have hyz : y = z := by simpa using hymem
+    exact hz.2.2 hyz.symm
   have hTripleCard : #({x, y, z} : Finset V) = 3 := by
-    simp [hxy, hz.2.1, hz.2.2]
+    rw [Finset.card_insert_of_notMem hxNot,
+      Finset.card_insert_of_notMem hyNot, Finset.card_singleton]
   have hsTriple : s = {x, y, z} := by
     symm
     apply Finset.eq_of_subset_of_card_le
-    · simp [hxs, hys, hz.1]
+    · rw [Finset.insert_subset_iff, Finset.insert_subset_iff,
+        Finset.singleton_subset_iff]
+      exact ⟨hxs, hys, hz.1⟩
     · rw [hTripleCard, hsClique.card_eq]
   have htTriple : t = {x, y, z} := by
     subst w
     symm
     apply Finset.eq_of_subset_of_card_le
-    · simp [hxt, hyt, hw.1]
+    · rw [Finset.insert_subset_iff, Finset.insert_subset_iff,
+        Finset.singleton_subset_iff]
+      exact ⟨hxt, hyt, hw.1⟩
     · rw [hTripleCard, htClique.card_eq]
   exact hst (hsTriple.trans htTriple.symm)
 
