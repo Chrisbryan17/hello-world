@@ -1,0 +1,436 @@
+name: BTC Minute4 Loss Detector Research
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - research-triggers/btc-minute4-yeet.txt
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      PYTHONHASHSEED: '17'
+      HF_XET_HIGH_PERFORMANCE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: python -m pip install --quiet pandas numpy pyarrow scikit-learn huggingface_hub hf_xet
+      - name: Run causal loss-detector and yeet-exit study
+        run: |
+          cat > /tmp/analyze.py <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import math
+          from dataclasses import dataclass
+          from pathlib import Path
+
+          import numpy as np
+          import pandas as pd
+          import pyarrow.parquet as pq
+          from huggingface_hub import snapshot_download
+          from sklearn.linear_model import LogisticRegression
+          from sklearn.metrics import roc_auc_score, precision_recall_curve
+          from sklearn.pipeline import Pipeline
+          from sklearn.preprocessing import StandardScaler
+
+          OUT = Path('btc-minute4-yeet-results')
+          DATA = Path('.cache/kacho-btc')
+          OUT.mkdir(parents=True, exist_ok=True)
+          DATA.mkdir(parents=True, exist_ok=True)
+          RNG = np.random.default_rng(17)
+
+          def fee(p: float) -> float:
+              p = float(np.clip(p, 0.0, 1.0))
+              return 0.07 * p * (1.0 - p)
+
+          def normalize_outcome(v) -> int | None:
+              s = str(v).strip().lower()
+              if s in {'up','yes','1','true'}:
+                  return 1
+              if s in {'down','no','0','false'}:
+                  return 0
+              return None
+
+          # Minimal execution tests before processing public data.
+          assert abs(fee(0.5) - 0.0175) < 1e-12
+          assert normalize_outcome('Up') == 1 and normalize_outcome('DOWN') == 0
+
+          snapshot_download(
+              repo_id='kachoio/polymarket-5-minute-crypto-up-down-markets',
+              repo_type='dataset',
+              local_dir=str(DATA),
+              allow_patterns=['btc_markets.parquet','btc_ticks.parquet'],
+          )
+          markets_path = next(DATA.rglob('btc_markets.parquet'))
+          ticks_path = next(DATA.rglob('btc_ticks.parquet'))
+
+          markets = pd.read_parquet(markets_path)
+          cid_col = 'condition_id' if 'condition_id' in markets else 'conditionId'
+          start_col = next(c for c in ['market_start','start_time','startDate','start'] if c in markets)
+          out_col = next(c for c in ['outcome','result','winner'] if c in markets)
+          markets = markets[[cid_col,start_col,out_col]].rename(columns={cid_col:'condition_id',start_col:'market_start',out_col:'outcome'})
+          markets['market_start'] = pd.to_datetime(markets['market_start'], utc=True, errors='coerce')
+          markets['y_up'] = markets['outcome'].map(normalize_outcome)
+          markets = markets.dropna(subset=['condition_id','market_start','y_up']).drop_duplicates('condition_id')
+          markets['y_up'] = markets['y_up'].astype(int)
+          markets['start_epoch'] = (markets['market_start'].astype('int64') // 1_000_000_000).astype('int64')
+
+          schema = pq.ParquetFile(ticks_path).schema.names
+          wanted = [c for c in ['condition_id','t','bu','au','bd','ad','du','dd'] if c in schema]
+          ticks = pd.read_parquet(ticks_path, columns=wanted)
+          ticks = ticks.merge(markets[['condition_id','start_epoch']], on='condition_id', how='inner')
+          ticks['rel_t'] = pd.to_numeric(ticks['t'], errors='coerce') - ticks['start_epoch']
+          ticks = ticks.loc[ticks['rel_t'].between(205, 299)].copy()
+          ticks['rel_t'] = ticks['rel_t'].round().astype(int)
+          ticks = ticks.sort_values(['condition_id','rel_t','t']).drop_duplicates(['condition_id','rel_t'], keep='last')
+          for c in ['bu','au','bd','ad','du','dd']:
+              if c in ticks:
+                  ticks[c] = pd.to_numeric(ticks[c], errors='coerce')
+
+          market_meta = markets.set_index('condition_id')[['market_start','y_up']]
+
+          def sane_row(r) -> bool:
+              vals = [r.get('bu'),r.get('au'),r.get('bd'),r.get('ad')]
+              if not all(np.isfinite(v) for v in vals):
+                  return False
+              bu,au,bd,ad = map(float, vals)
+              return 0 < bu <= au < 1 and 0 < bd <= ad < 1
+
+          records = []
+          snapshots = []
+          path_store = {}
+
+          for cid, g0 in ticks.groupby('condition_id', sort=False):
+              if cid not in market_meta.index:
+                  continue
+              g = g0.sort_values('rel_t').copy()
+              g = g.loc[g.apply(sane_row, axis=1)]
+              if g.empty:
+                  continue
+              signal_rows = g.loc[g['rel_t'] <= 240]
+              entry_rows = g.loc[g['rel_t'] >= 241]
+              if signal_rows.empty or entry_rows.empty:
+                  continue
+              sig = signal_rows.iloc[-1]
+              ent = entry_rows.iloc[0]
+              mid_up = (float(sig.bu) + float(sig.au))/2
+              mid_down = (float(sig.bd) + float(sig.ad))/2
+              side_up = mid_up >= mid_down
+              side = 'Up' if side_up else 'Down'
+              leader_mid = mid_up if side_up else mid_down
+              entry_ask = float(ent.au if side_up else ent.ad)
+              entry_bid = float(ent.bu if side_up else ent.bd)
+              entry_spread = entry_ask - entry_bid
+              y_up = int(market_meta.loc[cid,'y_up'])
+              won = bool(y_up == int(side_up))
+
+              path = g.loc[g['rel_t'] >= int(ent.rel_t)].copy()
+              path['fav_bid'] = path['bu'] if side_up else path['bd']
+              path['fav_ask'] = path['au'] if side_up else path['ad']
+              path['fav_mid'] = (path['fav_bid'] + path['fav_ask'])/2
+              path['fav_spread'] = path['fav_ask'] - path['fav_bid']
+              path = path.loc[(path['fav_bid'] > 0) & (path['fav_bid'] <= path['fav_ask']) & (path['fav_ask'] < 1)].copy()
+              if path.empty:
+                  continue
+
+              hist = signal_rows.copy()
+              hist['fav_mid'] = (hist['bu']+hist['au'])/2 if side_up else (hist['bd']+hist['ad'])/2
+              def lag_mid(seconds):
+                  h = hist.loc[hist['rel_t'] <= 240-seconds]
+                  return float(h.iloc[-1].fav_mid) if len(h) else np.nan
+              mom = {f'mom{s}': leader_mid-lag_mid(s) for s in [1,3,5,10,20,30]}
+              tail10 = hist.loc[hist['rel_t'] >= 230,'fav_mid'].to_numpy(float)
+              tail30 = hist.loc[hist['rel_t'] >= 210,'fav_mid'].to_numpy(float)
+              vol10 = float(np.std(np.diff(tail10))) if len(tail10)>2 else 0.0
+              vol30 = float(np.std(np.diff(tail30))) if len(tail30)>2 else 0.0
+              dd10 = float(np.max(tail10)-tail10[-1]) if len(tail10) else 0.0
+              dd30 = float(np.max(tail30)-tail30[-1]) if len(tail30) else 0.0
+              depth_up = float(sig.du) if 'du' in sig and np.isfinite(sig.du) else np.nan
+              depth_down = float(sig.dd) if 'dd' in sig and np.isfinite(sig.dd) else np.nan
+              depth_imb = (depth_up-depth_down)/(depth_up+depth_down) if np.isfinite(depth_up+depth_down) and depth_up+depth_down>0 else 0.0
+              if not side_up:
+                  depth_imb = -depth_imb
+
+              rec = {
+                  'condition_id':str(cid), 'market_start':market_meta.loc[cid,'market_start'],
+                  'side':side, 'side_up':int(side_up), 'won':int(won), 'leader_mid':leader_mid,
+                  'signal_spread':float((sig.au-sig.bu) if side_up else (sig.ad-sig.bd)),
+                  'entry_t':int(ent.rel_t), 'entry_ask':entry_ask, 'entry_bid':entry_bid,
+                  'entry_spread':entry_spread, 'vol10':vol10, 'vol30':vol30,
+                  'drawdown10':dd10, 'drawdown30':dd30, 'depth_imb':depth_imb,
+                  **mom,
+              }
+              records.append(rec)
+              path_store[str(cid)] = path[['rel_t','fav_bid','fav_ask','fav_mid','fav_spread']].copy()
+
+              mids = path.set_index('rel_t')['fav_mid']
+              bids = path.set_index('rel_t')['fav_bid']
+              spreads = path.set_index('rel_t')['fav_spread']
+              times = sorted(path.rel_t.unique())
+              max_mid = -np.inf
+              for tt in times:
+                  if tt > 295:
+                      break
+                  current_mid = float(mids.loc[tt])
+                  max_mid = max(max_mid,current_mid)
+                  def past_mid(k):
+                      prior = [x for x in times if x <= tt-k]
+                      return float(mids.loc[prior[-1]]) if prior else current_mid
+                  snapshots.append({
+                      'condition_id':str(cid), 'market_start':market_meta.loc[cid,'market_start'], 't':int(tt),
+                      'won':int(won), 'loss':int(not won), 'side_up':int(side_up),
+                      'entry_ask':entry_ask, 'entry_leader_mid':leader_mid, 'entry_spread':entry_spread,
+                      'current_bid':float(bids.loc[tt]), 'current_mid':current_mid,
+                      'current_spread':float(spreads.loc[tt]), 'bid_from_entry':float(bids.loc[tt]-entry_ask),
+                      'mid_from_entry':current_mid-leader_mid, 'mom1_live':current_mid-past_mid(1),
+                      'mom3_live':current_mid-past_mid(3), 'mom5_live':current_mid-past_mid(5),
+                      'mom10_live':current_mid-past_mid(10), 'trail_drawdown':max_mid-current_mid,
+                      'seconds_left':300-int(tt), 'vol10':vol10, 'mom5_entry':mom['mom5'],
+                      'mom10_entry':mom['mom10'], 'drawdown10_entry':dd10, 'depth_imb':depth_imb,
+                  })
+
+          base = pd.DataFrame(records).sort_values('market_start').reset_index(drop=True)
+          snap = pd.DataFrame(snapshots).sort_values(['market_start','condition_id','t']).reset_index(drop=True)
+          if len(base) < 1000:
+              raise RuntimeError(f'insufficient market panel: {len(base)}')
+
+          max_date = base.market_start.max().floor('D')
+          holdout_start = max_date - pd.Timedelta(days=6)
+          validation_start = holdout_start - pd.Timedelta(days=7)
+          base['split'] = np.where(base.market_start>=holdout_start,'holdout',np.where(base.market_start>=validation_start,'validation','train'))
+          split_map = base.set_index('condition_id')['split']
+          snap['split'] = snap.condition_id.map(split_map)
+
+          ENTRY_SLIP = 0.01
+          EXIT_SLIP = 0.01
+          def entry_cost(p):
+              q = min(0.99,max(0.01,float(p)+ENTRY_SLIP))
+              return q + fee(q)
+          def exit_net(p):
+              q = min(0.99,max(0.0,float(p)-EXIT_SLIP))
+              return max(0.0,q-fee(q))
+
+          def next_exec(path, trigger_t):
+              q = path.loc[path.rel_t >= trigger_t+1]
+              return None if q.empty else q.iloc[0]
+
+          def simulate_row(r, kind='hold', stop=0.10, trail=0.08, mid_floor=0.60, time_exit=295, trigger_time=None):
+              cost = entry_cost(r.entry_ask)
+              path = path_store[str(r.condition_id)]
+              peak = -np.inf
+              trigger = None
+              reason = None
+              for _,q in path.iterrows():
+                  tt=int(q.rel_t); bid=float(q.fav_bid); mid=float(q.fav_mid)
+                  peak=max(peak,mid)
+                  if tt <= int(r.entry_t):
+                      continue
+                  if trigger_time is not None and tt >= trigger_time:
+                      trigger=tt; reason='model'; break
+                  hit=False
+                  if kind in {'stop','combined'} and bid <= float(r.entry_ask)-stop:
+                      hit=True; reason='hard_stop'
+                  if not hit and kind in {'trail','combined'} and mid <= peak-trail:
+                      hit=True; reason='trailing_stop'
+                  if not hit and kind in {'floor','combined'} and mid <= mid_floor:
+                      hit=True; reason='mid_floor'
+                  if hit:
+                      trigger=tt; break
+                  if time_exit is not None and tt >= time_exit:
+                      trigger=tt; reason='time_exit'; break
+              if trigger is not None:
+                  ex=next_exec(path,trigger)
+                  if ex is not None:
+                      return exit_net(float(ex.fav_bid))/cost, int(ex.rel_t), reason
+              return ((1.0/cost) if bool(r.won) else 0.0), 300, 'resolution'
+
+          # Baseline and simple exit grid. Geometry is selected on train+validation only.
+          grid=[]
+          configs=[]
+          for time_exit in [270,280,290,295]:
+              configs.append(('time',None,None,None,time_exit))
+          for stop in [0.03,0.05,0.08,0.10,0.15,0.20]:
+              for time_exit in [290,295]:
+                  configs.append(('stop',stop,None,None,time_exit))
+          for trail in [0.03,0.05,0.08,0.10,0.15]:
+              for time_exit in [290,295]:
+                  configs.append(('trail',None,trail,None,time_exit))
+          for stop in [0.05,0.08,0.10,0.15]:
+              for trail in [0.05,0.08,0.10]:
+                  for floor in [0.50,0.55,0.60,0.65,0.70]:
+                      for time_exit in [290,295]:
+                          configs.append(('combined',stop,trail,floor,time_exit))
+
+          def summarize_mult(frame,mults):
+              x=np.asarray(mults,float)
+              # all-in terminal wealth; zero means ruin. Also report arithmetic and capped log-growth.
+              terminal=90.0
+              peak=terminal; maxdd=0.0
+              for m in x:
+                  terminal*=m
+                  peak=max(peak,terminal)
+                  maxdd=max(maxdd,1-terminal/peak if peak>0 else 1)
+              positive=(x>1).mean() if len(x) else np.nan
+              return {'n':len(x),'mean_multiple':float(np.mean(x)),'median_multiple':float(np.median(x)),
+                      'positive_rate':float(positive),'terminal_90':float(terminal),'max_drawdown':float(maxdd),
+                      'mean_log_multiple':float(np.mean(np.log(np.maximum(x,1e-12))))}
+
+          for cfg in configs:
+              kind,stop,trail,floor,time_exit=cfg
+              row={'kind':kind,'stop':stop,'trail':trail,'mid_floor':floor,'time_exit':time_exit}
+              for split in ['train','validation','holdout']:
+                  f=base.loc[base.split==split]
+                  mult=[]
+                  for r in f.itertuples(index=False):
+                      m,_,_=simulate_row(r,kind=kind,stop=stop or 0.1,trail=trail or 0.08,mid_floor=floor or 0.6,time_exit=time_exit)
+                      mult.append(m)
+                  s=summarize_mult(f,mult)
+                  row.update({f'{split}_{k}':v for k,v in s.items()})
+              grid.append(row)
+          grid=pd.DataFrame(grid)
+          eligible=grid.loc[(grid.train_mean_multiple>1)&(grid.validation_mean_multiple>1)&(grid.validation_n>=500)].copy()
+          if eligible.empty:
+              best=grid.sort_values(['validation_mean_multiple','train_mean_multiple'],ascending=False).iloc[0]
+          else:
+              # prioritize robust mean and drawdown, not terminal jackpot.
+              eligible['score']=eligible.train_mean_multiple+eligible.validation_mean_multiple-0.25*eligible.validation_max_drawdown
+              best=eligible.sort_values('score',ascending=False).iloc[0]
+
+          # Pre-entry veto model: can we identify losers before buying?
+          pre_features=['leader_mid','signal_spread','entry_spread','mom1','mom3','mom5','mom10','mom20','mom30','vol10','vol30','drawdown10','drawdown30','depth_imb','side_up']
+          pre_train=base.loc[base.split=='train'].dropna(subset=pre_features)
+          pre_val=base.loc[base.split=='validation'].dropna(subset=pre_features)
+          pre_hold=base.loc[base.split=='holdout'].dropna(subset=pre_features)
+          pre_model=Pipeline([('scale',StandardScaler()),('lr',LogisticRegression(max_iter=1000,class_weight='balanced',C=0.5))])
+          pre_model.fit(pre_train[pre_features],1-pre_train.won)
+          pre_auc={}
+          for name,f in [('train',pre_train),('validation',pre_val),('holdout',pre_hold)]:
+              p=pre_model.predict_proba(f[pre_features])[:,1]
+              pre_auc[name]=float(roc_auc_score(1-f.won,p))
+              base.loc[f.index,'pre_loss_prob']=p
+
+          # Sequential loss model. Train on causal snapshots, threshold on validation only.
+          live_features=['current_bid','current_mid','current_spread','bid_from_entry','mid_from_entry','mom1_live','mom3_live','mom5_live','mom10_live','trail_drawdown','seconds_left','entry_ask','entry_leader_mid','entry_spread','side_up','vol10','mom5_entry','mom10_entry','drawdown10_entry','depth_imb']
+          st=snap.loc[snap.split=='train'].dropna(subset=live_features)
+          sv=snap.loc[snap.split=='validation'].dropna(subset=live_features)
+          sh=snap.loc[snap.split=='holdout'].dropna(subset=live_features)
+          live_model=Pipeline([('scale',StandardScaler()),('lr',LogisticRegression(max_iter=1000,class_weight='balanced',C=0.35))])
+          live_model.fit(st[live_features],st.loss)
+          for f in [st,sv,sh]:
+              snap.loc[f.index,'live_loss_prob']=live_model.predict_proba(f[live_features])[:,1]
+          live_auc={name:float(roc_auc_score(f.loss,snap.loc[f.index,'live_loss_prob'])) for name,f in [('train',st),('validation',sv),('holdout',sh)]}
+
+          # Test thresholds and one/two consecutive alarm requirement; force a pre-expiry exit at 295.
+          model_grid=[]
+          for threshold in [0.25,0.35,0.45,0.55,0.65,0.75,0.85]:
+              for consecutive in [1,2,3]:
+                  row={'threshold':threshold,'consecutive':consecutive}
+                  for split in ['train','validation','holdout']:
+                      fbase=base.loc[base.split==split]
+                      mult=[]; caught=0; losses=int((fbase.won==0).sum()); exits=0
+                      for r in fbase.itertuples(index=False):
+                          ss=snap.loc[(snap.condition_id==str(r.condition_id)) & snap.live_loss_prob.notna()].sort_values('t')
+                          run=0; trig=None
+                          for q in ss.itertuples(index=False):
+                              run=run+1 if q.live_loss_prob>=threshold else 0
+                              if run>=consecutive:
+                                  trig=int(q.t); break
+                          m,_,reason=simulate_row(r,kind='hold',time_exit=295,trigger_time=trig)
+                          mult.append(m)
+                          exits += int(reason!='resolution')
+                          caught += int((not r.won) and reason!='resolution')
+                      s=summarize_mult(fbase,mult)
+                      row.update({f'{split}_{k}':v for k,v in s.items()})
+                      row[f'{split}_losses']=losses
+                      row[f'{split}_caught_losses']=caught
+                      row[f'{split}_exit_rate']=exits/len(fbase) if len(fbase) else np.nan
+                  model_grid.append(row)
+          model_grid=pd.DataFrame(model_grid)
+          model_eligible=model_grid.loc[(model_grid.train_mean_multiple>1)&(model_grid.validation_mean_multiple>1)].copy()
+          if model_eligible.empty:
+              best_model=model_grid.sort_values(['validation_mean_multiple','train_mean_multiple'],ascending=False).iloc[0]
+          else:
+              model_eligible['score']=model_eligible.train_mean_multiple+model_eligible.validation_mean_multiple-0.25*model_eligible.validation_max_drawdown
+              best_model=model_eligible.sort_values('score',ascending=False).iloc[0]
+
+          # Pre-entry veto threshold paired with best simple exit: skip high predicted-loss markets.
+          veto_grid=[]
+          for cutoff in [0.05,0.10,0.15,0.20,0.25,0.30,0.40,0.50]:
+              row={'pre_loss_prob_max':cutoff}
+              for split in ['train','validation','holdout']:
+                  f=base.loc[(base.split==split)&(base.pre_loss_prob<=cutoff)].copy()
+                  mult=[]
+                  for r in f.itertuples(index=False):
+                      m,_,_=simulate_row(r,kind=str(best.kind),stop=float(best.stop) if pd.notna(best.stop) else 0.1,trail=float(best.trail) if pd.notna(best.trail) else 0.08,mid_floor=float(best.mid_floor) if pd.notna(best.mid_floor) else 0.6,time_exit=int(best.time_exit))
+                      mult.append(m)
+                  s=summarize_mult(f,mult) if len(f) else {k:np.nan for k in ['n','mean_multiple','median_multiple','positive_rate','terminal_90','max_drawdown','mean_log_multiple']}
+                  row.update({f'{split}_{k}':v for k,v in s.items()})
+              veto_grid.append(row)
+          veto_grid=pd.DataFrame(veto_grid)
+
+          # Exact first BTC streak path under hold, best simple exit, and best sequential model.
+          first_rows=base.sort_values('market_start').head(30)
+          first_path=[]
+          bank={'hold':90.0,'simple_exit':90.0,'loss_model':90.0}
+          th=float(best_model.threshold); cons=int(best_model.consecutive)
+          for i,r in enumerate(first_rows.itertuples(index=False),start=1):
+              hold_m=((1/entry_cost(r.entry_ask)) if r.won else 0.0)
+              simple_m, simple_t, simple_reason=simulate_row(r,kind=str(best.kind),stop=float(best.stop) if pd.notna(best.stop) else 0.1,trail=float(best.trail) if pd.notna(best.trail) else 0.08,mid_floor=float(best.mid_floor) if pd.notna(best.mid_floor) else 0.6,time_exit=int(best.time_exit))
+              ss=snap.loc[(snap.condition_id==str(r.condition_id)) & snap.live_loss_prob.notna()].sort_values('t')
+              run=0; trig=None
+              for q in ss.itertuples(index=False):
+                  run=run+1 if q.live_loss_prob>=th else 0
+                  if run>=cons: trig=int(q.t); break
+              model_m, model_t, model_reason=simulate_row(r,kind='hold',time_exit=295,trigger_time=trig)
+              for name,m in [('hold',hold_m),('simple_exit',simple_m),('loss_model',model_m)]:
+                  bank[name]*=m
+              first_path.append({'trade':i,'market_start':r.market_start,'side':r.side,'won':r.won,'entry_ask':r.entry_ask,
+                                 'hold_multiple':hold_m,'hold_bankroll':bank['hold'],
+                                 'simple_multiple':simple_m,'simple_exit_t':simple_t,'simple_reason':simple_reason,'simple_bankroll':bank['simple_exit'],
+                                 'model_multiple':model_m,'model_exit_t':model_t,'model_reason':model_reason,'model_bankroll':bank['loss_model']})
+
+          # Save detailed artifacts.
+          base.to_csv(OUT/'market_features.csv',index=False)
+          grid.to_csv(OUT/'simple_exit_grid.csv',index=False)
+          model_grid.to_csv(OUT/'sequential_model_grid.csv',index=False)
+          veto_grid.to_csv(OUT/'pre_entry_veto_grid.csv',index=False)
+          pd.DataFrame(first_path).to_csv(OUT/'first_30_all_in_paths.csv',index=False)
+          best.to_frame().T.to_csv(OUT/'best_simple_exit.csv',index=False)
+          best_model.to_frame().T.to_csv(OUT/'best_sequential_model.csv',index=False)
+
+          summary={
+              'markets':int(len(base)), 'snapshots':int(len(snap)),
+              'date_min':str(base.market_start.min()), 'date_max':str(base.market_start.max()),
+              'validation_start':str(validation_start), 'holdout_start':str(holdout_start),
+              'execution':{'entry_delay_seconds':1,'entry_slippage_cents':1,'exit_trigger_delay_seconds':1,'exit_slippage_cents':1,'forced_exit_second':295},
+              'pre_entry_auc':pre_auc,'sequential_auc':live_auc,
+              'best_simple_exit':best.replace({np.nan:None}).to_dict(),
+              'best_sequential_model':best_model.replace({np.nan:None}).to_dict(),
+              'first_path_final_bankrolls':bank,
+          }
+          (OUT/'summary.json').write_text(json.dumps(summary,indent=2,default=str))
+          manifest=[]
+          for p in sorted(OUT.iterdir()):
+              if p.is_file():
+                  manifest.append({'file':p.name,'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+          (OUT/'MANIFEST.json').write_text(json.dumps(manifest,indent=2))
+          print(json.dumps(summary,indent=2,default=str))
+          PY
+          python /tmp/analyze.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: btc-minute4-loss-detector-results
+          path: btc-minute4-yeet-results
+          retention-days: 2
+          if-no-files-found: error
