@@ -159,6 +159,8 @@ theorem card_commonNeighborsOfDart_eq_one
     simpa using Finset.sum_erase_add (s := (Finset.univ : Finset J.Dart))
       (f := f) hdMem
   have hfdLe : f d ≤ 1 := hLe d
+  have hDartPos : 0 < Fintype.card J.Dart :=
+    Fintype.card_pos_iff.mpr ⟨d⟩
   have hfdEq : f d = 1 := by
     omega
   simpa [f] using hfdEq
