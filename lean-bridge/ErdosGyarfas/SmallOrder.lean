@@ -84,4 +84,90 @@ theorem card_outsideTwoStepAt_eq_total_sub_inside
     (Fintype.card_subtype_compl
       (fun p : TwoStepAt J v => p.2.1 ∈ J.neighborFinset v))
 
+/-- Vertices outside the closed neighborhood of `v`. -/
+def outsideVertices
+    (J : SimpleGraph V) [DecidableRel J.Adj] (v : V) : Finset V :=
+  (Finset.univ.erase v) \ J.neighborFinset v
+
+/-- Every neighbor of `v` belongs to `univ.erase v`. -/
+theorem neighborFinset_subset_univ_erase
+    (J : SimpleGraph V) [DecidableRel J.Adj] (v : V) :
+    J.neighborFinset v ⊆ Finset.univ.erase v := by
+  intro x hx
+  have hvx : J.Adj v x := (J.mem_neighborFinset v x).mp hx
+  exact Finset.mem_erase.mpr ⟨hvx.ne.symm, Finset.mem_univ x⟩
+
+/-- In a four-regular graph, precisely `|V| - 5` vertices lie outside the
+closed neighborhood of a fixed vertex. -/
+theorem card_outsideVertices
+    (J : SimpleGraph V) [DecidableRel J.Adj]
+    (hReg : J.IsRegularOfDegree 4) (v : V) :
+    #(outsideVertices J v) = Fintype.card V - 5 := by
+  rw [outsideVertices,
+    Finset.card_sdiff_of_subset (neighborFinset_subset_univ_erase J v),
+    Finset.card_erase_of_mem (Finset.mem_univ v), Finset.card_univ,
+    SimpleGraph.card_neighborFinset_eq_degree, hReg.degree_eq v]
+  omega
+
+/-- Endpoint of an exterior two-step walk, placed in the finite set outside the
+closed neighborhood. -/
+def outsideTwoStepEndpoint
+    (J : SimpleGraph V) [DecidableRel J.Adj] (v : V) :
+    OutsideTwoStepAt J v → outsideVertices J v
+  | p =>
+      ⟨p.1.2.1, Finset.mem_sdiff.mpr
+        ⟨Finset.mem_erase.mpr
+          ⟨(Finset.mem_erase.mp p.1.2.2).1, Finset.mem_univ _⟩,
+          p.2⟩⟩
+
+/-- `C₄`-freeness makes the exterior endpoint map injective. -/
+theorem outsideTwoStepEndpoint_injective
+    (J : SimpleGraph V) [DecidableRel J.Adj] (v : V)
+    (hC4 : NoFourCycle J) :
+    Function.Injective (outsideTwoStepEndpoint J v) := by
+  intro p q hpq
+  apply Subtype.ext
+  apply twoStepEndpoint_injective J v hC4
+  apply Subtype.ext
+  exact congrArg Subtype.val hpq
+
+/-- Exterior two-step walks fit injectively into the vertices outside the
+closed neighborhood. -/
+theorem card_outsideTwoStepAt_le
+    (J : SimpleGraph V) [DecidableRel J.Adj]
+    (hReg : J.IsRegularOfDegree 4) (hC4 : NoFourCycle J) (v : V) :
+    Fintype.card (OutsideTwoStepAt J v) ≤ Fintype.card V - 5 := by
+  have hCard := Fintype.card_le_of_injective (outsideTwoStepEndpoint J v)
+    (outsideTwoStepEndpoint_injective J v hC4)
+  rw [Fintype.card_coe, card_outsideVertices J hReg v] at hCard
+  exact hCard
+
+/-- At order at most fourteen, at least three of the twelve two-step walks from
+each vertex end back inside its neighborhood. -/
+theorem three_le_card_insideTwoStepAt
+    (J : SimpleGraph V) [DecidableRel J.Adj]
+    (hReg : J.IsRegularOfDegree 4) (hC4 : NoFourCycle J)
+    (hOrder : Fintype.card V ≤ 14) (v : V) :
+    3 ≤ Fintype.card (InsideTwoStepAt J v) := by
+  have hOutside := card_outsideTwoStepAt_le J hReg hC4 v
+  have hTotal := card_twoStepAt_eq_twelve J hReg v
+  have hPartition := card_outsideTwoStepAt_eq_total_sub_inside J v
+  have hInsideLe : Fintype.card (InsideTwoStepAt J v) ≤
+      Fintype.card (TwoStepAt J v) :=
+    Fintype.card_subtype_le
+      (fun p : TwoStepAt J v => p.2.1 ∈ J.neighborFinset v)
+  omega
+
+/-- Consequently, every neighborhood contains exactly two edges whenever a
+four-regular `C₄`-free graph has order at most fourteen. -/
+theorem neighborGraph_card_edges_eq_two_of_card_le_fourteen
+    (J : SimpleGraph V) [DecidableRel J.Adj]
+    (hReg : J.IsRegularOfDegree 4) (hC4 : NoFourCycle J)
+    (hOrder : Fintype.card V ≤ 14) (v : V) :
+    #(neighborGraph J v).edgeFinset = 2 := by
+  have hInside := three_le_card_insideTwoStepAt J hReg hC4 hOrder v
+  have hDarts := card_insideTwoStepAt_eq_twice_local_edges J v
+  have hUpper := neighborGraph_card_edges_le_two J hReg hC4 v
+  omega
+
 end ErdosGyarfas
