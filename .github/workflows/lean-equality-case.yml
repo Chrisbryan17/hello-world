@@ -71,12 +71,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          sed -E 's/\x1B\[[0-9;]*[mK]//g' build.log > build-clean.log
+          awk '
+            /^error:/ {remaining=24}
+            /unsolved goals/ {if (remaining < 40) remaining=40}
+            /^Some required targets/ {if (remaining < 8) remaining=8}
+            remaining > 0 {print; remaining--}
+          ' build-clean.log > diagnostics.log
+          if [ ! -s diagnostics.log ]; then
+            tail -n 100 build-clean.log > diagnostics.log
+          fi
           {
-            echo 'Lean theorem build failed — concise diagnostics:'
+            echo 'Lean theorem build failed — exact diagnostics:'
             echo
             echo '```text'
-            grep -nE -B 2 -A 35 '(^error:|unsolved goals|Some required targets)' build.log \
-              | tail -n 260 || tail -n 120 build.log
+            tail -n 220 diagnostics.log
             echo '```'
           } >comment.md
           gh pr comment 35 --body-file comment.md
