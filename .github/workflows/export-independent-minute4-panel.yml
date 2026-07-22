@@ -1,0 +1,123 @@
+name: Export Independent BTC Minute4 Panel
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - research-triggers/independent-minute4-panel.txt
+  workflow_dispatch:
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      HF_XET_HIGH_PERFORMANCE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --quiet pandas numpy pyarrow huggingface_hub hf_xet
+      - name: Build independent minute-four feature and path panels
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json, hashlib
+          import numpy as np
+          import pandas as pd
+          from huggingface_hub import snapshot_download
+
+          out=Path('independent-minute4-panel'); data=Path('.cache/kinzik')
+          out.mkdir(parents=True,exist_ok=True); data.mkdir(parents=True,exist_ok=True)
+          snapshot_download(repo_id='kinzikdza/polymarket-updown-microstructure',repo_type='dataset',local_dir=str(data),allow_patterns=['*.parquet'])
+          slots_path=next(data.rglob('slots.parquet'))
+          books_path=next(data.rglob('book_snapshots.parquet'))
+          slots=pd.read_parquet(slots_path)
+          books=pd.read_parquet(books_path)
+          slots['coin']=slots.coin.astype(str).str.upper()
+          btc=slots.loc[slots.coin.eq('BTC')].copy()
+          if 'duration' in btc:
+              btc=btc.loc[pd.to_numeric(btc.duration,errors='coerce').isin([300,5,5.0]) | btc.duration.astype(str).str.contains('5',case=False,na=False)]
+          btc=btc.drop_duplicates('condition_id').set_index('condition_id')
+          books=books.loc[books.condition_id.isin(btc.index)].copy()
+          numeric=['ts_ms','secs_to_close','yes_bid','yes_ask','yes_bid_size','yes_ask_size','no_bid','no_ask','no_bid_size','no_ask_size','spot','ds_spot']
+          for c in numeric:
+              if c in books: books[c]=pd.to_numeric(books[c],errors='coerce')
+          sane=(books.yes_bid.gt(0)&books.yes_ask.lt(1)&books.no_bid.gt(0)&books.no_ask.lt(1)&books.yes_bid.le(books.yes_ask)&books.no_bid.le(books.no_ask))
+          books=books.loc[sane].sort_values(['condition_id','ts_ms'])
+
+          def outcome_up(v):
+              s=str(v).strip().lower()
+              if s in {'yes','up','1','true'}: return 1
+              if s in {'no','down','0','false'}: return 0
+              return np.nan
+
+          rows=[]; paths=[]; exclusions={}
+          for cid,g in books.groupby('condition_id',sort=False):
+              if cid not in btc.index: continue
+              slot=btc.loc[cid]
+              y=outcome_up(slot.get('resolved_side'))
+              if not np.isfinite(y): exclusions['outcome']=exclusions.get('outcome',0)+1; continue
+              # Last clean book causally available at about 60 seconds remaining.
+              sigs=g.loc[g.secs_to_close.ge(60)&g.secs_to_close.le(61.75)]
+              if sigs.empty: exclusions['signal']=exclusions.get('signal',0)+1; continue
+              sig=sigs.sort_values('secs_to_close').iloc[0]
+              # First executable book at least 1 second later, no more than 3 seconds later.
+              ents=g.loc[g.ts_ms.ge(sig.ts_ms+1000)&g.ts_ms.le(sig.ts_ms+3000)]
+              if ents.empty: exclusions['entry']=exclusions.get('entry',0)+1; continue
+              ent=ents.sort_values('ts_ms').iloc[0]
+              mu=(sig.yes_bid+sig.yes_ask)/2; md=(sig.no_bid+sig.no_ask)/2; up=bool(mu>=md)
+              leader=float(mu if up else md); ask=float(ent.yes_ask if up else ent.no_ask); bid=float(ent.yes_bid if up else ent.no_bid)
+              ask_size=float(ent.yes_ask_size if up else ent.no_ask_size)
+              # Causal 30-second favorite history; collapse multiple snapshots per second to latest.
+              hist=g.loc[g.ts_ms.le(sig.ts_ms)&g.ts_ms.ge(sig.ts_ms-31000)].copy()
+              hist['sec_bin']=np.floor((hist.ts_ms-sig.ts_ms)/1000).astype(int)
+              hist=hist.sort_values('ts_ms').drop_duplicates('sec_bin',keep='last')
+              hist['fav_mid']=(hist.yes_bid+hist.yes_ask)/2 if up else (hist.no_bid+hist.no_ask)/2
+              hist=hist.sort_values('ts_ms')
+              if len(hist)<8: exclusions['history']=exclusions.get('history',0)+1; continue
+              ht=hist.ts_ms.to_numpy(float); hm=hist.fav_mid.to_numpy(float)
+              def lag(sec):
+                  k=np.searchsorted(ht,sig.ts_ms-sec*1000,side='right')-1
+                  return hm[k] if k>=0 else np.nan
+              moms={f'mom{s}':leader-lag(s) for s in [1,3,5,10,20,30]}
+              t10=hm[ht>=sig.ts_ms-10000]; t30=hm[ht>=sig.ts_ms-30000]
+              vol10=float(np.std(np.diff(t10))) if len(t10)>2 else 0.; vol30=float(np.std(np.diff(t30))) if len(t30)>2 else 0.
+              dd10=float(np.max(t10)-t10[-1]) if len(t10) else 0.; dd30=float(np.max(t30)-t30[-1]) if len(t30) else 0.
+              dy=float(sig.yes_bid_size) if np.isfinite(sig.yes_bid_size) else np.nan; dn=float(sig.no_bid_size) if np.isfinite(sig.no_bid_size) else np.nan
+              imb=(dy-dn)/(dy+dn) if np.isfinite(dy+dn) and dy+dn>0 else 0.; imb=imb if up else -imb
+              open_ts=float(slot.get('open_ts'))
+              market_start=pd.to_datetime(open_ts,unit='s',utc=True) if open_ts<1e12 else pd.to_datetime(open_ts,unit='ms',utc=True)
+              won=int(int(y)==int(up))
+              rows.append({'condition_id':str(cid),'market_start':market_start,'side':'Up' if up else 'Down','side_up':int(up),'won':won,'loss':1-won,'leader_mid':leader,
+                           'signal_spread':float((sig.yes_ask-sig.yes_bid) if up else (sig.no_ask-sig.no_bid)),'entry_delay_ms':int(ent.ts_ms-sig.ts_ms),
+                           'entry_ask':ask,'entry_bid':bid,'entry_spread':ask-bid,'entry_ask_size':ask_size,'vol10':vol10,'vol30':vol30,'drawdown10':dd10,'drawdown30':dd30,'depth_imb':imb,**moms,
+                           'strike':float(slot.get('strike')),'spot_at_open':float(slot.get('spot_at_open')),'spot_at_close':float(slot.get('spot_at_close')),'fee_rate':float(slot.get('fee_rate'))})
+              pg=g.loc[g.ts_ms.ge(ent.ts_ms)&g.secs_to_close.ge(0)&g.secs_to_close.le(float(ent.secs_to_close)+.01)].copy()
+              pg['t_after_entry_ms']=(pg.ts_ms-ent.ts_ms).astype('int64')
+              pg['fav_bid']=pg.yes_bid if up else pg.no_bid; pg['fav_ask']=pg.yes_ask if up else pg.no_ask; pg['fav_bid_size']=pg.yes_bid_size if up else pg.no_bid_size; pg['fav_ask_size']=pg.yes_ask_size if up else pg.no_ask_size
+              pg['fav_mid']=(pg.fav_bid+pg.fav_ask)/2; pg['condition_id']=str(cid); pg['loss']=1-won; pg['side_up']=int(up); pg['entry_ask']=ask; pg['entry_ask_size']=ask_size
+              paths.append(pg[['condition_id','ts_ms','secs_to_close','t_after_entry_ms','loss','side_up','entry_ask','entry_ask_size','fav_bid','fav_ask','fav_bid_size','fav_ask_size','fav_mid','spot','ds_spot']])
+          panel=pd.DataFrame(rows).sort_values('market_start')
+          path=pd.concat(paths,ignore_index=True) if paths else pd.DataFrame()
+          panel.to_csv(out/'independent_btc_minute4_panel.csv',index=False)
+          path.to_csv(out/'independent_btc_minute4_paths.csv.gz',index=False,compression='gzip')
+          summary={'source':'kinzikdza/polymarket-updown-microstructure','slots_btc':int(len(btc)),'panel_markets':int(len(panel)),'path_rows':int(len(path)),'losses':int(panel.loss.sum()) if len(panel) else 0,'date_min':str(panel.market_start.min()) if len(panel) else None,'date_max':str(panel.market_start.max()) if len(panel) else None,'exclusions':exclusions,'columns':panel.columns.tolist()}
+          (out/'summary.json').write_text(json.dumps(summary,indent=2))
+          print(json.dumps(summary,indent=2),flush=True)
+          manifest=[]
+          for p in sorted(out.iterdir()):
+              if p.is_file(): manifest.append({'file':p.name,'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+          (out/'MANIFEST.json').write_text(json.dumps(manifest,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: independent-btc-minute4-panel
+          path: independent-minute4-panel
+          compression-level: 0
+          retention-days: 2
+          if-no-files-found: error
