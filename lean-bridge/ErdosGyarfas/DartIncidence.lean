@@ -70,8 +70,11 @@ theorem card_commonDartsAt_eq_four
     (hReg : J.IsRegularOfDegree 4) (hC4 : NoFourCycle J)
     (hOrder : Fintype.card V ≤ 14) (v : V) :
     #(commonDartsAt J v) = 4 := by
-  rw [← Fintype.card_subtype]
-  rw [Fintype.card_congr (insideTwoStepEquivCommonDart J v)]
+  have hSubtype : #(commonDartsAt J v) =
+      Fintype.card {d : J.Dart // CommonNeighborRel J v d} := by
+    simpa [commonDartsAt] using
+      (Fintype.card_subtype (fun d : J.Dart => CommonNeighborRel J v d)).symm
+  rw [hSubtype, Fintype.card_congr (insideTwoStepEquivCommonDart J v)]
   rw [card_insideTwoStepAt_eq_twice_local_edges,
     neighborGraph_card_edges_eq_two_of_card_le_fourteen J hReg hC4 hOrder v]
   norm_num
@@ -86,7 +89,7 @@ theorem card_commonNeighborsOfDart_le_one
   simp only [commonNeighborsOfDart, Finset.mem_filter, Finset.mem_univ,
     true_and, CommonNeighborRel] at hv hw
   by_contra hvw
-  exact hC4 hv.1 d.adj hw.1.symm hw.2 hv.2.symm hvw d.fst_ne_snd
+  exact hC4 hv.1 hw.1.symm hw.2 hv.2.symm hvw d.fst_ne_snd
 
 /-- A four-regular finite graph has four darts per vertex. -/
 theorem dart_card_eq_four_mul_vertices
