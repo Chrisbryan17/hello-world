@@ -74,10 +74,16 @@ theorem card_commonDartsAt_eq_four
       Fintype.card {d : J.Dart // CommonNeighborRel J v d} := by
     simpa [commonDartsAt] using
       (Fintype.card_subtype (fun d : J.Dart => CommonNeighborRel J v d)).symm
-  rw [hSubtype, ← Fintype.card_congr (insideTwoStepEquivCommonDart J v)]
-  rw [card_insideTwoStepAt_eq_twice_local_edges,
-    neighborGraph_card_edges_eq_two_of_card_le_fourteen J hReg hC4 hOrder v]
-  norm_num
+  calc
+    #(commonDartsAt J v) =
+        Fintype.card {d : J.Dart // CommonNeighborRel J v d} := hSubtype
+    _ = Fintype.card (InsideTwoStepAt J v) :=
+      (Fintype.card_congr (insideTwoStepEquivCommonDart J v)).symm
+    _ = 2 * #(neighborGraph J v).edgeFinset :=
+      card_insideTwoStepAt_eq_twice_local_edges J v
+    _ = 4 := by
+      rw [neighborGraph_card_edges_eq_two_of_card_le_fourteen
+        J hReg hC4 hOrder v]
 
 /-- Two distinct common neighbors of one dart would form a four-cycle. -/
 theorem card_commonNeighborsOfDart_le_one
@@ -152,8 +158,9 @@ theorem card_commonNeighborsOfDart_eq_one
       ∑ e : J.Dart, f e := by
     simpa using Finset.sum_erase_add (s := (Finset.univ : Finset J.Dart))
       (f := f) hdMem
-  have hfdLe := hLe d
-  change f d = 1
-  omega
+  have hfdLe : f d ≤ 1 := hLe d
+  have hfdEq : f d = 1 := by
+    omega
+  simpa [f] using hfdEq
 
 end ErdosGyarfas
