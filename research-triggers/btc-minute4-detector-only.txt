@@ -1,0 +1,1 @@
+Frozen variant: hold unflagged favorite positions to resolution; sell only after the sequential danger detector triggers. One-second trigger-to-sale delay, one-cent entry and exit slippage, final seven days untouched.
