@@ -32,7 +32,10 @@ jobs:
       - name: Compile research runner
         run: python -m py_compile research/multiasset_frequency.py
       - name: Run causal rolling backtest
-        run: python research/multiasset_frequency.py 2>&1 | tee multiasset-frequency.log
+        shell: bash
+        run: |
+          set -o pipefail
+          python research/multiasset_frequency.py 2>&1 | tee multiasset-frequency.log
       - name: Show frontier
         if: always()
         run: |
