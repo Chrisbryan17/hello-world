@@ -1,0 +1,241 @@
+name: EG64 exact terminal-triangle cap census
+
+on:
+  push:
+    branches:
+      - eg64-triangle-cap
+    paths:
+      - 'eg64-triangle/**'
+      - 'eg64-census/**'
+      - '.github/workflows/eg64-triangle-cap.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  through-20:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Install nauty
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nauty
+          GENG="$(command -v geng || command -v nauty-geng || true)"
+          test -n "$GENG"
+          echo "GENG=$GENG" >> "$GITHUB_ENV"
+      - name: Compile exact checker and independent verifier
+        run: |
+          python3 -m py_compile \
+            eg64-census/cubic_cap_census.py \
+            eg64-triangle/triangle_cap_census.py \
+            eg64-triangle/verify_triangle_witness.py
+      - name: Exhaust connected cubic bases through order 20
+        id: census
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          specs=("4:1" "6:2" "8:5" "10:19" "12:85" "14:509" "16:4060" "18:41301" "20:510489")
+          found=0
+          for spec in "${specs[@]}"; do
+            n="${spec%%:*}"
+            expected="${spec##*:}"
+            set +e
+            "$GENG" -q -c -d3 -D3 "$n" \
+              | python3 eg64-triangle/triangle_cap_census.py \
+                  --order "$n" --expected "$expected" --progress 100000 \
+                  --witness-out "results/witness-${n}.json" \
+                  > "results/order-${n}.json"
+            pipeline=("${PIPESTATUS[@]}")
+            set -e
+            generator_status="${pipeline[0]}"
+            checker_status="${pipeline[1]}"
+            if [[ "$checker_status" == "10" ]]; then
+              [[ "$generator_status" == "0" || "$generator_status" == "141" ]]
+              python3 eg64-triangle/verify_triangle_witness.py \
+                "results/witness-${n}.json" \
+                --output "results/independent-verification-${n}.json"
+              found=1
+              break
+            fi
+            [[ "$generator_status" == "0" ]]
+            [[ "$checker_status" == "0" ]]
+          done
+          echo "found=$found" >> "$GITHUB_OUTPUT"
+          sha256sum results/*.json > results/SHA256SUMS
+      - name: Validate through-20 accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          expected={4:1,6:2,8:5,10:19,12:85,14:509,16:4060,18:41301,20:510489}
+          for order,count in expected.items():
+              path=Path(f'results/order-{order}.json')
+              if not path.exists(): break
+              result=json.loads(path.read_text())
+              assert result['stats']['graphs']==count,(order,result['stats']['graphs'],count)
+              assert result['stats']['expected']==count
+              assert len(result['stats']['input_sha256'])==64
+              if result.get('witness'):
+                  proof=Path(f'results/independent-verification-{order}.json')
+                  assert proof.exists() and json.loads(proof.read_text())['verified'] is True
+          print('THROUGH20_ACCOUNTING=PASS')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eg64-triangle-through20-${{ github.run_id }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Flag independently verified witness
+        if: steps.census.outputs.found == '1'
+        run: exit 10
+
+  order-22-shard:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Install nauty
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nauty
+          GENG="$(command -v geng || command -v nauty-geng || true)"
+          test -n "$GENG"
+          echo "GENG=$GENG" >> "$GITHUB_ENV"
+      - name: Exhaust cubic residue ${{ matrix.shard }}/16
+        id: census
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          shard="${{ matrix.shard }}"
+          set +e
+          "$GENG" -q -c -d3 -D3 22 "${shard}/16" \
+            | python3 eg64-triangle/triangle_cap_census.py \
+                --order 22 --progress 100000 \
+                --witness-out "results/witness-${shard}.json" \
+                > "results/shard-${shard}.json"
+          pipeline=("${PIPESTATUS[@]}")
+          set -e
+          generator_status="${pipeline[0]}"
+          checker_status="${pipeline[1]}"
+          if [[ "$checker_status" == "10" ]]; then
+            [[ "$generator_status" == "0" || "$generator_status" == "141" ]]
+            python3 eg64-triangle/verify_triangle_witness.py \
+              "results/witness-${shard}.json" \
+              --output "results/independent-verification-${shard}.json"
+            echo "found=1" >> "$GITHUB_OUTPUT"
+          else
+            [[ "$generator_status" == "0" ]]
+            [[ "$checker_status" == "0" ]]
+            echo "found=0" >> "$GITHUB_OUTPUT"
+          fi
+          sha256sum results/*.json > "results/SHA256SUMS-${shard}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eg64-triangle-order22-shard-${{ matrix.shard }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Flag independently verified witness
+        if: steps.census.outputs.found == '1'
+        run: exit 10
+
+  aggregate:
+    if: always()
+    needs: [through-20, order-22-shard]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-triangle-*
+          path: gathered
+      - name: Verify exact counts and witness state
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root=Path('gathered')
+          through=next(root.glob('eg64-triangle-through20-*'))
+          expected={4:1,6:2,8:5,10:19,12:85,14:509,16:4060,18:41301,20:510489}
+          records=[]
+          witnesses=[]
+          for order,count in expected.items():
+              result=json.loads((through/f'order-{order}.json').read_text())
+              assert result['stats']['graphs']==count
+              if result.get('witness'):
+                  proof=through/f'independent-verification-{order}.json'
+                  assert proof.exists() and json.loads(proof.read_text())['verified'] is True
+                  witnesses.append({'order':order,'witness':result['witness']})
+              records.append({'base_order':order,**result})
+          shards=[]
+          for shard in range(16):
+              directory=root/f'eg64-triangle-order22-shard-{shard}'
+              result=json.loads((directory/f'shard-{shard}.json').read_text())
+              if result.get('witness'):
+                  proof=directory/f'independent-verification-{shard}.json'
+                  assert proof.exists() and json.loads(proof.read_text())['verified'] is True
+                  witnesses.append({'order':22,'shard':shard,'witness':result['witness']})
+              shards.append({'shard':shard,**result})
+          total22=sum(record['stats']['graphs'] for record in shards)
+          assert total22==7_319_447,total22
+          total=sum(expected.values())+total22
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'construction':'terminal triangle expansion of a rooted cubic edge',
+              'maximum_base_order':22,
+              'maximum_cap_order':25,
+              'graphs_exhausted':total,
+              'through20':records,
+              'order22_shards':shards,
+              'verified_witnesses':witnesses,
+          }
+          out=Path('triangle-cap-summary.json')
+          out.write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          Path('triangle-cap-summary.sha256').write_text(
+              hashlib.sha256(out.read_bytes()).hexdigest()+'  triangle-cap-summary.json\n'
+          )
+          print(json.dumps({'graphs_exhausted':total,'verified_witnesses':len(witnesses)}))
+          if witnesses:
+              raise SystemExit(10)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eg64-triangle-complete-${{ github.run_id }}
+          path: |
+            triangle-cap-summary.json
+            triangle-cap-summary.sha256
+            gathered/
+            eg64-triangle/
+            eg64-census/cubic_cap_census.py
+          if-no-files-found: error
+          retention-days: 90
