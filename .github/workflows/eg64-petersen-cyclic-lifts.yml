@@ -1,0 +1,213 @@
+name: EG64 exact cyclic Petersen lifts
+
+on:
+  push:
+    branches:
+      - eg64-cubic-cap-census
+    paths:
+      - 'eg64-voltage/petersen_cyclic_lifts.cpp'
+      - 'eg64-voltage/verify_petersen_lift.py'
+      - '.github/workflows/eg64-petersen-cyclic-lifts.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  modulus:
+    strategy:
+      fail-fast: false
+      matrix:
+        modulus: [3, 5, 7, 11, 13, 17]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Compile exact C++ census and Python verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          g++ -O3 -std=c++20 -Wall -Wextra -pedantic \
+            eg64-voltage/petersen_cyclic_lifts.cpp \
+            -o petersen_cyclic_lifts
+          python3 -m py_compile eg64-voltage/verify_petersen_lift.py
+
+      - name: Exhaust all first-voltage shards modulo ${{ matrix.modulus }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          q="${{ matrix.modulus }}"
+          mkdir -p "results/q${q}"
+          export q
+          run_shard() {
+            first="$1"
+            set +e
+            ./petersen_cyclic_lifts "$q" "$first" \
+              > "results/q${q}/shard-${first}.json"
+            status=$?
+            set -e
+            if [[ "$status" != "0" && "$status" != "10" ]]; then
+              echo "shard ${first} failed with status ${status}" >&2
+              return "$status"
+            fi
+            return 0
+          }
+          export -f run_shard
+          seq 0 $((q-1)) | xargs -P 4 -n 1 bash -c 'run_shard "$0"'
+          test "$(find "results/q${q}" -name 'shard-*.json' | wc -l)" -eq "$q"
+
+      - name: Aggregate modulus and independently verify any survivor
+        id: aggregate
+        shell: bash
+        run: |
+          set -euo pipefail
+          q="${{ matrix.modulus }}"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          q=int("${{ matrix.modulus }}")
+          directory=Path(f"results/q{q}")
+          records=[]
+          aggregate={str(length):0 for length in (4,8,16,32,64,128)}
+          aggregate['none']=0
+          witnesses=[]
+          for first in range(q):
+              record=json.loads((directory/f"shard-{first}.json").read_text())
+              assert record['modulus']==q
+              assert record['fixed_first']==first
+              assert record['assignments_checked']==q**5 or record['witness'] is not None
+              for key,value in record['counts'].items():
+                  aggregate[key]+=value
+              if record['witness'] is not None:
+                  witnesses.append(record['witness'])
+              records.append(record)
+          checked=sum(record['assignments_checked'] for record in records)
+          if not witnesses:
+              assert checked==q**6,(checked,q**6)
+              assert aggregate['none']==0
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'modulus':q,
+              'gauge_normalization':'all spanning-tree voltages are zero',
+              'cycle_rank':6,
+              'assignments_checked':checked,
+              'expected_assignments':q**6,
+              'counts':aggregate,
+              'witnesses':witnesses,
+              'records':records,
+          }
+          (directory/'summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          if witnesses:
+              (directory/'witness.json').write_text(
+                  json.dumps({'modulus':q,'voltages':witnesses[0]},indent=2,sort_keys=True)+'\n'
+              )
+          print(json.dumps({
+              'modulus':q,
+              'assignments_checked':checked,
+              'counts':aggregate,
+              'witnesses':len(witnesses),
+          }))
+          PY
+          if [[ -f "results/q${q}/witness.json" ]]; then
+            python3 eg64-voltage/verify_petersen_lift.py \
+              "results/q${q}/witness.json" \
+              --output "results/q${q}/independent-verification.json"
+            echo "found=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=0" >> "$GITHUB_OUTPUT"
+          fi
+          sha256sum "results/q${q}"/*.json > "results/q${q}/SHA256SUMS"
+
+      - name: Upload exact modulus evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-petersen-cyclic-q${{ matrix.modulus }}
+          path: |
+            results/q${{ matrix.modulus }}/
+            eg64-voltage/petersen_cyclic_lifts.cpp
+            eg64-voltage/verify_petersen_lift.py
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Flag an independently verified counterexample
+        if: steps.aggregate.outputs.found == '1'
+        run: exit 10
+
+  complete:
+    if: always()
+    needs: modulus
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-petersen-cyclic-q*
+          path: gathered
+      - name: Verify all modulus partitions and aggregate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root=Path('gathered')
+          moduli=(3,5,7,11,13,17)
+          summaries=[]
+          witnesses=[]
+          for q in moduli:
+              directory=root/f'eg64-petersen-cyclic-q{q}'/f'results/q{q}'
+              summary=json.loads((directory/'summary.json').read_text())
+              assert summary['modulus']==q
+              if not summary['witnesses']:
+                  assert summary['assignments_checked']==q**6
+              else:
+                  verification=json.loads((directory/'independent-verification.json').read_text())
+                  assert verification['verified'] is True
+                  witnesses.append({'modulus':q,'verification':verification})
+              summaries.append(summary)
+          total=sum(summary['assignments_checked'] for summary in summaries)
+          expected=sum(q**6 for q in moduli)
+          if not witnesses:
+              assert total==expected,(total,expected)
+          result={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'moduli':list(moduli),
+              'assignments_checked':total,
+              'expected_assignments':expected,
+              'witnesses':witnesses,
+              'summaries':summaries,
+          }
+          Path('petersen-cyclic-summary.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
+          print(json.dumps({
+              'moduli':list(moduli),
+              'assignments_checked':total,
+              'witnesses':len(witnesses),
+          }))
+          if witnesses:
+              raise SystemExit(10)
+          PY
+          sha256sum petersen-cyclic-summary.json > petersen-cyclic-summary.sha256
+
+      - name: Upload complete voltage evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-petersen-cyclic-complete-${{ github.run_id }}
+          path: |
+            petersen-cyclic-summary.json
+            petersen-cyclic-summary.sha256
+            gathered/
+            eg64-voltage/petersen_cyclic_lifts.cpp
+            eg64-voltage/verify_petersen_lift.py
+          if-no-files-found: error
+          retention-days: 90
