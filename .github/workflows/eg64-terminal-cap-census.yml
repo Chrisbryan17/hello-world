@@ -1,0 +1,202 @@
+name: EG64 exact one-terminal cap census
+
+on:
+  push:
+    branches:
+      - eg64-terminal-cap-census
+    paths:
+      - 'eg64-terminal/**'
+      - '.github/workflows/eg64-terminal-cap-census.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  census-through-21:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Install nauty graph generator
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nauty
+          GENG="$(command -v geng || command -v nauty-geng || true)"
+          test -n "$GENG"
+          echo "GENG=$GENG" >> "$GITHUB_ENV"
+
+      - name: Syntax and adversarial verifier smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            eg64-terminal/terminal_cap_census.py \
+            eg64-terminal/verify_terminal_cap.py
+          python3 - <<'PY'
+          import json
+          import subprocess
+          import tempfile
+          from pathlib import Path
+
+          def graph6(graph):
+              n = len(graph)
+              bits = []
+              for high in range(1, n):
+                  for low in range(high):
+                      bits.append(1 if high in graph[low] else 0)
+              while len(bits) % 6:
+                  bits.append(0)
+              chars = [chr(n + 63)]
+              for start in range(0, len(bits), 6):
+                  value = sum(bits[start + offset] << (5 - offset) for offset in range(6))
+                  chars.append(chr(value + 63))
+              return ''.join(chars)
+
+          # Subdivide one edge of K4. Doubling this cap has a C4, so the
+          # independent verifier must reject the deliberately invalid witness.
+          cap = [set() for _ in range(5)]
+          for u in range(4):
+              for v in range(u + 1, 4):
+                  if (u, v) != (0, 1):
+                      cap[u].add(v)
+                      cap[v].add(u)
+          cap[0].add(4); cap[4].add(0)
+          cap[1].add(4); cap[4].add(1)
+          witness = {
+              "kind": "terminal_cap",
+              "cap_order": 5,
+              "cap_graph6": graph6(cap),
+              "terminal": 4,
+              "doubled_counterexample_order": 10,
+          }
+          with tempfile.TemporaryDirectory() as directory:
+              path = Path(directory) / "invalid.json"
+              path.write_text(json.dumps(witness), encoding="utf-8")
+              process = subprocess.run(
+                  ["python3", "eg64-terminal/verify_terminal_cap.py", str(path)],
+                  text=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.STDOUT,
+              )
+              if process.returncode == 0 or "C_4 found" not in process.stdout:
+                  raise SystemExit(
+                      "terminal verifier failed adversarial rejection\n" + process.stdout
+                  )
+          print("ADVERSARIAL_TERMINAL_VERIFIER=PASS")
+          PY
+
+      - name: Exhaust one-terminal caps through order 21
+        id: census
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          found=0
+          for n in 5 7 9 11 13 15 17 19 21; do
+            m=$(( (3*n - 1) / 2 ))
+            echo "=== terminal caps of order $n with $m edges ==="
+            set +e
+            "$GENG" -q -c -d2 -D3 "$n" "${m}:${m}" \
+              | python3 eg64-terminal/terminal_cap_census.py \
+                  --order "$n" \
+                  --progress 100000 \
+                  --witness-out "results/witness-${n}.json" \
+                  > "results/order-${n}.json"
+            pipeline=("${PIPESTATUS[@]}")
+            set -e
+            generator_status="${pipeline[0]}"
+            checker_status="${pipeline[1]}"
+            if [[ "$checker_status" == "10" ]]; then
+              if [[ "$generator_status" != "0" && "$generator_status" != "141" ]]; then
+                exit "$generator_status"
+              fi
+              python3 eg64-terminal/verify_terminal_cap.py \
+                "results/witness-${n}.json" \
+                --output "results/independent-verification-${n}.json"
+              found=1
+              break
+            fi
+            if [[ "$generator_status" != "0" ]]; then
+              echo "geng failed with status $generator_status" >&2
+              exit "$generator_status"
+            fi
+            if [[ "$checker_status" != "0" ]]; then
+              echo "checker failed with status $checker_status" >&2
+              cat "results/order-${n}.json" >&2
+              exit "$checker_status"
+            fi
+          done
+          echo "found=$found" >> "$GITHUB_OUTPUT"
+
+      - name: Validate result accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          records = []
+          witness = None
+          for order in (5, 7, 9, 11, 13, 15, 17, 19, 21):
+              path = Path(f"results/order-{order}.json")
+              if not path.exists():
+                  break
+              result = json.loads(path.read_text(encoding="utf-8"))
+              stats = result["stats"]
+              assert stats["order"] == order
+              assert stats["graphs"] > 0
+              assert len(stats["input_sha256"]) == 64
+              if result.get("witness") is None:
+                  rejected = sum(stats["rejected_by_length"].values())
+                  assert rejected == stats["graphs"], (order, rejected, stats["graphs"])
+              else:
+                  witness = result["witness"]
+                  verification = Path(f"results/independent-verification-{order}.json")
+                  assert verification.exists()
+                  assert json.loads(verification.read_text(encoding="utf-8"))["verified"] is True
+              records.append(result)
+          summary = {
+              "source_commit": os.environ["GITHUB_SHA"],
+              "generator": os.environ["GENG"],
+              "orders_completed": [record["stats"]["order"] for record in records],
+              "graphs_exhausted": sum(record["stats"]["graphs"] for record in records),
+              "witness": witness,
+              "records": records,
+          }
+          Path("results/terminal-cap-summary.json").write_text(
+              json.dumps(summary, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          for path in sorted(Path("results").glob("*.json")):
+              print(hashlib.sha256(path.read_bytes()).hexdigest(), path)
+          print("TERMINAL_RESULT_VALIDATION=PASS")
+          PY
+          sha256sum results/*.json > results/SHA256SUMS
+
+      - name: Upload exact terminal-cap evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-terminal-cap-census-${{ github.run_id }}
+          path: |
+            eg64-terminal/terminal_cap_census.py
+            eg64-terminal/verify_terminal_cap.py
+            results/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Fail loudly on independently verified counterexample
+        if: steps.census.outputs.found == '1'
+        shell: bash
+        run: |
+          echo "A one-terminal cap generated a verified counterexample. Preserve and audit the artifact." >&2
+          exit 10
