@@ -1,0 +1,118 @@
+name: EG64 all (3,9)-cage subdivisions
+
+on:
+  push:
+    branches:
+      - eg64-cubic-cap-census
+    paths:
+      - '.github/workflows/eg64-all-3-9-cage-subdivisions.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Fetch complete (3,9)-cage graph6 list
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          curl -fsSL -D results/download.headers \
+            https://houseofgraphs.org/data/cages/cagesk3g09.g6 \
+            -o results/cagesk3g09.g6
+          python3 - <<'PY'
+          from pathlib import Path
+          lines=[line.strip() for line in Path('results/cagesk3g09.g6').read_bytes().splitlines() if line.strip()]
+          if len(lines)!=18:
+              raise SystemExit(f'expected 18 (3,9)-cages, received {len(lines)}')
+          for index,line in enumerate(lines):
+              if line.startswith(b'>>graph6<<'):
+                  line=line[len(b'>>graph6<<'):]
+              if not line or line[0]-63 != 58:
+                  raise SystemExit(f'line {index} is not an order-58 graph6 record')
+          print(f'CAGE_LIST_COUNT={len(lines)}')
+          PY
+          sha256sum results/cagesk3g09.g6 > results/cagesk3g09.g6.sha256
+
+      - name: Exhaust every edge subdivision
+        id: census
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          python3 eg64-census/cubic_cap_census.py \
+            --order 58 \
+            --expected 18 \
+            --progress 1 \
+            --witness-out results/witness.json \
+            < results/cagesk3g09.g6 \
+            > results/census.json
+          status=$?
+          set -e
+          if [[ "$status" == "10" ]]; then
+            python3 eg64-census/verify_cap_witness.py \
+              results/witness.json \
+              --output results/independent-verification.json
+            echo 'found=1' >> "$GITHUB_OUTPUT"
+          else
+            [[ "$status" == "0" ]]
+            echo 'found=0' >> "$GITHUB_OUTPUT"
+          fi
+          cat results/census.json
+
+      - name: Independent accounting and source checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          result=json.loads(Path('results/census.json').read_text())
+          stats=result['stats']
+          assert stats['order']==58
+          if result.get('witness') is None:
+              assert stats['graphs']==18
+              assert stats['expected']==18
+              assert stats['subdivision_candidates']==0
+          else:
+              proof=Path('results/independent-verification.json')
+              assert proof.exists()
+              assert json.loads(proof.read_text())['verified'] is True
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'source_url':'https://houseofgraphs.org/data/cages/cagesk3g09.g6',
+              'source_sha256':hashlib.sha256(Path('results/cagesk3g09.g6').read_bytes()).hexdigest(),
+              'cage_count':18,
+              'edges_per_cage':87,
+              'edge_subdivisions_covered':18*87,
+              'result':result,
+          }
+          Path('results/summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          PY
+          sha256sum results/* > results/SHA256SUMS.tmp
+          grep -v 'SHA256SUMS' results/SHA256SUMS.tmp > results/SHA256SUMS
+          rm results/SHA256SUMS.tmp
+
+      - name: Upload exact cage-subdivision evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-all-3-9-cage-subdivisions-${{ github.run_id }}
+          path: |
+            eg64-census/cubic_cap_census.py
+            eg64-census/verify_cap_witness.py
+            results/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Flag independently verified counterexample
+        if: steps.census.outputs.found == '1'
+        run: exit 10
