@@ -1,0 +1,160 @@
+name: EG64 sharded cubic cap census order 22
+
+on:
+  push:
+    branches:
+      - eg64-cubic-cap-census
+    paths:
+      - '.github/workflows/eg64-cubic-cap-order22.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shard:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Install nauty
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nauty
+          GENG="$(command -v geng || command -v nauty-geng || true)"
+          test -n "$GENG"
+          echo "GENG=$GENG" >> "$GITHUB_ENV"
+
+      - name: Exhaust residue class ${{ matrix.shard }}/16
+        id: census
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          shard="${{ matrix.shard }}"
+          set +e
+          "$GENG" -q -c -d3 -D3 22 "${shard}/16" \
+            | python3 eg64-census/cubic_cap_census.py \
+                --order 22 \
+                --progress 100000 \
+                --witness-out "results/witness-${shard}.json" \
+                > "results/shard-${shard}.json"
+          pipeline=("${PIPESTATUS[@]}")
+          set -e
+          generator_status="${pipeline[0]}"
+          checker_status="${pipeline[1]}"
+          if [[ "$checker_status" == "10" ]]; then
+            if [[ "$generator_status" != "0" && "$generator_status" != "141" ]]; then
+              exit "$generator_status"
+            fi
+            python3 eg64-census/verify_cap_witness.py \
+              "results/witness-${shard}.json" \
+              --output "results/independent-verification-${shard}.json"
+            echo "found=1" >> "$GITHUB_OUTPUT"
+          else
+            [[ "$generator_status" == "0" ]]
+            [[ "$checker_status" == "0" ]]
+            echo "found=0" >> "$GITHUB_OUTPUT"
+          fi
+          sha256sum results/*.json > "results/SHA256SUMS-${shard}"
+
+      - name: Upload shard evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-order22-shard-${{ matrix.shard }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Flag an independently verified witness
+        if: steps.census.outputs.found == '1'
+        run: exit 10
+
+  aggregate:
+    if: always()
+    needs: shard
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Download all shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-order22-shard-*
+          path: gathered
+
+      - name: Verify complete residue partition and aggregate count
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("gathered")
+          records = []
+          witnesses = []
+          for shard in range(16):
+              directory = root / f"eg64-order22-shard-{shard}"
+              result_path = directory / f"shard-{shard}.json"
+              assert result_path.exists(), result_path
+              result = json.loads(result_path.read_text(encoding="utf-8"))
+              stats = result["stats"]
+              assert stats["order"] == 22
+              assert stats["graphs"] > 0
+              assert len(stats["input_sha256"]) == 64
+              if result.get("witness") is not None:
+                  witnesses.append(result["witness"])
+                  verification = directory / f"independent-verification-{shard}.json"
+                  assert verification.exists()
+                  assert json.loads(verification.read_text(encoding="utf-8"))["verified"] is True
+              records.append({"shard": shard, **result})
+          total = sum(record["stats"]["graphs"] for record in records)
+          assert total == 7_319_447, total
+          summary = {
+              "source_commit": os.environ["GITHUB_SHA"],
+              "order": 22,
+              "modulus": 16,
+              "shards": records,
+              "graphs_exhausted": total,
+              "expected_connected_cubic_graphs": 7_319_447,
+              "verified_witnesses": witnesses,
+          }
+          out = Path("order22-summary.json")
+          out.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          Path("order22-summary.sha256").write_text(
+              hashlib.sha256(out.read_bytes()).hexdigest() + "  order22-summary.json\n",
+              encoding="utf-8",
+          )
+          print(json.dumps({"graphs_exhausted": total, "witnesses": len(witnesses)}))
+          if witnesses:
+              raise SystemExit(10)
+          PY
+
+      - name: Upload aggregate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-order22-complete-${{ github.run_id }}
+          path: |
+            order22-summary.json
+            order22-summary.sha256
+            gathered/
+            eg64-census/cubic_cap_census.py
+            eg64-census/verify_cap_witness.py
+          if-no-files-found: error
+          retention-days: 90
