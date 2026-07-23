@@ -49,7 +49,7 @@ jobs:
           print(f'detailed payload verified: sha256={actual}')
           PY
 
-      - name: Install checksum-pinned FreeCAD AppImage
+      - name: Install checksum-pinned FreeCAD command runtime
         shell: bash
         run: |
           curl --fail --location --retry 5 --retry-delay 3 \
@@ -58,21 +58,27 @@ jobs:
           echo 'e2006138400b2fa85fa2e160e872d00767eb32964e85075830f7e198a3a876e1  FreeCAD.AppImage' \
             | sha256sum --check --strict
           chmod +x FreeCAD.AppImage
-          FREECAD_CMD="$PWD/FreeCAD.AppImage"
+          ./FreeCAD.AppImage --appimage-extract >/dev/null
+          FREECAD_CMD="$(find "$PWD/squashfs-root" -maxdepth 5 \
+            \( -type f -o -type l \) \
+            \( -iname 'freecadcmd' -o -iname 'FreeCADCmd' \) \
+            -print -quit)"
+          test -n "$FREECAD_CMD"
+          test -x "$FREECAD_CMD"
           echo "FREECAD_CMD=$FREECAD_CMD" >> "$GITHUB_ENV"
-          APPIMAGE_EXTRACT_AND_RUN=1 "$FREECAD_CMD" --version
+          "$FREECAD_CMD" --version
 
       - name: Generate nine detailed 1-to-1 FreeCAD documents
         shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
           FREECAD_USER_HOME: ${{ github.workspace }}/.freecad-user
-          APPIMAGE_EXTRACT_AND_RUN: "1"
         run: |
           set +e
           mkdir -p "$FREECAD_USER_HOME" collapsecad_ci/build
-          PYTHONPATH="$PWD/collapsecad_ci/src" \
-            "$FREECAD_CMD" --console "$PWD/collapsecad_ci/scripts/generate_freecad.py" \
+          SCRIPT="$PWD/collapsecad_ci/scripts/generate_freecad.py"
+          printf 'import runpy\nrunpy.run_path(%q, run_name="__main__")\n' "$SCRIPT" \
+            | PYTHONPATH="$PWD/collapsecad_ci/src" "$FREECAD_CMD" \
             > collapsecad_ci/build/native-freecad-generation.log 2>&1
           STATUS=$?
           cat collapsecad_ci/build/native-freecad-generation.log
@@ -88,12 +94,12 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
           FREECAD_USER_HOME: ${{ github.workspace }}/.freecad-user
-          APPIMAGE_EXTRACT_AND_RUN: "1"
         run: |
           set +e
           mkdir -p collapsecad_ci/build
-          PYTHONPATH="$PWD/collapsecad_ci/src" \
-            "$FREECAD_CMD" --console "$PWD/collapsecad_ci/scripts/inspect_native_freecad.py" \
+          SCRIPT="$PWD/collapsecad_ci/scripts/inspect_native_freecad.py"
+          printf 'import runpy\nrunpy.run_path(%q, run_name="__main__")\n' "$SCRIPT" \
+            | PYTHONPATH="$PWD/collapsecad_ci/src" "$FREECAD_CMD" \
             > collapsecad_ci/build/native-freecad-inspection.log 2>&1
           STATUS=$?
           cat collapsecad_ci/build/native-freecad-inspection.log
