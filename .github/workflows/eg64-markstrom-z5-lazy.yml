@@ -1,0 +1,152 @@
+name: EG64 lazy algebraic Z5 lift search
+
+on:
+  push:
+    branches:
+      - eg64-markstrom-z5-lazy
+    paths:
+      - 'eg64-voltage/**'
+      - '.github/workflows/eg64-markstrom-z5-lazy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  search:
+    strategy:
+      fail-fast: false
+      matrix:
+        base: [0, 1, 2, 3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 58
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Clone public extremal graphs
+        run: |
+          git clone --quiet --depth 1 --branch special-graphs \
+            https://github.com/rbsandeep/Erdos-Gyarfas.git public-extremals
+      - name: Install algebra and SAT runtimes
+        run: |
+          python3 -m pip install --disable-pip-version-check python-sat z3-solver
+      - name: Compile search and independent verifier
+        run: |
+          PYTHONPATH=eg64-voltage python3 -m py_compile \
+            eg64-voltage/cyclic_lift_census.py \
+            eg64-voltage/markstrom_z3_lift_shard.py \
+            eg64-voltage/markstrom_z5_lazy.py \
+            eg64-voltage/verify_z5_witness.py
+      - name: Solve Z5 obstruction system for base ${{ matrix.base }}
+        id: search
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          base="${{ matrix.base }}"
+          set +e
+          PYTHONPATH=eg64-voltage python3 eg64-voltage/markstrom_z5_lazy.py \
+            --special-dir public-extremals/special \
+            --base-index "$base" \
+            --max-seconds 3000 \
+            --result "results/base-${base}.json" \
+            --witness-out "results/witness-${base}.json" \
+            > "results/base-${base}.stdout.json" \
+            2> "results/base-${base}.stderr.log"
+          status=$?
+          set -e
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          case "$status" in
+            0)
+              test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "results/base-${base}.json")" = "unsat"
+              ;;
+            10)
+              python3 eg64-voltage/verify_z5_witness.py \
+                "results/witness-${base}.json" \
+                --output "results/independent-verification-${base}.json"
+              ;;
+            124)
+              test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "results/base-${base}.json")" = "timeout"
+              ;;
+            *)
+              tail -n 160 "results/base-${base}.stderr.log" >&2 || true
+              exit "$status"
+              ;;
+          esac
+          sha256sum results/* > "results/SHA256SUMS-${base}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eg64-markstrom-z5-base-${{ matrix.base }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Flag independently verified counterexample
+        if: steps.search.outputs.exit_code == '10'
+        run: exit 10
+
+  aggregate:
+    if: always()
+    needs: search
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-markstrom-z5-base-*
+          path: gathered
+      - name: Aggregate exact algebraic states
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+
+          records=[]
+          witnesses=[]
+          for base in range(4):
+              directory=Path('gathered')/f'eg64-markstrom-z5-base-{base}'
+              result=json.loads((directory/f'base-{base}.json').read_text())
+              status=result['status']
+              assert status in {'unsat','timeout','witness'},result
+              if status=='witness':
+                  proof=directory/f'independent-verification-{base}.json'
+                  assert proof.exists()
+                  verification=json.loads(proof.read_text())
+                  assert verification['verified'] is True
+                  witnesses.append({'base':base,'witness':result['witness'],'verification':verification})
+              records.append({'base':base,**result})
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'construction':'lazy hyperplane-avoidance search over normalized Z5 covers of the four order-24 C4/C8-free cubic graphs',
+              'lift_order':120,
+              'records':records,
+              'verified_witnesses':witnesses,
+          }
+          out=Path('markstrom-z5-summary.json')
+          out.write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          Path('markstrom-z5-summary.sha256').write_text(
+              hashlib.sha256(out.read_bytes()).hexdigest()+'  markstrom-z5-summary.json\n'
+          )
+          print(json.dumps({
+              'statuses':{str(record['base']):record['status'] for record in records},
+              'verified_witnesses':len(witnesses),
+          },sort_keys=True))
+          if witnesses:
+              raise SystemExit(10)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eg64-markstrom-z5-complete-${{ github.run_id }}
+          path: |
+            markstrom-z5-summary.json
+            markstrom-z5-summary.sha256
+            gathered/
+            eg64-voltage/
+          if-no-files-found: error
+          retention-days: 90
