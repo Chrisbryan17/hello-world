@@ -5,6 +5,7 @@ on:
     branches:
       - eg64-cubic-cap-census
     paths:
+      - 'eg64-gadget/direct_wiring_search.py'
       - '.github/workflows/eg64-direct-wiring-through20.yml'
   workflow_dispatch:
 
@@ -47,7 +48,7 @@ jobs:
           assert result['witness'] is None
           assert result['stats']['candidate_vertices']==4
           assert result['stats']['base_graphs']==3
-          assert result['stats']['wirings_tested']==63072
+          assert result['stats']['wirings_tested']==378432
           print('DIRECT_WIRING_SMOKE=PASS')
           PY
       - name: Exhaust source graphs through order 20
@@ -108,7 +109,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eg64-direct-wiring-through20-fixed-${{ github.run_id }}
+          name: eg64-direct-wiring-through20-complete-${{ github.run_id }}
           path: |
             results/
             eg64-gadget/direct_wiring_search.py
