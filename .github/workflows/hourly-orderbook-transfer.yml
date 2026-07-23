@@ -6,6 +6,11 @@ on:
     paths:
       - research/hourly_orderbook_transfer.py
       - .github/workflows/hourly-orderbook-transfer.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - research/hourly_orderbook_transfer.py
+      - .github/workflows/hourly-orderbook-transfer.yml
   workflow_dispatch:
 
 env:
