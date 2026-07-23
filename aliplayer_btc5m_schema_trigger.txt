@@ -1,0 +1,1 @@
+Public-data-only trigger for BTC five-minute schema and timestamp inspection, dependency-fixed rerun.
