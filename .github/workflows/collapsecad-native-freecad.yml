@@ -58,24 +58,20 @@ jobs:
           echo 'e2006138400b2fa85fa2e160e872d00767eb32964e85075830f7e198a3a876e1  FreeCAD.AppImage' \
             | sha256sum --check --strict
           chmod +x FreeCAD.AppImage
-          ./FreeCAD.AppImage --appimage-extract >/dev/null
-          APPDIR="$PWD/squashfs-root"
-          FREECAD_CMD="$APPDIR/AppRun"
-          test -x "$FREECAD_CMD"
-          echo "APPDIR=$APPDIR" >> "$GITHUB_ENV"
+          FREECAD_CMD="$PWD/FreeCAD.AppImage"
           echo "FREECAD_CMD=$FREECAD_CMD" >> "$GITHUB_ENV"
-          APPDIR="$APPDIR" "$FREECAD_CMD" --version
+          APPIMAGE_EXTRACT_AND_RUN=1 "$FREECAD_CMD" --version
 
       - name: Generate nine detailed 1-to-1 FreeCAD documents
         shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
           FREECAD_USER_HOME: ${{ github.workspace }}/.freecad-user
+          APPIMAGE_EXTRACT_AND_RUN: "1"
         run: |
           set +e
           mkdir -p "$FREECAD_USER_HOME" collapsecad_ci/build
           PYTHONPATH="$PWD/collapsecad_ci/src" \
-            APPDIR="$APPDIR" \
             "$FREECAD_CMD" --console "$PWD/collapsecad_ci/scripts/generate_freecad.py" \
             > collapsecad_ci/build/native-freecad-generation.log 2>&1
           STATUS=$?
@@ -92,11 +88,11 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
           FREECAD_USER_HOME: ${{ github.workspace }}/.freecad-user
+          APPIMAGE_EXTRACT_AND_RUN: "1"
         run: |
           set +e
           mkdir -p collapsecad_ci/build
           PYTHONPATH="$PWD/collapsecad_ci/src" \
-            APPDIR="$APPDIR" \
             "$FREECAD_CMD" --console "$PWD/collapsecad_ci/scripts/inspect_native_freecad.py" \
             > collapsecad_ci/build/native-freecad-inspection.log 2>&1
           STATUS=$?
