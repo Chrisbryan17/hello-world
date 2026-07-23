@@ -73,7 +73,11 @@ jobs:
               -exec ls -ld {} \; | sort
           } > build/freecad/RUNTIME_PATHS.txt 2>&1
           cp squashfs-root/AppRun build/freecad/AppRun.txt || true
-          echo "FREECAD_CMD=$GITHUB_WORKSPACE/$freecad_cmd" >> "$GITHUB_ENV"
+          wrapper="$GITHUB_WORKSPACE/build/freecad/freecadcmd-appimage"
+          printf '#!/bin/bash\nexec "%s" freecadcmd "$@"\n' \
+            "$GITHUB_WORKSPACE/squashfs-root/AppRun" > "$wrapper"
+          chmod +x "$wrapper"
+          echo "FREECAD_CMD=$wrapper" >> "$GITHUB_ENV"
 
       - name: Report native runtime
         run: '"$FREECAD_CMD" --version'
