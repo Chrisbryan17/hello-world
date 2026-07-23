@@ -1,0 +1,56 @@
+name: Multiasset Panel Diagnostic
+
+on:
+  push:
+    branches:
+      - polymarket-multiasset-frequency-20260723
+    paths:
+      - .github/workflows/multiasset-panel-diagnostic.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/multiasset-panel-diagnostic.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: multiasset-frequency-backtest
+          path: prior
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Chrisbryan17/hello-world
+          run-id: 30045613046
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --quiet pandas pyarrow
+      - name: Diagnose causal panel
+        run: |
+          set -o pipefail
+          python - <<'PY' | tee panel-diagnostic.log
+          import pandas as pd
+          p='prior/results/multiasset_frequency/causal_panel.parquet'
+          d=pd.read_parquet(p)
+          print('shape',d.shape)
+          print('columns',d.columns.tolist())
+          print('clock counts',d.clock.value_counts(dropna=False).sort_index().to_dict())
+          print('asset counts',d.asset.value_counts(dropna=False).to_dict())
+          print('date range',d.market_start.min(),d.market_start.max())
+          print('week dtype',d.week_start.dtype)
+          print('week counts rows',d.groupby('week_start').size().sort_index().to_dict())
+          print('week unique starts clock60',d[d.clock==60].groupby('week_start').market_start.nunique().sort_index().to_dict())
+          print('rows by week asset clock60')
+          print(d[d.clock==60].pivot_table(index='week_start',columns='asset',values='condition_id',aggfunc='count',fill_value=0).to_string())
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: multiasset-panel-diagnostic
+          path: panel-diagnostic.log
+          retention-days: 30
