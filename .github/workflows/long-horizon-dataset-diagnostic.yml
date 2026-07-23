@@ -1,0 +1,80 @@
+name: Long Horizon Dataset Diagnostic
+
+on:
+  push:
+    branches:
+      - polymarket-multiasset-frequency-20260723
+    paths:
+      - .github/workflows/long-horizon-dataset-diagnostic.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/long-horizon-dataset-diagnostic.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Inspect immutable revisions and dataset-server schemas
+        shell: bash
+        run: |
+          set -o pipefail
+          python - <<'PY' 2>&1 | tee long-horizon-diagnostic.log
+          import json, requests, time
+          from pathlib import Path
+          repos=[
+            'kinzikdza/polymarket-updown-microstructure',
+            'Solal9/polymarket-crypto-updown-binary',
+            'notkali/polymarket-crypto-5m-15m',
+            'trentmkelly/polymarket_crypto_derivatives',
+            'aliplayer1/polymarket-crypto-updown',
+          ]
+          base='https://datasets-server.huggingface.co'
+          out={}
+          for repo in repos:
+            print('\n###',repo,flush=True)
+            info=requests.get(f'https://huggingface.co/api/datasets/{repo}',timeout=90)
+            print('api status',info.status_code)
+            entry={'api_status':info.status_code}
+            if info.ok:
+              j=info.json(); entry['sha']=j.get('sha'); entry['lastModified']=j.get('lastModified')
+              entry['siblings']=[{'rfilename':x.get('rfilename'),'size':x.get('size')} for x in j.get('siblings',[]) if x.get('rfilename','').endswith(('.parquet','.csv','.json','.jsonl'))][:500]
+              print('sha',entry['sha'],'data files',len(entry['siblings']))
+            for endpoint in ['splits','parquet']:
+              r=requests.get(f'{base}/{endpoint}',params={'dataset':repo},timeout=180)
+              entry[endpoint+'_status']=r.status_code
+              try: entry[endpoint]=r.json()
+              except Exception: entry[endpoint+'_text']=r.text[:2000]
+              print(endpoint,r.status_code)
+            splits=entry.get('splits',{}).get('splits',[])[:30]
+            previews=[]
+            for s in splits:
+              config=s.get('config'); split=s.get('split')
+              r=requests.get(f'{base}/first-rows',params={'dataset':repo,'config':config,'split':split},timeout=180)
+              rec={'config':config,'split':split,'status':r.status_code}
+              if r.ok:
+                jj=r.json(); rec['features']=jj.get('features'); rec['rows']=jj.get('rows',[])[:3]
+              else: rec['text']=r.text[:1000]
+              previews.append(rec)
+              print('preview',config,split,r.status_code)
+            entry['previews']=previews
+            out[repo]=entry
+            time.sleep(1)
+          Path('long-horizon-diagnostic.json').write_text(json.dumps(out,indent=2,default=str))
+          print('\nWROTE long-horizon-diagnostic.json')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: long-horizon-dataset-diagnostic
+          path: |
+            long-horizon-diagnostic.json
+            long-horizon-diagnostic.log
+          retention-days: 30
