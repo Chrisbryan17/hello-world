@@ -1,0 +1,1 @@
+Trigger public BTC5m validation-day downloads.
