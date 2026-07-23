@@ -1,0 +1,150 @@
+name: EG64 exhaustive Z3 lifts of order-24 extremal graphs
+
+on:
+  push:
+    branches:
+      - eg64-markstrom-z3-lifts
+    paths:
+      - 'eg64-voltage/**'
+      - '.github/workflows/eg64-markstrom-z3-lifts.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shard:
+    strategy:
+      fail-fast: false
+      matrix:
+        base: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Clone public extremal graphs
+        run: |
+          git clone --quiet --depth 1 --branch special-graphs \
+            https://github.com/rbsandeep/Erdos-Gyarfas.git public-extremals
+      - name: Compile shard and independent verifier
+        run: |
+          python3 -m py_compile \
+            eg64-voltage/cyclic_lift_census.py \
+            eg64-voltage/markstrom_z3_lift_shard.py \
+            eg64-voltage/verify_voltage_witness.py
+      - name: Exhaust base ${{ matrix.base }}, shard ${{ matrix.shard }}/8
+        id: search
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          stem="b${{ matrix.base }}-s${{ matrix.shard }}"
+          set +e
+          PYTHONPATH=eg64-voltage python3 eg64-voltage/markstrom_z3_lift_shard.py \
+            --special-dir public-extremals/special \
+            --base-index "${{ matrix.base }}" \
+            --shard "${{ matrix.shard }}" \
+            --shards 8 \
+            --result "results/${stem}.json" \
+            --witness-out "results/witness-${stem}.json" \
+            > "results/${stem}.stdout.json"
+          status=$?
+          set -e
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          if [[ "$status" == "10" ]]; then
+            python3 eg64-voltage/verify_voltage_witness.py \
+              "results/witness-${stem}.json" \
+              --output "results/independent-verification-${stem}.json"
+          else
+            [[ "$status" == "0" ]]
+            test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "results/${stem}.json")" = "exhausted"
+          fi
+          sha256sum results/* > "results/SHA256SUMS-${stem}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eg64-markstrom-z3-b${{ matrix.base }}-s${{ matrix.shard }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Flag independently verified counterexample
+        if: steps.search.outputs.exit_code == '10'
+        run: exit 10
+
+  aggregate:
+    if: always()
+    needs: shard
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-markstrom-z3-b*-s*
+          path: gathered
+      - name: Verify complete Z3 assignment partition
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+
+          records=[]
+          witnesses=[]
+          for base in range(4):
+              for shard in range(8):
+                  directory=Path('gathered')/f'eg64-markstrom-z3-b{base}-s{shard}'
+                  result=json.loads((directory/f'b{base}-s{shard}.json').read_text())
+                  stats=result['stats']
+                  assert stats['base_index']==base
+                  assert stats['shard']==shard and stats['modulus_shards']==8
+                  assert stats['assignment_space']==3**13
+                  assert result['status'] in ('exhausted','witness')
+                  rejected=sum(stats['rejected_by_length'].values())
+                  if result['status']=='exhausted':
+                      assert rejected==stats['connected_lifts'],result
+                  else:
+                      proof=directory/f'independent-verification-b{base}-s{shard}.json'
+                      assert proof.exists()
+                      verification=json.loads(proof.read_text())
+                      assert verification['verified'] is True
+                      witnesses.append({'base':base,'shard':shard,'witness':result['witness'],'verification':verification})
+                  records.append({'base':base,'shard':shard,**result})
+          visited=sum(record['stats']['assignments_visited'] for record in records)
+          connected=sum(record['stats']['connected_lifts'] for record in records)
+          assert visited==4*(3**13),visited
+          assert connected==4*((3**13)-1),connected
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'construction':'gauge-normalized connected Z3 voltage lifts of the four public order-24 C4/C8-free cubic graphs',
+              'lift_order':72,
+              'assignment_space_visited':visited,
+              'connected_lifts_exhausted':connected,
+              'records':records,
+              'verified_witnesses':witnesses,
+          }
+          out=Path('markstrom-z3-summary.json')
+          out.write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          Path('markstrom-z3-summary.sha256').write_text(
+              hashlib.sha256(out.read_bytes()).hexdigest()+'  markstrom-z3-summary.json\n'
+          )
+          print(json.dumps({'connected_lifts_exhausted':connected,'verified_witnesses':len(witnesses)}))
+          if witnesses:
+              raise SystemExit(10)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eg64-markstrom-z3-complete-${{ github.run_id }}
+          path: |
+            markstrom-z3-summary.json
+            markstrom-z3-summary.sha256
+            gathered/
+            eg64-voltage/
+          if-no-files-found: error
+          retention-days: 90
