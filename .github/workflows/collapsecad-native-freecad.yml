@@ -52,7 +52,7 @@ jobs:
           curl --fail --location --retry 5 --retry-delay 3 \
             --output FreeCAD.AppImage \
             https://github.com/FreeCAD/FreeCAD/releases/download/1.1.1/FreeCAD_1.1.1-Linux-x86_64-py311.AppImage
-          echo 'e200b5a095b00515997e798ee9f9a14b79e4c5166f55d60e2360a9385dc6cffb  FreeCAD.AppImage' \
+          echo 'e2006138400b2fa85fa2e160e872d00767eb32964e85075830f7e198a3a876e1  FreeCAD.AppImage' \
             | sha256sum --check --strict
           chmod +x FreeCAD.AppImage
           ./FreeCAD.AppImage --appimage-extract >/dev/null
