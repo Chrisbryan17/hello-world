@@ -1,0 +1,1 @@
+Public-data-only trigger for frozen BTC5m physical column-range footer inspection.
