@@ -1,0 +1,236 @@
+name: EG64 exact SAT synthesis of terminal caps
+
+on:
+  push:
+    branches:
+      - eg64-cubic-cap-census
+    paths:
+      - 'eg64-sat/**'
+      - '.github/workflows/eg64-terminal-cap-sat.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Install exact SAT dependencies
+        run: |
+          python3 -m pip install --disable-pip-version-check --quiet python-sat networkx
+      - name: Compile scripts and prove the order-5 smoke instance UNSAT
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            eg64-sat/terminal_cap_sat.py \
+            eg64-sat/verify_terminal_cap_sat.py
+          mkdir -p results
+          python3 eg64-sat/terminal_cap_sat.py \
+            --order 5 \
+            --wall-seconds 300 \
+            --cycle-batch 1024 \
+            --max-iterations 100000 \
+            --output results/order-5.json
+          python3 - <<'PY'
+          import json
+          result=json.load(open('results/order-5.json'))
+          assert result['witness'] is None
+          assert result['stats']['status']=='unsat',result
+          assert result['stats']['cycle_clauses']['4']>0
+          print('SAT_ORDER5_UNSAT_SMOKE=PASS')
+          PY
+
+  search:
+    needs: smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        order: [23, 25, 27, 29, 31]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Install exact SAT dependencies
+        run: |
+          python3 -m pip install --disable-pip-version-check --quiet python-sat networkx
+
+      - name: Search cap order ${{ matrix.order }}
+        id: search
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          order="${{ matrix.order }}"
+          set +e
+          python3 eg64-sat/terminal_cap_sat.py \
+            --order "$order" \
+            --wall-seconds 2700 \
+            --cycle-batch 512 \
+            --max-iterations 5000000 \
+            --progress-every 1000 \
+            --output "results/order-${order}.json" \
+            --witness-out "results/witness-${order}.json"
+          status=$?
+          set -e
+          if [[ "$status" == "10" ]]; then
+            python3 eg64-sat/verify_terminal_cap_sat.py \
+              "results/witness-${order}.json" \
+              --output "results/independent-verification-${order}.json"
+            echo "found=1" >> "$GITHUB_OUTPUT"
+          elif [[ "$status" == "0" ]]; then
+            echo "found=0" >> "$GITHUB_OUTPUT"
+          elif [[ "$status" == "3" ]]; then
+            echo "found=0" >> "$GITHUB_OUTPUT"
+            echo "incomplete=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "SAT search failed with status $status" >&2
+            exit "$status"
+          fi
+
+      - name: Audit result semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          order="${{ matrix.order }}"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          order=int("${{ matrix.order }}")
+          result=json.loads(Path(f'results/order-{order}.json').read_text())
+          stats=result['stats']
+          assert stats['order']==order
+          assert stats['solver'] in ('Cadical195','Glucose4','Minisat22')
+          assert stats['models']>=0
+          assert stats['clauses_added']==(
+              stats['connectivity_cuts']
+              +stats['articulation_cuts']
+              +sum(stats['cycle_clauses'].values())
+          )
+          status=stats['status']
+          assert status in ('unsat','sat_witness','timeout','iteration_limit')
+          if status=='sat_witness':
+              verification=json.loads(
+                  Path(f'results/independent-verification-{order}.json').read_text()
+              )
+              assert verification['verified'] is True
+          elif status=='unsat':
+              assert result['witness'] is None
+          audit={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'order':order,
+              'complete':status in ('unsat','sat_witness'),
+              'result':result,
+          }
+          Path(f'results/audit-{order}.json').write_text(
+              json.dumps(audit,indent=2,sort_keys=True)+'\n'
+          )
+          print(json.dumps({
+              'order':order,
+              'status':status,
+              'models':stats['models'],
+              'clauses_added':stats['clauses_added'],
+              'witness':result['witness'] is not None,
+          }))
+          PY
+          sha256sum results/* > results/SHA256SUMS
+
+      - name: Upload exact SAT evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-terminal-cap-sat-order${{ matrix.order }}
+          path: |
+            results/
+            eg64-sat/terminal_cap_sat.py
+            eg64-sat/verify_terminal_cap_sat.py
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Flag an independently verified counterexample
+        if: steps.search.outputs.found == '1'
+        run: exit 10
+
+  aggregate:
+    if: always()
+    needs: [smoke, search]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-terminal-cap-sat-order*
+          path: gathered
+      - name: Aggregate search states without overstating timeouts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          records=[]
+          complete_orders=[]
+          incomplete_orders=[]
+          witnesses=[]
+          for order in (23,25,27,29,31):
+              directory=Path('gathered')/f'eg64-terminal-cap-sat-order{order}'/'results'
+              audit=json.loads((directory/f'audit-{order}.json').read_text())
+              status=audit['result']['stats']['status']
+              if audit['complete']:
+                  complete_orders.append(order)
+              else:
+                  incomplete_orders.append(order)
+              if status=='sat_witness':
+                  verification=json.loads(
+                      (directory/f'independent-verification-{order}.json').read_text()
+                  )
+                  assert verification['verified'] is True
+                  witnesses.append({'order':order,'verification':verification})
+              records.append(audit)
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'complete_orders':complete_orders,
+              'incomplete_orders':incomplete_orders,
+              'witnesses':witnesses,
+              'records':records,
+          }
+          Path('terminal-cap-sat-summary.json').write_text(
+              json.dumps(summary,indent=2,sort_keys=True)+'\n'
+          )
+          print(json.dumps({
+              'complete_orders':complete_orders,
+              'incomplete_orders':incomplete_orders,
+              'witnesses':len(witnesses),
+          }))
+          if witnesses:
+              raise SystemExit(10)
+          PY
+          sha256sum terminal-cap-sat-summary.json > terminal-cap-sat-summary.sha256
+
+      - name: Upload aggregate SAT evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-terminal-cap-sat-complete-${{ github.run_id }}
+          path: |
+            terminal-cap-sat-summary.json
+            terminal-cap-sat-summary.sha256
+            gathered/
+            eg64-sat/terminal_cap_sat.py
+            eg64-sat/verify_terminal_cap_sat.py
+          if-no-files-found: error
+          retention-days: 90
