@@ -1,0 +1,45 @@
+name: Multiasset Frequency Backtest
+
+on:
+  push:
+    branches:
+      - polymarket-multiasset-frequency-20260723
+    paths:
+      - research/multiasset_frequency.py
+      - .github/workflows/multiasset-frequency-backtest.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install analytical dependencies
+        run: python -m pip install --upgrade pip pandas numpy pyarrow scikit-learn requests tabulate
+      - name: Compile research runner
+        run: python -m py_compile research/multiasset_frequency.py
+      - name: Run causal rolling backtest
+        run: python research/multiasset_frequency.py 2>&1 | tee multiasset-frequency.log
+      - name: Show frontier
+        if: always()
+        run: |
+          cat results/multiasset_frequency/coverage_frontier.csv || true
+          tail -100 multiasset-frequency.log || true
+      - name: Upload verified research artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multiasset-frequency-backtest
+          path: |
+            results/multiasset_frequency/
+            multiasset-frequency.log
+          if-no-files-found: warn
+          retention-days: 30
