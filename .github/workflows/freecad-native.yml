@@ -68,7 +68,11 @@ jobs:
         run: |
           set -euo pipefail
           printf 'driver reached FreeCAD invocation\n' > build/freecad/DRIVER_SENTINEL.txt
-          "$FREECAD_CMD" "$GITHUB_WORKSPACE/scripts/build_native_freecad.py"
+          "$FREECAD_CMD" --console <<PY
+          import runpy
+          runpy.run_path(r"$GITHUB_WORKSPACE/scripts/build_native_freecad.py", run_name="__main__")
+          exit()
+          PY
           printf 'FreeCADCmd exit status was zero\n' >> build/freecad/DRIVER_SENTINEL.txt
 
       - name: Diagnose native documents
