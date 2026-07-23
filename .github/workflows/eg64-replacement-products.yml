@@ -1,0 +1,140 @@
+name: EG64 exhaustive three-pole replacement products
+
+on:
+  push:
+    branches:
+      - eg64-replacement-products
+    paths:
+      - 'eg64-replacement/**'
+      - '.github/workflows/eg64-replacement-products.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  exhaustive:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Install nauty and compile search tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nauty
+          GENG="$(command -v geng || command -v nauty-geng || true)"
+          test -n "$GENG"
+          echo "GENG=$GENG" >> "$GITHUB_ENV"
+          python3 -m py_compile \
+            eg64-replacement/replacement_product_search.py \
+            eg64-replacement/verify_replacement_product.py
+
+      - name: Generate exact gadget and host censuses
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p census results
+          specs=("4:1" "6:2" "8:5" "10:19" "12:85" "14:509" "16:4060")
+          for spec in "${specs[@]}"; do
+            n="${spec%%:*}"; expected="${spec##*:}"
+            "$GENG" -q -c -d3 -D3 "$n" > "census/cubic-${n}.g6"
+            actual="$(wc -l < "census/cubic-${n}.g6" | tr -d ' ')"
+            [[ "$actual" == "$expected" ]]
+          done
+          cp census/cubic-4.g6 census/hosts-4.g6
+          cp census/cubic-6.g6 census/hosts-6.g6
+          sha256sum census/*.g6 > results/CENSUS_SHA256SUMS
+
+      - name: Exhaust all port assignments over hosts 4 and 6
+        id: search
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          python3 eg64-replacement/replacement_product_search.py \
+            --gadget-file census/cubic-4.g6 \
+            --gadget-file census/cubic-6.g6 \
+            --gadget-file census/cubic-8.g6 \
+            --gadget-file census/cubic-10.g6 \
+            --gadget-file census/cubic-12.g6 \
+            --gadget-file census/cubic-14.g6 \
+            --gadget-file census/cubic-16.g6 \
+            --host-file census/hosts-4.g6 \
+            --host-file census/hosts-6.g6 \
+            --progress 100000 \
+            --witness-out results/witness.json \
+            > results/search.json
+          status=$?
+          set -e
+          if [[ "$status" == "10" ]]; then
+            python3 eg64-replacement/verify_replacement_product.py \
+              results/witness.json \
+              --output results/independent-verification.json
+            echo 'found=1' >> "$GITHUB_OUTPUT"
+          else
+            [[ "$status" == "0" ]]
+            echo 'found=0' >> "$GITHUB_OUTPUT"
+          fi
+          cat results/search.json
+
+      - name: Independently validate exhaustive accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          result=json.loads(Path('results/search.json').read_text())
+          stats=result['stats']
+          assert stats['gadget_bases']==4681,stats
+          assert stats['host_graphs']==3,stats
+          assert stats['internally_clean_three_poles']==9,stats
+          if result.get('witness') is None:
+              expected=9*(6**4 + 2*(6**6))
+              assert expected==851472
+              assert stats['invalid_products']==0,stats
+              assert stats['products_tested']==expected,(stats['products_tested'],expected)
+              rejected=sum(stats.get(f'rejected_c{length}',0) for length in (4,8,16,32,64))
+              assert rejected==expected,(rejected,expected)
+          else:
+              proof=Path('results/independent-verification.json')
+              assert proof.exists() and json.loads(proof.read_text())['verified'] is True
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'gadget_cubic_graphs':4681,
+              'internally_clean_three_poles':stats['internally_clean_three_poles'],
+              'host_graphs':stats['host_graphs'],
+              'all_port_assignments_covered':stats['products_tested'],
+              'result':result,
+          }
+          Path('results/summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          print(json.dumps({
+              'gadget_bases':stats['gadget_bases'],
+              'clean_three_poles':stats['internally_clean_three_poles'],
+              'products_tested':stats['products_tested'],
+              'witness':result.get('witness') is not None,
+          }))
+          PY
+          sha256sum results/* > results/SHA256SUMS.tmp
+          grep -v 'SHA256SUMS' results/SHA256SUMS.tmp > results/SHA256SUMS
+          rm results/SHA256SUMS.tmp
+
+      - name: Upload exact replacement-product evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-replacement-products-${{ github.run_id }}
+          path: |
+            eg64-replacement/
+            results/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Flag independently verified counterexample
+        if: steps.search.outputs.found == '1'
+        run: exit 10
