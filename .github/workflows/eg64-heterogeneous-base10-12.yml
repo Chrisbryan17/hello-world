@@ -1,0 +1,248 @@
+name: EG64 heterogeneous gadget assemblies on cubic bases 10 and 12
+
+on:
+  push:
+    branches:
+      - eg64-cubic-cap-census
+    paths:
+      - 'eg64-gadget/heterogeneous_spectrum_search.py'
+      - '.github/workflows/eg64-heterogeneous-base10-12.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  search:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - base_order: 10
+            base_count: 19
+          - base_order: 12
+            base_count: 85
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Install nauty
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nauty
+          GENG="$(command -v geng || command -v nauty-geng || true)"
+          test -n "$GENG"
+          echo "GENG=$GENG" >> "$GITHUB_ENV"
+
+      - name: Generate exact sources and cubic bases
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          "$GENG" -q -c -d3 -D3 4 > results/source-4.g6
+          "$GENG" -q -c -d3 -D3 8 > results/source-8.g6
+          "$GENG" -q -c -d3 -D3 16 > results/source-16.g6
+          "$GENG" -q -c -d3 -D3 "${{ matrix.base_order }}" > "results/bases-${{ matrix.base_order }}.g6"
+          test "$(wc -l < "results/bases-${{ matrix.base_order }}.g6")" -eq "${{ matrix.base_count }}"
+          python3 eg64-gadget/heterogeneous_spectrum_search.py --self-test
+
+      - name: Collect and combine all surviving gadgets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 eg64-gadget/collect_gadget_catalog.py \
+            --order 4 --expected-sources 1 --expected-candidates 4 \
+            --output results/catalog-4.json < results/source-4.g6
+          python3 eg64-gadget/collect_gadget_catalog.py \
+            --order 8 --expected-sources 5 --expected-candidates 4 \
+            --output results/catalog-8.json < results/source-8.g6
+          python3 eg64-gadget/collect_gadget_catalog.py \
+            --order 16 --expected-sources 4060 --expected-candidates 1 \
+            --output results/catalog-16.json < results/source-16.g6
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          candidates=[]
+          for order in (4,8,16):
+              candidates.extend(json.loads(Path(f'results/catalog-{order}.json').read_text())['candidates'])
+          assert len(candidates)==9
+          Path('results/catalog-all.json').write_text(
+              json.dumps({'candidates':candidates},indent=2,sort_keys=True)+'\n'
+          )
+          PY
+
+      - name: Exhaust heterogeneous base order ${{ matrix.base_order }}
+        id: search
+        shell: bash
+        run: |
+          set -euo pipefail
+          order="${{ matrix.base_order }}"
+          set +e
+          python3 eg64-gadget/heterogeneous_spectrum_search.py \
+            --catalog results/catalog-all.json \
+            --base-file "results/bases-${order}.g6" \
+            --witness-out "results/witness-${order}.json" \
+            > "results/search-${order}.json"
+          status=$?
+          set -e
+          if [[ "$status" == "10" ]]; then
+            python3 eg64-gadget/verify_heterogeneous_witness.py \
+              "results/witness-${order}.json" \
+              --output "results/independent-verification-${order}.json"
+            echo "found=1" >> "$GITHUB_OUTPUT"
+          else
+            [[ "$status" == "0" ]]
+            echo "found=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate exact accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          order=int("${{ matrix.base_order }}")
+          base_count=int("${{ matrix.base_count }}")
+          result=json.loads(Path(f'results/search-{order}.json').read_text())
+          stats=result['stats']
+          assert stats['raw_catalog_entries']==9
+          assert stats['distinct_spectrum_types']==4
+          assert stats['domain_size']==24
+          assert stats['base_graphs']==base_count
+          if result.get('witness') is None:
+              expected=base_count*(24**order)
+              assert stats['configurations_covered']==expected,(
+                  stats['configurations_covered'],expected
+              )
+          else:
+              verification=json.loads(
+                  Path(f'results/independent-verification-{order}.json').read_text()
+              )
+              assert verification['verified'] is True
+          audit={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'base_order':order,
+              'base_count':base_count,
+              'result':result,
+          }
+          Path(f'results/audit-{order}.json').write_text(
+              json.dumps(audit,indent=2,sort_keys=True)+'\n'
+          )
+          print(json.dumps({
+              'base_order':order,
+              'configurations_covered':stats['configurations_covered'],
+              'search_nodes':stats['search_nodes'],
+              'witness':result.get('witness') is not None,
+          }))
+          PY
+          sha256sum results/* > results/SHA256SUMS
+
+      - name: Upload exact order evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-heterogeneous-base${{ matrix.base_order }}
+          path: |
+            results/
+            eg64-gadget/spectrum_wiring_search.py
+            eg64-gadget/collect_gadget_catalog.py
+            eg64-gadget/heterogeneous_spectrum_search.py
+            eg64-gadget/verify_heterogeneous_witness.py
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Flag an independently verified counterexample
+        if: steps.search.outputs.found == '1'
+        run: exit 10
+
+  aggregate:
+    if: always()
+    needs: search
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-heterogeneous-base*
+          path: gathered
+      - name: Verify both order partitions and aggregate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          expected={10:19,12:85}
+          records=[]
+          witnesses=[]
+          for order,count in expected.items():
+              directory=Path('gathered')/f'eg64-heterogeneous-base{order}'/'results'
+              audit=json.loads((directory/f'audit-{order}.json').read_text())
+              assert audit['base_order']==order
+              assert audit['base_count']==count
+              result=audit['result']
+              if result.get('witness') is not None:
+                  verification=json.loads(
+                      (directory/f'independent-verification-{order}.json').read_text()
+                  )
+                  assert verification['verified'] is True
+                  witnesses.append({'order':order,'verification':verification})
+              records.append(audit)
+          total=sum(
+              record['result']['stats']['configurations_covered']
+              for record in records
+          )
+          expected_total=sum(count*(24**order) for order,count in expected.items())
+          if not witnesses:
+              assert total==expected_total,(total,expected_total)
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'base_orders':expected,
+              'configurations_covered':total,
+              'expected_configurations':expected_total,
+              'search_nodes':sum(
+                  record['result']['stats']['search_nodes'] for record in records
+              ),
+              'witnesses':witnesses,
+              'records':records,
+          }
+          Path('heterogeneous-base10-12-summary.json').write_text(
+              json.dumps(summary,indent=2,sort_keys=True)+'\n'
+          )
+          print(json.dumps({
+              'configurations_covered':total,
+              'search_nodes':summary['search_nodes'],
+              'witnesses':len(witnesses),
+          }))
+          if witnesses:
+              raise SystemExit(10)
+          PY
+          sha256sum heterogeneous-base10-12-summary.json > heterogeneous-base10-12-summary.sha256
+
+      - name: Upload aggregate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-heterogeneous-base10-12-complete-${{ github.run_id }}
+          path: |
+            heterogeneous-base10-12-summary.json
+            heterogeneous-base10-12-summary.sha256
+            gathered/
+            eg64-gadget/spectrum_wiring_search.py
+            eg64-gadget/collect_gadget_catalog.py
+            eg64-gadget/heterogeneous_spectrum_search.py
+            eg64-gadget/verify_heterogeneous_witness.py
+          if-no-files-found: error
+          retention-days: 90
