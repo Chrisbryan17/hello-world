@@ -1,0 +1,126 @@
+name: EG64 strongest gadget over cubic bases of order 12
+
+on:
+  push:
+    branches:
+      - eg64-cubic-cap-census
+    paths:
+      - '.github/workflows/eg64-spectrum-base12-strong.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  search:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Install nauty
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nauty
+          GENG="$(command -v geng || command -v nauty-geng || true)"
+          test -n "$GENG"
+          echo "GENG=$GENG" >> "$GITHUB_ENV"
+
+      - name: Generate all cubic bases of order 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          "$GENG" -q -c -d3 -D3 12 > results/bases-order12.g6
+          test "$(wc -l < results/bases-order12.g6)" -eq 85
+          python3 -m py_compile \
+            eg64-gadget/spectrum_wiring_search.py \
+            eg64-gadget/verify_wiring_witness.py
+
+      - name: Search the unique source-order-16 candidate gadget
+        id: search
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          "$GENG" -q -c -d3 -D3 16 \
+            | python3 eg64-gadget/spectrum_wiring_search.py \
+                --base-file results/bases-order12.g6 \
+                --order 16 \
+                --expected 4060 \
+                --witness-out results/witness.json \
+                > results/search.json
+          pipeline=("${PIPESTATUS[@]}")
+          set -e
+          generator_status="${pipeline[0]}"
+          checker_status="${pipeline[1]}"
+          if [[ "$checker_status" == "10" ]]; then
+            [[ "$generator_status" == "0" || "$generator_status" == "141" ]]
+            python3 eg64-gadget/verify_wiring_witness.py \
+              results/witness.json \
+              --output results/independent-verification.json
+            echo "found=1" >> "$GITHUB_OUTPUT"
+          else
+            [[ "$generator_status" == "0" ]]
+            [[ "$checker_status" == "0" ]]
+            echo "found=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate exhaustive accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          result = json.loads(Path("results/search.json").read_text())
+          stats = result["stats"]
+          assert stats["source_graphs"] == 4060
+          assert stats["candidate_vertices"] == 1
+          assert stats["base_graphs"] == 85
+          witness = result.get("witness")
+          if witness is None:
+              expected = 85 * (6 ** 12)
+              assert stats["assignments_covered"] == expected, (
+                  stats["assignments_covered"], expected
+              )
+          else:
+              verification = json.loads(
+                  Path("results/independent-verification.json").read_text()
+              )
+              assert verification["verified"] is True
+          audit = {
+              "source_commit": os.environ["GITHUB_SHA"],
+              "base_order": 12,
+              "base_graphs": 85,
+              "source_order": 16,
+              "result": result,
+          }
+          Path("results/audit.json").write_text(
+              json.dumps(audit, indent=2, sort_keys=True) + "\n"
+          )
+          print(json.dumps(audit, sort_keys=True))
+          PY
+          sha256sum results/* > results/SHA256SUMS
+
+      - name: Upload exact evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-spectrum-base12-strong-${{ github.run_id }}
+          path: |
+            results/
+            eg64-gadget/spectrum_wiring_search.py
+            eg64-gadget/verify_wiring_witness.py
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Flag an independently verified counterexample
+        if: steps.search.outputs.found == '1'
+        run: exit 10
