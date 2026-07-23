@@ -1,0 +1,169 @@
+name: EG64 Markstrom local-surgery search
+
+on:
+  push:
+    branches:
+      - eg64-markstrom-surgery
+    paths:
+      - 'eg64-surgery/**'
+      - '.github/workflows/eg64-markstrom-surgery.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  search:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - family: edge
+            max_edge: 9
+            max_vertex: 0
+          - family: vertex
+            max_edge: 0
+            max_vertex: 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 58
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Install generator and clone public extremal graphs
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nauty
+          GENG="$(command -v geng || command -v nauty-geng || true)"
+          test -n "$GENG"
+          echo "GENG=$GENG" >> "$GITHUB_ENV"
+          git clone --quiet --depth 1 --branch special-graphs \
+            https://github.com/rbsandeep/Erdos-Gyarfas.git public-extremals
+          find public-extremals/special -maxdepth 1 -type f -printf '%f\n' | sort
+
+      - name: Compile search and verifier
+        run: |
+          python3 -m py_compile \
+            eg64-surgery/markstrom_gadget_surgery.py \
+            eg64-surgery/verify_surgery_witness.py
+
+      - name: Exhaust ${{ matrix.family }} replacement gadgets
+        id: search
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          family="${{ matrix.family }}"
+          set +e
+          python3 eg64-surgery/markstrom_gadget_surgery.py \
+            --special-dir public-extremals/special \
+            --geng "$GENG" \
+            --max-edge-gadget "${{ matrix.max_edge }}" \
+            --max-vertex-gadget "${{ matrix.max_vertex }}" \
+            --checkpoint "results/${family}.json" \
+            --witness-out "results/witness-${family}.json" \
+            > "results/${family}.stdout.json" \
+            2> "results/${family}.stderr.log"
+          status=$?
+          set -e
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          case "$status" in
+            0)
+              test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "results/${family}.json")" = "exhausted"
+              ;;
+            10)
+              python3 eg64-surgery/verify_surgery_witness.py \
+                "results/witness-${family}.json" \
+                --output "results/independent-verification-${family}.json"
+              ;;
+            *)
+              cat "results/${family}.stderr.log" >&2 || true
+              exit "$status"
+              ;;
+          esac
+          sha256sum results/* > "results/SHA256SUMS-${family}"
+
+      - name: Upload exact family evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-markstrom-surgery-${{ matrix.family }}
+          path: |
+            results/
+            eg64-surgery/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Flag independently verified witness
+        if: steps.search.outputs.exit_code == '10'
+        run: exit 10
+
+  aggregate:
+    if: always()
+    needs: search
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-markstrom-surgery-*
+          path: gathered
+      - name: Validate both exhaustive family records
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          records={}
+          witnesses=[]
+          for family in ('edge','vertex'):
+              directory=Path('gathered')/f'eg64-markstrom-surgery-{family}'
+              result=json.loads((directory/f'{family}.json').read_text())
+              assert result['status'] in ('exhausted','witness'),result
+              assert result['stats']['base_graphs_unique'] >= 3,result
+              assert result['stats']['surgeries'] > 0,result
+              if result['status']=='witness':
+                  proof=directory/f'independent-verification-{family}.json'
+                  assert proof.exists()
+                  verification=json.loads(proof.read_text())
+                  assert verification['verified'] is True
+                  witnesses.append({'family':family,'witness':result['witness'],'verification':verification})
+              records[family]=result
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'records':records,
+              'verified_witnesses':witnesses,
+          }
+          out=Path('markstrom-surgery-summary.json')
+          out.write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          Path('markstrom-surgery-summary.sha256').write_text(
+              hashlib.sha256(out.read_bytes()).hexdigest()+'  markstrom-surgery-summary.json\n'
+          )
+          print(json.dumps({
+              'surgeries':{family:records[family]['stats']['surgeries'] for family in records},
+              'verified_witnesses':len(witnesses),
+          },sort_keys=True))
+          if witnesses:
+              raise SystemExit(10)
+          PY
+      - name: Upload aggregate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-markstrom-surgery-complete-${{ github.run_id }}
+          path: |
+            markstrom-surgery-summary.json
+            markstrom-surgery-summary.sha256
+            gathered/
+            eg64-surgery/
+          if-no-files-found: error
+          retention-days: 90
