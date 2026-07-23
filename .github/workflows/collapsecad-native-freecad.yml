@@ -59,11 +59,7 @@ jobs:
             | sha256sum --check --strict
           chmod +x FreeCAD.AppImage
           ./FreeCAD.AppImage --appimage-extract >/dev/null
-          FREECAD_CMD="$(find "$PWD/squashfs-root" -maxdepth 5 \
-            \( -type f -o -type l \) \
-            \( -iname 'freecadcmd' -o -iname 'FreeCADCmd' \) \
-            -print -quit)"
-          test -n "$FREECAD_CMD"
+          FREECAD_CMD="$PWD/squashfs-root/AppRun"
           test -x "$FREECAD_CMD"
           echo "FREECAD_CMD=$FREECAD_CMD" >> "$GITHUB_ENV"
           "$FREECAD_CMD" --version
@@ -77,7 +73,7 @@ jobs:
           set +e
           mkdir -p "$FREECAD_USER_HOME" collapsecad_ci/build
           PYTHONPATH="$PWD/collapsecad_ci/src" \
-            "$FREECAD_CMD" "$PWD/collapsecad_ci/scripts/generate_freecad.py" \
+            "$FREECAD_CMD" --console "$PWD/collapsecad_ci/scripts/generate_freecad.py" \
             > collapsecad_ci/build/native-freecad-generation.log 2>&1
           STATUS=$?
           cat collapsecad_ci/build/native-freecad-generation.log
@@ -97,7 +93,7 @@ jobs:
           set +e
           mkdir -p collapsecad_ci/build
           PYTHONPATH="$PWD/collapsecad_ci/src" \
-            "$FREECAD_CMD" "$PWD/collapsecad_ci/scripts/inspect_native_freecad.py" \
+            "$FREECAD_CMD" --console "$PWD/collapsecad_ci/scripts/inspect_native_freecad.py" \
             > collapsecad_ci/build/native-freecad-inspection.log 2>&1
           STATUS=$?
           cat collapsecad_ci/build/native-freecad-inspection.log
