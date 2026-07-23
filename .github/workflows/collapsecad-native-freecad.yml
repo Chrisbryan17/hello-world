@@ -59,10 +59,12 @@ jobs:
             | sha256sum --check --strict
           chmod +x FreeCAD.AppImage
           ./FreeCAD.AppImage --appimage-extract >/dev/null
-          FREECAD_CMD="$PWD/squashfs-root/AppRun"
+          APPDIR="$PWD/squashfs-root"
+          FREECAD_CMD="$APPDIR/AppRun"
           test -x "$FREECAD_CMD"
+          echo "APPDIR=$APPDIR" >> "$GITHUB_ENV"
           echo "FREECAD_CMD=$FREECAD_CMD" >> "$GITHUB_ENV"
-          "$FREECAD_CMD" --version
+          APPDIR="$APPDIR" "$FREECAD_CMD" --version
 
       - name: Generate nine detailed 1-to-1 FreeCAD documents
         shell: bash
@@ -73,6 +75,7 @@ jobs:
           set +e
           mkdir -p "$FREECAD_USER_HOME" collapsecad_ci/build
           PYTHONPATH="$PWD/collapsecad_ci/src" \
+            APPDIR="$APPDIR" \
             "$FREECAD_CMD" --console "$PWD/collapsecad_ci/scripts/generate_freecad.py" \
             > collapsecad_ci/build/native-freecad-generation.log 2>&1
           STATUS=$?
@@ -93,6 +96,7 @@ jobs:
           set +e
           mkdir -p collapsecad_ci/build
           PYTHONPATH="$PWD/collapsecad_ci/src" \
+            APPDIR="$APPDIR" \
             "$FREECAD_CMD" --console "$PWD/collapsecad_ci/scripts/inspect_native_freecad.py" \
             > collapsecad_ci/build/native-freecad-inspection.log 2>&1
           STATUS=$?
