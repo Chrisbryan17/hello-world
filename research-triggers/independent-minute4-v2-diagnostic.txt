@@ -1,0 +1,3 @@
+inspect=slots-duration-slug-condition-id-overlap
+source=kinzikdza/polymarket-updown-microstructure
+created=2026-07-23
