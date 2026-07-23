@@ -1,0 +1,146 @@
+name: native-freecad
+
+on:
+  push:
+    branches: [jamaica-collapsible-container]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-native-family:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      FREECAD_VERSION: "1.1.1"
+      FREECAD_APPIMAGE: FreeCAD_1.1.1-Linux-x86_64-py311.AppImage
+      FREECAD_SHA256: e2006138400b2fa85fa2e160e872d00767eb32964e85075830f7e198a3a876e1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache pinned FreeCAD AppImage
+        uses: actions/cache@v4
+        with:
+          path: .cache/freecad/${{ env.FREECAD_APPIMAGE }}
+          key: freecad-${{ runner.os }}-${{ env.FREECAD_VERSION }}-${{ env.FREECAD_SHA256 }}
+
+      - name: Download and verify pinned FreeCAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .cache/freecad
+          asset=".cache/freecad/${FREECAD_APPIMAGE}"
+          if [[ ! -s "$asset" ]]; then
+            curl --fail --location --retry 5 --retry-all-errors \
+              --output "$asset" \
+              "https://github.com/FreeCAD/FreeCAD/releases/download/${FREECAD_VERSION}/${FREECAD_APPIMAGE}"
+          fi
+          echo "${FREECAD_SHA256}  ${asset}" | sha256sum --check --strict
+          chmod +x "$asset"
+
+      - name: Extract and inspect headless runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/freecad
+          rm -rf squashfs-root
+          .cache/freecad/${FREECAD_APPIMAGE} --appimage-extract >/dev/null
+          freecad_cmd="$(find squashfs-root -type f \( -name freecadcmd -o -name FreeCADCmd \) -perm -u+x | head -n 1)"
+          test -n "$freecad_cmd"
+          {
+            echo "selected_relative=$freecad_cmd"
+            echo "selected_absolute=$GITHUB_WORKSPACE/$freecad_cmd"
+            echo "=== selected executable ==="
+            file "$freecad_cmd" || true
+            ls -l "$freecad_cmd" || true
+            readlink -f "$freecad_cmd" || true
+            ldd "$freecad_cmd" || true
+            echo "=== AppRun ==="
+            file squashfs-root/AppRun || true
+            ls -l squashfs-root/AppRun || true
+            readlink -f squashfs-root/AppRun || true
+            head -n 240 squashfs-root/AppRun || true
+            echo "=== candidate runtimes ==="
+            find squashfs-root -maxdepth 5 -type f \
+              \( -iname '*freecad*' -o -iname 'python3*' -o -name 'AppRun' \) \
+              -printf '%p\t%s bytes\n' | sort
+            echo "=== candidate launchers and symlinks ==="
+            find squashfs-root -maxdepth 4 \
+              \( -type f -o -type l \) \
+              \( -iname '*freecad*' -o -name 'AppRun' \) \
+              -exec ls -ld {} \; | sort
+          } > build/freecad/RUNTIME_PATHS.txt 2>&1
+          cp squashfs-root/AppRun build/freecad/AppRun.txt || true
+          wrapper="$GITHUB_WORKSPACE/build/freecad/freecadcmd-appimage"
+          printf '#!/bin/bash\nexec "%s" freecadcmd "$@"\n' \
+            "$GITHUB_WORKSPACE/squashfs-root/AppRun" > "$wrapper"
+          chmod +x "$wrapper"
+          echo "FREECAD_CMD=$wrapper" >> "$GITHUB_ENV"
+
+      - name: Report native runtime
+        run: '"$FREECAD_CMD" --version'
+
+      - name: Capture FreeCAD CLI contract
+        shell: bash
+        run: |
+          "$FREECAD_CMD" --help > build/freecad/FREECAD_HELP.txt 2>&1 || true
+
+      - name: Generate native three-variant family
+        shell: bash
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src
+          JCC_FREECAD_OUTPUT: ${{ github.workspace }}/build/freecad
+          JCC_FREECAD_SAMPLES: "3"
+        run: |
+          set -euo pipefail
+          printf 'driver reached FreeCAD invocation\n' > build/freecad/DRIVER_SENTINEL.txt
+          "$FREECAD_CMD" --console <<PY
+          import runpy
+          runpy.run_path(r"$GITHUB_WORKSPACE/scripts/build_native_freecad.py", run_name="__main__")
+          exit()
+          PY
+          printf 'FreeCADCmd exit status was zero\n' >> build/freecad/DRIVER_SENTINEL.txt
+
+      - name: Diagnose native documents
+        shell: bash
+        run: |
+          set -u
+          echo "=== generated paths ==="
+          find build/freecad -maxdepth 1 -type f -printf '%f\t%s bytes\n' | sort || true
+          echo "=== file signatures ==="
+          find build/freecad -maxdepth 1 -type f -name '*.FCStd' -print0 \
+            | sort -z \
+            | xargs -0 -r file || true
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import is_zipfile
+          files = sorted(Path("build/freecad").glob("*.FCStd"))
+          print(f"python_fcstd_count={len(files)}")
+          for path in files:
+              print(f"{path.name}: size={path.stat().st_size}, zip={is_zipfile(path)}")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: freecad-native-family-diagnostic
+          path: build/freecad
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Validate native documents
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find build/freecad -maxdepth 1 -type f -name '*.FCStd' | sort)
+          test "${#files[@]}" -eq 9
+          for file in "${files[@]}"; do
+            test -s "$file"
+            unzip -t "$file" >/dev/null
+          done
+          for variant in 20std 40std 40hc; do
+            test "$(find build/freecad -maxdepth 1 -type f -name "${variant}_*.FCStd" | wc -l)" -eq 3
+          done
+          sha256sum "${files[@]}" > build/freecad/SHA256SUMS
