@@ -148,8 +148,6 @@ def verify(witness: dict) -> dict:
     if len(lift) != witness["lift_order"]:
         raise AssertionError("lift order mismatch")
     digest = adjacency_digest(lift)
-    if digest != witness["lift_adjacency_sha256"]:
-        raise AssertionError("lift adjacency digest mismatch")
     component_results = []
     for vertices in components(lift):
         component = induced_component(lift, vertices)
@@ -170,6 +168,8 @@ def verify(witness: dict) -> dict:
             "minimum_degree": min(map(len, component)),
             "power_lengths_checked": checked,
         })
+    if digest != witness["lift_adjacency_sha256"]:
+        raise AssertionError("lift adjacency digest mismatch")
     return {
         "verified": True,
         "lift_order": len(lift),
