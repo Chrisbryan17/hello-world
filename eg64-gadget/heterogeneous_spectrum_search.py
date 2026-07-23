@@ -89,53 +89,97 @@ def solve_exact(
     domain_size = len(domains)
     constraints = encoded_base_cycles(base)
 
+    # Every spectrum in the recovered catalog is a complete integer interval.
+    # Retain an assertion so this fast path can never silently over-approximate.
+    spectrum_bounds = []
+    for spectrum in spectra:
+        if spectrum != tuple(range(spectrum[0], spectrum[-1] + 1)):
+            raise AssertionError(("non-interval spectrum", spectrum))
+        spectrum_bounds.append((spectrum[0], spectrum[-1]))
+    domain_pair_bounds = tuple(
+        tuple(spectrum_bounds[spectrum_id] for spectrum_id in row)
+        for row in pair_spectrum_ids
+    )
+    slot_options = tuple(
+        tuple(sorted({domain_pair_bounds[domain][pair] for domain in range(domain_size)}))
+        for pair in range(3)
+    )
+
     occurrences = [0] * len(base)
+    constraints_by_vertex = [[] for _ in base]
     for constraint in constraints:
         for vertex, _, _ in constraint:
             occurrences[vertex] += 1
+            constraints_by_vertex[vertex].append(constraint)
     variable_order = tuple(
         sorted(range(len(base)), key=lambda vertex: (-occurrences[vertex], vertex))
     )
-    position = {vertex: index for index, vertex in enumerate(variable_order)}
-    triggered = [[] for _ in variable_order]
-    for constraint in constraints:
-        triggered[max(position[vertex] for vertex, _, _ in constraint)].append(
-            constraint
-        )
 
     maximum_order = max(int(gadget["gadget_order"]) for gadget in catalog) * len(base)
-    powers = set()
+    powers = []
     power = 4
     while power <= maximum_order:
-        powers.add(power)
+        powers.append(power)
         power *= 2
 
-    spectrum_cache: dict[tuple[int, ...], bool] = {}
+    def interval_contains_power(lower: int, upper: int) -> bool:
+        return any(lower <= power <= upper for power in powers)
+
+    completion_cache: dict[tuple[int, int, int], tuple[tuple[int, int], ...]] = {}
+
+    def completion_bounds(counts: tuple[int, int, int]) -> tuple[tuple[int, int], ...]:
+        if counts in completion_cache:
+            return completion_cache[counts]
+        possible = {(0, 0)}
+        for pair_index, count in enumerate(counts):
+            for _ in range(count):
+                possible = {
+                    (lower + option_lower, upper + option_upper)
+                    for lower, upper in possible
+                    for option_lower, option_upper in slot_options[pair_index]
+                }
+        answer = tuple(sorted(possible))
+        completion_cache[counts] = answer
+        return answer
+
+    feasibility_cache: dict[tuple[int, int, int, int, int], bool] = {}
     assignments: list[int | None] = [None] * len(base)
     covered_configurations = 0
     search_nodes = 0
 
-    def constraint_is_forbidden(
+    def constraint_has_avoiding_completion(
         constraint: tuple[tuple[int, int, int], ...]
     ) -> bool:
-        key = []
+        assigned_lower = 0
+        assigned_upper = 0
+        unassigned_counts = [0, 0, 0]
         for vertex, first_slot, second_slot in constraint:
+            pair_index = slot_pair_index(first_slot, second_slot)
             domain_index = assignments[vertex]
             if domain_index is None:
-                raise AssertionError("constraint evaluated before all variables were assigned")
-            pair_index = slot_pair_index(first_slot, second_slot)
-            key.append(pair_spectrum_ids[domain_index][pair_index])
-        cache_key = tuple(sorted(key))
-        if cache_key not in spectrum_cache:
-            possible_lengths = {0}
-            for spectrum_index in cache_key:
-                possible_lengths = {
-                    partial + contribution
-                    for partial in possible_lengths
-                    for contribution in spectra[spectrum_index]
-                }
-            spectrum_cache[cache_key] = bool(possible_lengths & powers)
-        return spectrum_cache[cache_key]
+                unassigned_counts[pair_index] += 1
+            else:
+                lower, upper = domain_pair_bounds[domain_index][pair_index]
+                assigned_lower += lower
+                assigned_upper += upper
+        key = (
+            assigned_lower,
+            assigned_upper,
+            unassigned_counts[0],
+            unassigned_counts[1],
+            unassigned_counts[2],
+        )
+        if key not in feasibility_cache:
+            feasibility_cache[key] = any(
+                not interval_contains_power(
+                    assigned_lower + additional_lower,
+                    assigned_upper + additional_upper,
+                )
+                for additional_lower, additional_upper in completion_bounds(
+                    tuple(unassigned_counts)
+                )
+            )
+        return feasibility_cache[key]
 
     def search(depth: int) -> tuple[int, ...] | None:
         nonlocal covered_configurations, search_nodes
@@ -148,8 +192,8 @@ def solve_exact(
         for domain_index in range(domain_size):
             assignments[vertex] = domain_index
             failed = any(
-                constraint_is_forbidden(constraint)
-                for constraint in triggered[depth]
+                not constraint_has_avoiding_completion(constraint)
+                for constraint in constraints_by_vertex[vertex]
             )
             if failed:
                 covered_configurations += domain_size ** (
@@ -169,9 +213,8 @@ def solve_exact(
         search_nodes,
         len(constraints),
         domains,
-        len(spectrum_cache),
+        len(feasibility_cache) + len(completion_cache),
     )
-
 
 def self_test() -> None:
     from spectrum_wiring_search import (
