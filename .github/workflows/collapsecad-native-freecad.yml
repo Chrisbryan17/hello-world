@@ -1,0 +1,132 @@
+name: CollapseCAD Detailed Native FreeCAD Proof
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".collapsecad-native-ci/**"
+      - ".github/workflows/collapsecad-native-freecad.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-freecad:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out isolated CI branch
+        uses: actions/checkout@v4
+
+      - name: Verify, extract, and patch detailed engineering payload
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import base64
+          import hashlib
+          import io
+          import tarfile
+
+          parts = sorted(Path('.collapsecad-native-ci/detailed').glob('part-*.txt'))
+          if len(parts) != 5:
+              raise SystemExit(f'expected 5 payload parts, found {len(parts)}')
+          encoded = ''.join(part.read_text().strip() for part in parts)
+          payload = base64.b64decode(encoded, validate=True)
+          expected = '29cf1b7e6e15a3d25d80ba928d5151e3ea07f8b60a3b8dc942bce71267c48193'
+          actual = hashlib.sha256(payload).hexdigest()
+          if actual != expected:
+              raise SystemExit(f'payload checksum mismatch: {actual} != {expected}')
+          root = Path.cwd().resolve()
+          with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as archive:
+              for member in archive.getmembers():
+                  target = (root / member.name).resolve()
+                  if root != target and root not in target.parents:
+                      raise SystemExit(f'unsafe archive path: {member.name}')
+              archive.extractall(root, filter='data')
+
+          adapter = Path('collapsecad_ci/src/collapsecad/freecad_adapter.py')
+          source = adapter.read_text()
+          old = '''    existing = App.getDocument(document_name)\n    if existing is not None:\n        App.closeDocument(document_name)\n'''
+          new = '''    try:\n        existing = App.getDocument(document_name)\n    except (NameError, RuntimeError):\n        existing = None\n    if existing is not None:\n        App.closeDocument(document_name)\n'''
+          if old not in source:
+              raise SystemExit('expected FreeCAD document lookup block not found')
+          adapter.write_text(source.replace(old, new))
+          print(f'detailed payload verified: sha256={actual}; FreeCAD 1.1 document lookup patch applied')
+          PY
+
+      - name: Install checksum-pinned FreeCAD command runtime
+        shell: bash
+        run: |
+          curl --fail --location --retry 5 --retry-delay 3 \
+            --output FreeCAD.AppImage \
+            https://github.com/FreeCAD/FreeCAD/releases/download/1.1.1/FreeCAD_1.1.1-Linux-x86_64-py311.AppImage
+          echo 'e2006138400b2fa85fa2e160e872d00767eb32964e85075830f7e198a3a876e1  FreeCAD.AppImage' \
+            | sha256sum --check --strict
+          chmod +x FreeCAD.AppImage
+          ./FreeCAD.AppImage --appimage-extract >/dev/null
+          FREECAD_CMD="$(find "$PWD/squashfs-root" -maxdepth 5 \
+            \( -type f -o -type l \) \
+            \( -iname 'freecadcmd' -o -iname 'FreeCADCmd' \) \
+            -print -quit)"
+          test -n "$FREECAD_CMD"
+          test -x "$FREECAD_CMD"
+          echo "FREECAD_CMD=$FREECAD_CMD" >> "$GITHUB_ENV"
+          "$FREECAD_CMD" --version
+
+      - name: Generate nine detailed 1-to-1 FreeCAD documents
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+          FREECAD_USER_HOME: ${{ github.workspace }}/.freecad-user
+        run: |
+          set +e
+          mkdir -p "$FREECAD_USER_HOME" collapsecad_ci/build
+          SCRIPT="$PWD/collapsecad_ci/scripts/generate_freecad.py"
+          SCRIPT_LITERAL="$(python -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$SCRIPT")"
+          printf 'import runpy\nrunpy.run_path(%s, run_name="__main__")\n' "$SCRIPT_LITERAL" \
+            | PYTHONPATH="$PWD/collapsecad_ci/src" "$FREECAD_CMD" \
+            > collapsecad_ci/build/native-freecad-generation.log 2>&1
+          STATUS=$?
+          cat collapsecad_ci/build/native-freecad-generation.log
+          if test "$STATUS" -ne 0; then
+            exit "$STATUS"
+          fi
+          find "$PWD/collapsecad_ci/build/freecad" -type f -name '*.FCStd' -print -exec ls -lh {} \;
+          MODEL_COUNT="$(find "$PWD/collapsecad_ci/build/freecad" -type f -name '*.FCStd' | wc -l)"
+          test "$MODEL_COUNT" -eq 9
+
+      - name: Reopen and inspect every detailed FreeCAD document
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+          FREECAD_USER_HOME: ${{ github.workspace }}/.freecad-user
+        run: |
+          set +e
+          mkdir -p collapsecad_ci/build
+          SCRIPT="$PWD/collapsecad_ci/scripts/inspect_native_freecad.py"
+          SCRIPT_LITERAL="$(python -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$SCRIPT")"
+          printf 'import runpy\nrunpy.run_path(%s, run_name="__main__")\n' "$SCRIPT_LITERAL" \
+            | PYTHONPATH="$PWD/collapsecad_ci/src" "$FREECAD_CMD" \
+            > collapsecad_ci/build/native-freecad-inspection.log 2>&1
+          STATUS=$?
+          cat collapsecad_ci/build/native-freecad-inspection.log
+          if test -f collapsecad_ci/build/native-freecad-manifest.json; then
+            cat collapsecad_ci/build/native-freecad-manifest.json
+          fi
+          exit "$STATUS"
+
+      - name: Upload detailed native FreeCAD proof and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collapsecad-detailed-native-freecad
+          path: |
+            collapsecad_ci/build/freecad
+            collapsecad_ci/build/native-freecad-manifest.json
+            collapsecad_ci/build/native-freecad-generation.log
+            collapsecad_ci/build/native-freecad-inspection.log
+          if-no-files-found: error
+          retention-days: 30
