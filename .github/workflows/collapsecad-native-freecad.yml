@@ -66,7 +66,6 @@ jobs:
             \( -iname 'freecadcmd' -o -iname 'FreeCADCmd' \) \
             -print -quit)"
           test -n "$FREECAD_CMD"
-          FREECAD_CMD="$(readlink -f "$FREECAD_CMD")"
           test -x "$FREECAD_CMD"
           echo "FREECAD_CMD=$FREECAD_CMD" >> "$GITHUB_ENV"
           "$FREECAD_CMD" --version
@@ -75,20 +74,26 @@ jobs:
         shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
+          FREECAD_USER_HOME: ${{ github.workspace }}/.freecad-user
         run: |
+          mkdir -p "$FREECAD_USER_HOME"
           PYTHONPATH="$PWD/collapsecad_ci/src" \
-            "$FREECAD_CMD" collapsecad_ci/scripts/generate_freecad.py
+            "$FREECAD_CMD" "$PWD/collapsecad_ci/scripts/generate_freecad.py"
+          find "$PWD/collapsecad_ci/build/freecad" -type f -name '*.FCStd' -print -exec ls -lh {} \;
+          MODEL_COUNT="$(find "$PWD/collapsecad_ci/build/freecad" -type f -name '*.FCStd' | wc -l)"
+          test "$MODEL_COUNT" -eq 9
 
       - name: Reopen and inspect native FreeCAD documents
         id: inspect
         shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
+          FREECAD_USER_HOME: ${{ github.workspace }}/.freecad-user
         run: |
           set +e
           mkdir -p collapsecad_ci/build
           PYTHONPATH="$PWD/collapsecad_ci/src" \
-            "$FREECAD_CMD" collapsecad_ci/scripts/inspect_native_freecad.py \
+            "$FREECAD_CMD" "$PWD/collapsecad_ci/scripts/inspect_native_freecad.py" \
             > collapsecad_ci/build/native-freecad-inspection.log 2>&1
           STATUS=$?
           cat collapsecad_ci/build/native-freecad-inspection.log
