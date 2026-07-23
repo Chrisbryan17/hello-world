@@ -1,0 +1,1 @@
+Public-data-only trigger for March 21-23 BTC5m 100ms steps.
