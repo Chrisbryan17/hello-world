@@ -1,0 +1,161 @@
+name: EG64 cubic record graphs girth 15 through 20
+
+on:
+  push:
+    branches:
+      - eg64-cubic-cap-census
+    paths:
+      - '.github/workflows/eg64-record-girth15-20.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {girth: 15, order: 620, file: k3_g15_n620.g6}
+          - {girth: 16, order: 936, file: k3_g16_n936.g6}
+          - {girth: 17, order: 2048, file: k3_g17_n2048.g6}
+          - {girth: 18, order: 2560, file: k3_g18_n2560.g6}
+          - {girth: 19, order: 4324, file: k3_g19_n4324.g6}
+          - {girth: 20, order: 5376, file: k3_g20_n5376.g6}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Fetch exact cubic record graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          url="https://houseofgraphs.org/data/cages/${{ matrix.file }}"
+          curl -fsSL -D results/download.headers "$url" -o results/source.g6
+          python3 - <<'PY'
+          from pathlib import Path
+          data=Path('results/source.g6').read_bytes().strip()
+          if data.startswith(b'>>graph6<<'):
+              data=data[len(b'>>graph6<<'):].strip()
+          lines=[line.strip() for line in data.splitlines() if line.strip()]
+          if len(lines)!=1:
+              raise SystemExit(f'expected one record, received {len(lines)}')
+          values=[byte-63 for byte in lines[0]]
+          if values[0]<=62: order=values[0]
+          elif values[0]==63 and values[1]!=63: order=(values[1]<<12)|(values[2]<<6)|values[3]
+          else: raise SystemExit('unsupported graph6 order')
+          if order!=${{ matrix.order }}:
+              raise SystemExit(f'expected order ${{ matrix.order }}, received {order}')
+          Path('results/normalized.g6').write_bytes(lines[0]+b'\n')
+          PY
+          sha256sum results/source.g6 results/normalized.g6 > results/source.sha256
+
+      - name: Test base graph and every edge subdivision
+        id: audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          python3 eg64-census/cubic_cap_census.py \
+            --order "${{ matrix.order }}" \
+            --expected 1 \
+            --witness-out results/witness.json \
+            < results/normalized.g6 \
+            > results/census.json
+          status=$?
+          set -e
+          if [[ "$status" == "10" ]]; then
+            python3 eg64-census/verify_cap_witness.py \
+              results/witness.json \
+              --output results/independent-verification.json
+            echo 'found=1' >> "$GITHUB_OUTPUT"
+          else
+            [[ "$status" == "0" ]]
+            echo 'found=0' >> "$GITHUB_OUTPUT"
+          fi
+          cat results/census.json
+
+      - name: Validate result
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          result=json.loads(Path('results/census.json').read_text())
+          stats=result['stats']
+          assert stats['order']==${{ matrix.order }}
+          if result.get('witness') is None:
+              assert stats['graphs']==1
+              assert stats['subdivision_candidates']==0
+          else:
+              proof=Path('results/independent-verification.json')
+              assert proof.exists() and json.loads(proof.read_text())['verified'] is True
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'girth':${{ matrix.girth }},
+              'order':${{ matrix.order }},
+              'source_url':'https://houseofgraphs.org/data/cages/${{ matrix.file }}',
+              'source_sha256':hashlib.sha256(Path('results/source.g6').read_bytes()).hexdigest(),
+              'result':result,
+          }
+          Path('results/summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          PY
+          sha256sum results/* > results/SHA256SUMS.tmp
+          grep -v 'SHA256SUMS' results/SHA256SUMS.tmp > results/SHA256SUMS
+          rm results/SHA256SUMS.tmp
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eg64-record-g${{ matrix.girth }}-n${{ matrix.order }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Flag independently verified counterexample
+        if: steps.audit.outputs.found == '1'
+        run: exit 10
+
+  aggregate:
+    if: always()
+    needs: audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-record-g*-n*
+          path: gathered
+      - name: Aggregate all completed audits
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          records=[]; witnesses=[]
+          for path in sorted(Path('gathered').glob('eg64-record-g*-n*/summary.json')):
+              record=json.loads(path.read_text()); records.append(record)
+              if record['result'].get('witness'): witnesses.append(record['result']['witness'])
+          assert len(records)==6,len(records)
+          summary={'families':len(records),'verified_witnesses':witnesses,'records':records}
+          Path('record-girth15-20-summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          print(json.dumps({'families':len(records),'witnesses':len(witnesses)}))
+          if witnesses: raise SystemExit(10)
+          PY
+          sha256sum record-girth15-20-summary.json > record-girth15-20-summary.sha256
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eg64-record-girth15-20-complete-${{ github.run_id }}
+          path: |
+            record-girth15-20-summary.json
+            record-girth15-20-summary.sha256
+            gathered/
+          if-no-files-found: error
+          retention-days: 90
