@@ -1,0 +1,86 @@
+name: CollapseCAD Native FreeCAD Proof
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".collapsecad-native-ci/**"
+      - ".github/workflows/collapsecad-native-freecad.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-freecad:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out isolated CI branch
+        uses: actions/checkout@v4
+
+      - name: Verify and extract engineering payload
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import base64
+          import hashlib
+          import io
+          import tarfile
+
+          source = Path('.collapsecad-native-ci/payload.tar.gz.b64')
+          payload = base64.b64decode(source.read_text(), validate=True)
+          expected = 'e834a96d0bbb5e4649cd169ecc9d90ac341bf1a34203673ea20395a9559e95cf'
+          actual = hashlib.sha256(payload).hexdigest()
+          if actual != expected:
+              raise SystemExit(f'payload checksum mismatch: {actual} != {expected}')
+          root = Path.cwd().resolve()
+          with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as archive:
+              for member in archive.getmembers():
+                  target = (root / member.name).resolve()
+                  if root != target and root not in target.parents:
+                      raise SystemExit(f'unsafe archive path: {member.name}')
+              archive.extractall(root, filter='data')
+          print(f'payload verified: sha256={actual}')
+          PY
+
+      - name: Install native FreeCAD runtime
+        shell: bash
+        run: |
+          sudo add-apt-repository -y universe
+          sudo apt-get update
+          sudo apt-get install -y freecad
+          FREECAD_CMD="$(command -v FreeCADCmd || command -v freecadcmd || true)"
+          test -n "$FREECAD_CMD"
+          "$FREECAD_CMD" --version
+
+      - name: Generate nine native FreeCAD documents
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          FREECAD_CMD="$(command -v FreeCADCmd || command -v freecadcmd)"
+          PYTHONPATH="$PWD/collapsecad_ci/src" \
+            "$FREECAD_CMD" collapsecad_ci/scripts/generate_freecad.py
+
+      - name: Reopen and inspect native FreeCAD documents
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          FREECAD_CMD="$(command -v FreeCADCmd || command -v freecadcmd)"
+          PYTHONPATH="$PWD/collapsecad_ci/src" \
+            "$FREECAD_CMD" collapsecad_ci/scripts/inspect_native_freecad.py
+          cat collapsecad_ci/build/native-freecad-manifest.json
+
+      - name: Upload native FreeCAD proof artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: collapsecad-native-freecad
+          path: |
+            collapsecad_ci/build/freecad
+            collapsecad_ci/build/native-freecad-manifest.json
+          if-no-files-found: error
+          retention-days: 30
