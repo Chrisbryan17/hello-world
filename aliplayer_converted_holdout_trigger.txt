@@ -1,0 +1,1 @@
+Public-data-only trigger for exact BTC5m historical-shard extraction of the frozen April 1-7 holdout using active-window timestamps.
