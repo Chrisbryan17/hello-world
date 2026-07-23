@@ -53,6 +53,12 @@ jobs:
       - name: Report native runtime
         run: '"$FREECAD_CMD" --version'
 
+      - name: Capture FreeCAD CLI contract
+        shell: bash
+        run: |
+          mkdir -p build/freecad
+          "$FREECAD_CMD" --help > build/freecad/FREECAD_HELP.txt 2>&1 || true
+
       - name: Generate native three-variant family
         shell: bash
         env:
@@ -61,7 +67,6 @@ jobs:
           JCC_FREECAD_SAMPLES: "3"
         run: |
           set -euo pipefail
-          mkdir -p build/freecad
           printf 'driver reached FreeCAD invocation\n' > build/freecad/DRIVER_SENTINEL.txt
           "$FREECAD_CMD" scripts/build_native_freecad.py
           printf 'FreeCADCmd exit status was zero\n' >> build/freecad/DRIVER_SENTINEL.txt
