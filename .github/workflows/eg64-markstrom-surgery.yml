@@ -126,10 +126,10 @@ jobs:
           records={}
           witnesses=[]
           for family in ('edge','vertex'):
-              directory=Path('gathered')/f'eg64-markstrom-surgery-{family}'
+              directory=Path('gathered')/f'eg64-markstrom-surgery-{family}'/'results'
               result=json.loads((directory/f'{family}.json').read_text())
               assert result['status'] in ('exhausted','witness'),result
-              assert result['stats']['base_graphs_unique'] >= 3,result
+              assert result['stats']['base_graphs_unique'] == 4,result
               assert result['stats']['surgeries'] > 0,result
               if result['status']=='witness':
                   proof=directory/f'independent-verification-{family}.json'
