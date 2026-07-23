@@ -29,8 +29,13 @@ jobs:
       - name: Compile probe
         run: python -m py_compile tools/btc_minute4_recovery_probe.py
       - name: Verify public BTC and spot sources
-        run: python tools/btc_minute4_recovery_probe.py
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p recovery-probe-output
+          python tools/btc_minute4_recovery_probe.py 2>&1 | tee recovery-probe-output/probe.log
       - name: Upload checksummed probe evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: btc-minute4-recovery-probe
