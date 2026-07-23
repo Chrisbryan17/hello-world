@@ -1,0 +1,158 @@
+name: EG64 exhaustive F3-square voltage lifts
+
+on:
+  push:
+    branches:
+      - eg64-voltage-f3sq
+    paths:
+      - 'eg64-voltage/**'
+      - '.github/workflows/eg64-voltage-f3sq.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lift:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - base_order: 4
+            expected: 1
+          - base_order: 6
+            expected: 2
+          - base_order: 8
+            expected: 5
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Install nauty
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nauty
+          GENG="$(command -v geng || command -v nauty-geng || true)"
+          test -n "$GENG"
+          echo "GENG=$GENG" >> "$GITHUB_ENV"
+      - name: Compile search and independent verifier
+        run: |
+          python3 -m py_compile \
+            eg64-voltage/cyclic_lift_census.py \
+            eg64-voltage/f3_square_lift_census.py \
+            eg64-voltage/verify_voltage_witness.py
+      - name: Exhaust F3-square lifts over base order ${{ matrix.base_order }}
+        id: search
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          stem="n${{ matrix.base_order }}-f3sq"
+          set +e
+          "$GENG" -q -c -d3 -D3 "${{ matrix.base_order }}" \
+            | PYTHONPATH=eg64-voltage python3 eg64-voltage/f3_square_lift_census.py \
+                --base-order "${{ matrix.base_order }}" \
+                --expected-bases "${{ matrix.expected }}" \
+                --checkpoint "results/${stem}.json" \
+                --witness-out "results/witness-${stem}.json" \
+                > "results/${stem}.stdout.json"
+          pipeline=("${PIPESTATUS[@]}")
+          set -e
+          generator_status="${pipeline[0]}"
+          search_status="${pipeline[1]}"
+          echo "exit_code=$search_status" >> "$GITHUB_OUTPUT"
+          if [[ "$search_status" == "10" ]]; then
+            [[ "$generator_status" == "0" || "$generator_status" == "141" ]]
+            python3 eg64-voltage/verify_voltage_witness.py \
+              "results/witness-${stem}.json" \
+              --output "results/independent-verification-${stem}.json"
+          else
+            [[ "$generator_status" == "0" ]]
+            [[ "$search_status" == "0" ]]
+            test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "results/${stem}.json")" = "exhausted"
+          fi
+          sha256sum results/* > "results/SHA256SUMS-${stem}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eg64-f3sq-n${{ matrix.base_order }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Flag independently verified counterexample
+        if: steps.search.outputs.exit_code == '10'
+        run: exit 10
+
+  aggregate:
+    if: always()
+    needs: lift
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-f3sq-n*
+          path: gathered
+      - name: Validate complete noncyclic lift matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+
+          cases=[(4,1),(6,2),(8,5)]
+          records=[]
+          witnesses=[]
+          for base,expected in cases:
+              directory=Path('gathered')/f'eg64-f3sq-n{base}'
+              result=json.loads((directory/f'n{base}-f3sq.json').read_text())
+              assert result['stats']['bases']==expected,result
+              assert result['status'] in ('exhausted','witness'),result
+              rejected=sum(result['stats']['rejected_by_length'].values())
+              if result['status']=='exhausted':
+                  assert rejected==result['stats']['connected_lifts'],result
+              else:
+                  proof=directory/f'independent-verification-n{base}-f3sq.json'
+                  assert proof.exists()
+                  verification=json.loads(proof.read_text())
+                  assert verification['verified'] is True
+                  witnesses.append({'base_order':base,'witness':result['witness'],'verification':verification})
+              records.append({'base_order':base,**result})
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'group':'F_3^2',
+              'maximum_lift_order':72,
+              'records':records,
+              'connected_lifts_exhausted':sum(record['stats']['connected_lifts'] for record in records),
+              'verified_witnesses':witnesses,
+          }
+          out=Path('f3-square-lift-summary.json')
+          out.write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          Path('f3-square-lift-summary.sha256').write_text(
+              hashlib.sha256(out.read_bytes()).hexdigest()+'  f3-square-lift-summary.json\n'
+          )
+          print(json.dumps({
+              'connected_lifts_exhausted':summary['connected_lifts_exhausted'],
+              'verified_witnesses':len(witnesses),
+          },sort_keys=True))
+          if witnesses:
+              raise SystemExit(10)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eg64-f3sq-complete-${{ github.run_id }}
+          path: |
+            f3-square-lift-summary.json
+            f3-square-lift-summary.sha256
+            gathered/
+            eg64-voltage/
+          if-no-files-found: error
+          retention-days: 90
