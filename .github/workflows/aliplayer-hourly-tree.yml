@@ -28,22 +28,21 @@ jobs:
           import json, requests
           from pathlib import Path
           repo='aliplayer1/polymarket-crypto-updown'; rev='ba1ad37cbcdd720cced20f1cdc97c2cf347cad6c'
-          out={'repo':repo,'revision':rev,'paths':{}}
-          paths=['data','data/orderbook/crypto=BTC/timeframe=1-hour','data/orderbook/crypto=ETH/timeframe=1-hour']
-          for path in paths:
-            url=f'https://huggingface.co/api/datasets/{repo}/tree/{rev}/{path}'
-            rows=[]; cursor=None
-            while True:
-              params={'recursive':'true','expand':'true','limit':1000}
-              if cursor: params['cursor']=cursor
-              r=requests.get(url,params=params,timeout=180); print(path,r.status_code,r.url)
-              r.raise_for_status(); batch=r.json(); rows.extend(batch)
-              link=r.links.get('next',{}).get('url')
-              if not link: break
-              url=link; cursor=None
-            out['paths'][path]=rows
-            print('rows',len(rows),'bytes',sum((x.get('size') or 0) for x in rows if x.get('type')=='file'))
-            for x in rows[:20]: print(x.get('path'),x.get('size'),x.get('lfs'))
+          r=requests.get(f'https://huggingface.co/api/datasets/{repo}',params={'blobs':'true'},timeout=180)
+          print('status',r.status_code,r.url); r.raise_for_status(); info=r.json()
+          print('reported revision',info.get('sha')); assert info.get('sha')==rev,(info.get('sha'),rev)
+          siblings=info.get('siblings',[])
+          prefixes=('data/orderbook/crypto=BTC/timeframe=1-hour/','data/orderbook/crypto=ETH/timeframe=1-hour/')
+          exact=('data/markets.parquet','data/spot_prices.parquet','data/prices.parquet','data/ticks.parquet')
+          selected=[]
+          for x in siblings:
+            path=x.get('rfilename','')
+            if path.startswith(prefixes) or path in exact:
+              selected.append({'path':path,'size':x.get('size'),'blob_id':x.get('blobId'),'lfs':x.get('lfs')})
+          out={'repo':repo,'revision':rev,'selected':selected,'all_sibling_count':len(siblings)}
+          print('siblings',len(siblings),'selected',len(selected))
+          print('selected bytes',sum((x.get('size') or (x.get('lfs') or {}).get('size') or 0) for x in selected))
+          for x in selected: print(x)
           Path('aliplayer-hourly-tree.json').write_text(json.dumps(out,indent=2))
           PY
       - uses: actions/upload-artifact@v4
