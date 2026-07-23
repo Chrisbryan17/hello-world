@@ -1,0 +1,183 @@
+name: EG64 SAT three-terminal multiplier search
+
+on:
+  push:
+    branches:
+      - eg64-sat-multiplier
+    paths:
+      - 'eg64-sat/**'
+      - '.github/workflows/eg64-sat-multiplier.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Install SAT runtime
+        run: python3 -m pip install --disable-pip-version-check python-sat
+      - name: Compile search and independent verifier
+        run: |
+          python3 -m py_compile \
+            eg64-sat/lazy_terminal_sat.py \
+            eg64-sat/lazy_terminal_sat_stable.py \
+            eg64-sat/lazy_multiplier_sat.py \
+            eg64-sat/verify_multiplier_witness.py
+      - name: Known UNSAT multiplier orders 5 and 7
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p smoke
+          for n in 5 7; do
+            PYTHONPATH=eg64-sat python3 eg64-sat/lazy_multiplier_sat.py \
+              --order "$n" --modulus 3 --solver m22 --max-seconds 300 \
+              --checkpoint "smoke/order-${n}.json" \
+              > "smoke/order-${n}.progress.log"
+            python3 - "$n" <<'PY'
+          import json,sys
+          n=int(sys.argv[1])
+          result=json.load(open(f'smoke/order-{n}.json'))
+          assert result['stats']['status']=='unsat',result
+          print(f'MULTIPLIER_ORDER_{n}_UNSAT=PASS')
+          PY
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eg64-multiplier-smoke-${{ github.run_id }}
+          path: smoke/
+          if-no-files-found: error
+          retention-days: 90
+
+  search:
+    needs: smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        order: [23, 25, 27, 29]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 58
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Install SAT runtime
+        run: python3 -m pip install --disable-pip-version-check python-sat
+      - name: Search multiplier gadget at order ${{ matrix.order }}
+        id: solve
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          order="${{ matrix.order }}"
+          set +e
+          PYTHONPATH=eg64-sat python3 eg64-sat/lazy_multiplier_sat.py \
+            --order "$order" --modulus 3 --solver m22 --max-seconds 3000 \
+            --log-every 50 \
+            --checkpoint "results/order-${order}.json" \
+            --witness-out "results/witness-${order}.json" \
+            > "results/order-${order}.progress.log" 2>&1
+          status=$?
+          set -e
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          case "$status" in
+            0)
+              test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["stats"]["status"])' "results/order-${order}.json")" = "unsat"
+              ;;
+            10)
+              python3 eg64-sat/verify_multiplier_witness.py \
+                "results/witness-${order}.json" \
+                --output "results/independent-verification-${order}.json"
+              ;;
+            124)
+              test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["stats"]["status"])' "results/order-${order}.json")" = "timeout"
+              ;;
+            *)
+              tail -n 160 "results/order-${order}.progress.log" >&2 || true
+              exit "$status"
+              ;;
+          esac
+          sha256sum results/* > "results/SHA256SUMS-${order}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eg64-multiplier-order-${{ matrix.order }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Flag independently verified counterexample construction
+        if: steps.solve.outputs.exit_code == '10'
+        run: exit 10
+
+  aggregate:
+    if: always()
+    needs: [smoke, search]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-multiplier-order-*
+          path: gathered
+      - name: Aggregate exact multiplier-search states
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+
+          records=[]
+          witnesses=[]
+          for order in (23,25,27,29):
+              directory=Path('gathered')/f'eg64-multiplier-order-{order}'
+              checkpoint=directory/f'order-{order}.json'
+              assert checkpoint.exists(),checkpoint
+              result=json.loads(checkpoint.read_text())
+              status=result['stats']['status']
+              assert status in {'unsat','timeout','witness'},result
+              if status=='witness':
+                  proof=directory/f'independent-verification-{order}.json'
+                  assert proof.exists()
+                  verification=json.loads(proof.read_text())
+                  assert verification['verified'] is True
+                  witnesses.append({'order':order,'witness':result.get('witness'),'verification':verification})
+              records.append({'order':order,**result})
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'modulus':3,
+              'construction':'replace every vertex of K4 by a three-terminal multiplier gadget',
+              'records':records,
+              'verified_witnesses':witnesses,
+          }
+          out=Path('multiplier-sat-summary.json')
+          out.write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          Path('multiplier-sat-summary.sha256').write_text(
+              hashlib.sha256(out.read_bytes()).hexdigest()+'  multiplier-sat-summary.json\n'
+          )
+          print(json.dumps({
+              'statuses':{str(record['order']):record['stats']['status'] for record in records},
+              'verified_witnesses':len(witnesses),
+          },sort_keys=True))
+          if witnesses:
+              raise SystemExit(10)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eg64-multiplier-complete-${{ github.run_id }}
+          path: |
+            multiplier-sat-summary.json
+            multiplier-sat-summary.sha256
+            gathered/
+            eg64-sat/
+          if-no-files-found: error
+          retention-days: 90
