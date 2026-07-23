@@ -8,6 +8,9 @@ on:
       - .github/workflows/hourly-orderbook-transfer.yml
   workflow_dispatch:
 
+env:
+  PYTHONUNBUFFERED: '1'
+
 permissions:
   contents: read
 
