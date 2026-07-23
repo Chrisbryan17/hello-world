@@ -1,0 +1,173 @@
+name: EG64 exhaustive odd cyclic lifts through order 31
+
+on:
+  push:
+    branches:
+      - eg64-voltage-lifts
+    paths:
+      - 'eg64-voltage/**'
+      - '.github/workflows/eg64-voltage-lifts.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lift:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - base_order: 4
+            modulus: 3
+            expected: 1
+          - base_order: 4
+            modulus: 5
+            expected: 1
+          - base_order: 4
+            modulus: 7
+            expected: 1
+          - base_order: 6
+            modulus: 3
+            expected: 2
+          - base_order: 6
+            modulus: 5
+            expected: 2
+          - base_order: 8
+            modulus: 3
+            expected: 5
+          - base_order: 10
+            modulus: 3
+            expected: 19
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Install nauty
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nauty
+          GENG="$(command -v geng || command -v nauty-geng || true)"
+          test -n "$GENG"
+          echo "GENG=$GENG" >> "$GITHUB_ENV"
+      - name: Compile search and verifier
+        run: |
+          python3 -m py_compile \
+            eg64-voltage/cyclic_lift_census.py \
+            eg64-voltage/verify_voltage_witness.py
+      - name: Exhaust base ${{ matrix.base_order }} over Z_${{ matrix.modulus }}
+        id: search
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          stem="n${{ matrix.base_order }}-q${{ matrix.modulus }}"
+          set +e
+          "$GENG" -q -c -d3 -D3 "${{ matrix.base_order }}" \
+            | python3 eg64-voltage/cyclic_lift_census.py \
+                --base-order "${{ matrix.base_order }}" \
+                --modulus "${{ matrix.modulus }}" \
+                --expected-bases "${{ matrix.expected }}" \
+                --checkpoint "results/${stem}.json" \
+                --witness-out "results/witness-${stem}.json" \
+                > "results/${stem}.stdout.json"
+          pipeline=("${PIPESTATUS[@]}")
+          set -e
+          generator_status="${pipeline[0]}"
+          search_status="${pipeline[1]}"
+          echo "exit_code=$search_status" >> "$GITHUB_OUTPUT"
+          if [[ "$search_status" == "10" ]]; then
+            [[ "$generator_status" == "0" || "$generator_status" == "141" ]]
+            python3 eg64-voltage/verify_voltage_witness.py \
+              "results/witness-${stem}.json" \
+              --output "results/independent-verification-${stem}.json"
+          else
+            [[ "$generator_status" == "0" ]]
+            [[ "$search_status" == "0" ]]
+            test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "results/${stem}.json")" = "exhausted"
+          fi
+          sha256sum results/* > "results/SHA256SUMS-${stem}"
+      - name: Upload exact lift evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-voltage-n${{ matrix.base_order }}-q${{ matrix.modulus }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Flag independently verified counterexample
+        if: steps.search.outputs.exit_code == '10'
+        run: exit 10
+
+  aggregate:
+    if: always()
+    needs: lift
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-voltage-n*-q*
+          path: gathered
+      - name: Validate complete lift matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          cases=[(4,3,1),(4,5,1),(4,7,1),(6,3,2),(6,5,2),(8,3,5),(10,3,19)]
+          records=[]
+          witnesses=[]
+          for base,modulus,expected in cases:
+              directory=Path('gathered')/f'eg64-voltage-n{base}-q{modulus}'
+              result=json.loads((directory/f'n{base}-q{modulus}.json').read_text())
+              assert result['stats']['bases']==expected,result
+              assert result['status'] in ('exhausted','witness'),result
+              if result['status']=='witness':
+                  proof=directory/f'independent-verification-n{base}-q{modulus}.json'
+                  assert proof.exists()
+                  verification=json.loads(proof.read_text())
+                  assert verification['verified'] is True
+                  witnesses.append({'base_order':base,'modulus':modulus,'witness':result['witness'],'verification':verification})
+              records.append({'base_order':base,'modulus':modulus,**result})
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'maximum_lift_order':31,
+              'cases':records,
+              'connected_lifts_exhausted':sum(record['stats']['connected_lifts'] for record in records),
+              'verified_witnesses':witnesses,
+          }
+          out=Path('voltage-lift-summary.json')
+          out.write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          Path('voltage-lift-summary.sha256').write_text(
+              hashlib.sha256(out.read_bytes()).hexdigest()+'  voltage-lift-summary.json\n'
+          )
+          print(json.dumps({
+              'connected_lifts_exhausted':summary['connected_lifts_exhausted'],
+              'verified_witnesses':len(witnesses),
+          },sort_keys=True))
+          if witnesses:
+              raise SystemExit(10)
+          PY
+      - name: Upload aggregate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-voltage-lifts-complete-${{ github.run_id }}
+          path: |
+            voltage-lift-summary.json
+            voltage-lift-summary.sha256
+            gathered/
+            eg64-voltage/
+          if-no-files-found: error
+          retention-days: 90
