@@ -1,0 +1,48 @@
+name: Hourly Spot Transfer
+
+on:
+  push:
+    branches: [polymarket-multiasset-frequency-20260723]
+    paths:
+      - research/hourly_spot_transfer.py
+      - .github/workflows/hourly-spot-transfer.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - research/hourly_spot_transfer.py
+      - .github/workflows/hourly-spot-transfer.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --quiet pandas numpy pyarrow requests tabulate
+      - run: python -m py_compile research/hourly_spot_transfer.py
+      - name: Run hourly transfer
+        shell: bash
+        run: |
+          set -o pipefail
+          python research/hourly_spot_transfer.py 2>&1 | tee hourly-spot-transfer.log
+      - name: Show results
+        if: always()
+        run: |
+          cat results/hourly_spot_transfer/summary.csv || true
+          tail -200 hourly-spot-transfer.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hourly-spot-transfer
+          path: |
+            results/hourly_spot_transfer/
+            hourly-spot-transfer.log
+          if-no-files-found: warn
+          retention-days: 30
