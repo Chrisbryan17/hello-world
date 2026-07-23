@@ -20,45 +20,67 @@ jobs:
         with:
           show-progress: false
 
-      - name: Fetch exact graph6 record from House of Graphs
+      - name: Fetch exact graph record and output formats
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p results
-          endpoints=(
-            'https://houseofgraphs.org/DownloadGraphs.action'
-            'https://hog.grinvin.org/DownloadGraphs.action'
-          )
-          success=0
-          for endpoint in "${endpoints[@]}"; do
-            label="$(echo "$endpoint" | tr -c '[:alnum:]' '_')"
-            status="$(curl -sS -L \
-              -o "results/response-${label}.bin" \
-              -w '%{http_code}' \
-              --data 'graphFormatName=Graph6&id=50547' \
-              "$endpoint" || true)"
-            printf '%s %s\n' "$status" "$endpoint" >> results/http-status.txt
-            if [[ "$status" == "200" ]] && \
-               python3 - "results/response-${label}.bin" <<'PY'
-          import sys
+          curl -fsSL -D results/graph-api.headers \
+            https://houseofgraphs.org/api/graphs/50547 \
+            -o results/graph-api-50547.json
+          curl -fsSL -D results/formats-api.headers \
+            https://houseofgraphs.org/api/graph_output_formats \
+            -o results/graph-output-formats.json
+          python3 - <<'PY'
+          import json
           from pathlib import Path
-          data=Path(sys.argv[1]).read_bytes().strip()
+          graph=json.loads(Path('results/graph-api-50547.json').read_text())
+          formats=json.loads(Path('results/graph-output-formats.json').read_text())
+          options=formats if isinstance(formats,list) else formats.get('content',formats.get('entity',formats))
+          if not isinstance(options,list):
+              raise SystemExit(f'unexpected format payload: {type(options).__name__}')
+          g6=[item for item in options if str(item.get('extension','')).lower()=='g6']
+          if not g6:
+              raise SystemExit('Graph6 output format absent')
+          format_name=g6[0]['name']
+          Path('results/download-request.json').write_text(
+              json.dumps({'graphId':50547,'format':format_name,'searchConditions':None},sort_keys=True)+'\n'
+          )
+          summary={
+              'graph_id':50547,
+              'format_name':format_name,
+              'graph_payload_top_level_keys':sorted(graph.keys()) if isinstance(graph,dict) else [],
+              'format_record':g6[0],
+          }
+          Path('results/api-summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(summary,sort_keys=True))
+          PY
+
+      - name: Download exact graph6 record through production API
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -D results/download-api.headers \
+            -H 'Content-Type: application/json' \
+            --data-binary @results/download-request.json \
+            https://houseofgraphs.org/api/download_graph \
+            -o results/download-50547.bin
+          python3 - <<'PY'
+          from pathlib import Path
+          data=Path('results/download-50547.bin').read_bytes().strip()
           if data.startswith(b'>>graph6<<'):
               data=data[len(b'>>graph6<<'):].strip()
-          if not data or any(byte < 63 or byte > 126 for byte in data):
-              raise SystemExit(1)
-          first=data[0]-63
-          if first != 59:
-              raise SystemExit(1)
-          Path('results/graph-50547.g6').write_bytes(data+b'\n')
-          print(data.decode('ascii'))
+          lines=[line.strip() for line in data.splitlines() if line.strip()]
+          if len(lines)!=1:
+              raise SystemExit(f'expected one graph6 record, received {len(lines)} lines')
+          record=lines[0]
+          if any(byte<63 or byte>126 for byte in record):
+              raise SystemExit('download is not printable graph6')
+          if record[0]-63 != 59:
+              raise SystemExit(f'expected order 59 graph6, first value={record[0]-63}')
+          Path('results/graph-50547.g6').write_bytes(record+b'\n')
+          print(record.decode('ascii'))
           PY
-            then
-              success=1
-              break
-            fi
-          done
-          test "$success" = 1
           sha256sum results/graph-50547.g6 > results/graph-50547.g6.sha256
 
       - name: Run exact terminal-cap cycle test
