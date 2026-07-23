@@ -1,0 +1,123 @@
+name: EG64 minimal terminal-cap census
+
+on:
+  push:
+    branches:
+      - eg64-terminal-cap-census
+    paths:
+      - '.github/workflows/eg64-terminal-cap-biconnected.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  biconnected-through-21:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Install nauty
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nauty
+          GENG="$(command -v geng || command -v nauty-geng || true)"
+          test -n "$GENG"
+          echo "GENG=$GENG" >> "$GITHUB_ENV"
+
+      - name: Exhaust biconnected one-terminal caps through 21
+        id: census
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          found=0
+          for n in 5 7 9 11 13 15 17 19 21; do
+            m=$(( (3*n - 1) / 2 ))
+            echo "=== biconnected terminal caps order $n ==="
+            set +e
+            "$GENG" -q -C -d2 -D3 "$n" "${m}:${m}" \
+              | python3 eg64-terminal/terminal_cap_census.py \
+                  --order "$n" \
+                  --progress 100000 \
+                  --witness-out "results/witness-${n}.json" \
+                  > "results/order-${n}.json"
+            pipeline=("${PIPESTATUS[@]}")
+            set -e
+            generator_status="${pipeline[0]}"
+            checker_status="${pipeline[1]}"
+            if [[ "$checker_status" == "10" ]]; then
+              if [[ "$generator_status" != "0" && "$generator_status" != "141" ]]; then
+                exit "$generator_status"
+              fi
+              python3 eg64-terminal/verify_terminal_cap.py \
+                "results/witness-${n}.json" \
+                --output "results/independent-verification-${n}.json"
+              found=1
+              break
+            fi
+            [[ "$generator_status" == "0" ]]
+            [[ "$checker_status" == "0" ]]
+          done
+          echo "found=$found" >> "$GITHUB_OUTPUT"
+
+      - name: Validate accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          records=[]
+          witness=None
+          for order in (5,7,9,11,13,15,17,19,21):
+              path=Path(f"results/order-{order}.json")
+              if not path.exists(): break
+              result=json.loads(path.read_text())
+              stats=result["stats"]
+              assert stats["graphs"]>0
+              assert sum(stats["rejected_by_length"].values()) == stats["graphs"] or result.get("witness")
+              assert len(stats["input_sha256"])==64
+              if result.get("witness"):
+                  witness=result["witness"]
+                  proof=Path(f"results/independent-verification-{order}.json")
+                  assert proof.exists() and json.loads(proof.read_text())["verified"]
+              records.append(result)
+          summary={
+              "source_commit":os.environ["GITHUB_SHA"],
+              "generator":os.environ["GENG"],
+              "minimality_reduction":"A smallest one-terminal cap is bridgeless; in a subcubic connected graph, bridgeless implies biconnected.",
+              "orders_completed":[x["stats"]["order"] for x in records],
+              "graphs_exhausted":sum(x["stats"]["graphs"] for x in records),
+              "witness":witness,
+              "records":records,
+          }
+          out=Path("results/biconnected-terminal-summary.json")
+          out.write_text(json.dumps(summary,indent=2,sort_keys=True)+"\n")
+          for path in sorted(Path("results").glob("*.json")):
+              print(hashlib.sha256(path.read_bytes()).hexdigest(),path)
+          PY
+          sha256sum results/*.json > results/SHA256SUMS
+
+      - name: Upload exact evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-biconnected-terminal-${{ github.run_id }}
+          path: |
+            eg64-terminal/
+            results/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Flag independently verified counterexample
+        if: steps.census.outputs.found == '1'
+        run: exit 10
