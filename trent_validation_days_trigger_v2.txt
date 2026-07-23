@@ -1,0 +1,1 @@
+Public-data-only trigger for evenly spaced independent BTC5m 100ms validation days.
