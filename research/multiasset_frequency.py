@@ -78,7 +78,6 @@ def build_asset(asset,rev):
   d['spread_up']=d.au-d.bu; d['spread_down']=d.ad-d.bd; d['ask_sum']=d.au+d.ad
   d['size_skew']=np.log1p(d.sau.fillna(0))-np.log1p(d.sad.fillna(0))
   rows.append(d.reset_index())
- del t,wide,m
  return pd.concat(rows,ignore_index=True)
 
 def enrich(panel):
@@ -132,9 +131,12 @@ def portfolio(trades,slip=.01,coef=.07):
   bank*=gm; peak=max(peak,bank); mdd=max(mdd,1-bank/peak)
  return {'terminal':float(bank),'mdd':float(mdd)}
 
-def full_weeks(panel):
- c=panel[panel.clock==60].groupby('week_start').market_start.nunique()
- return list(c[c>=1900].sort_index().index)
+def eligible_weeks(panel,min_starts=1600,min_asset_rows=1200):
+ p=panel[panel.clock==60]
+ starts=p.groupby('week_start').market_start.nunique()
+ per_asset=p.groupby(['week_start','asset']).condition_id.size().unstack(fill_value=0).reindex(columns=ASSETS,fill_value=0)
+ ok=(starts>=min_starts) & (per_asset.min(axis=1)>=min_asset_rows)
+ return list(starts[ok].sort_index().index)
 
 def run():
  info=requests.get(f'https://huggingface.co/api/datasets/{REPO}',timeout=60).json(); rev=info['sha']
@@ -144,22 +146,23 @@ def run():
   print('building',a,flush=True); parts.append(build_asset(a,rev))
   hashes[f'{a}_markets']=sha256(DATA/f'{a}_markets.parquet'); hashes[f'{a}_ticks']=sha256(DATA/f'{a}_ticks.parquet')
  panel=enrich(pd.concat(parts,ignore_index=True)); panel.to_parquet(OUT/'causal_panel.parquet',index=False)
- weeks=full_weeks(panel); print('full weeks',weeks); assert len(weeks)>=6, weeks
+ weeks=eligible_weeks(panel); print('eligible weeks',weeks); assert len(weeks)>=6, weeks
  tests=[]; choices=[]; selected_all=[]
- for coverage in COVERAGES:
-  for fi in range(len(weeks)-2):
-   va,vb,tw=weeks[fi:fi+3]; candidates=[]
-   for family,features in FAMILIES.items():
-    for clock in CLOCKS:
-     for C in C_GRID:
-      vals=[]
-      for trainw,evalw in [(va,vb),(vb,va)]:
-       tr=panel[(panel.week_start==trainw)&(panel.clock==clock)]
-       ev=panel[(panel.week_start==evalw)&(panel.clock==clock)]
-       vals.append(metrics(select(ev,fit_predict(tr,ev,features,C),coverage))['arith'])
-      candidates.append((min(vals),sum(vals)/2,family,clock,C,vals))
+ for fi in range(len(weeks)-2):
+  va,vb,tw=weeks[fi:fi+3]; by_coverage={c:[] for c in COVERAGES}
+  for family,features in FAMILIES.items():
+   for clock in CLOCKS:
+    tr_a=panel[(panel.week_start==va)&(panel.clock==clock)]
+    tr_b=panel[(panel.week_start==vb)&(panel.clock==clock)]
+    for C in C_GRID:
+     p_b=fit_predict(tr_a,tr_b,features,C); p_a=fit_predict(tr_b,tr_a,features,C)
+     for coverage in COVERAGES:
+      vals=[metrics(select(tr_b,p_b,coverage))['arith'],metrics(select(tr_a,p_a,coverage))['arith']]
+      by_coverage[coverage].append((min(vals),sum(vals)/2,family,clock,C,vals))
+  for coverage in COVERAGES:
+   candidates=by_coverage[coverage]
    candidates.sort(reverse=True,key=lambda x:(x[0],x[1],-len(FAMILIES[x[2]]),-x[3],-x[4]))
-   best=candidates[0]; _,_,family,clock,C,vals=best; features=FAMILIES[family]
+   best=candidates[0]; _,_,family,clock,C,_=best; features=FAMILIES[family]
    train=panel[(panel.week_start.isin([va,vb]))&(panel.clock==clock)]
    test=panel[(panel.week_start==tw)&(panel.clock==clock)]
    s=select(test,fit_predict(train,test,features,C),coverage)
@@ -170,6 +173,7 @@ def run():
    selected_all.append(s.assign(coverage=coverage,fold=fi+1,family=family,C=C,test_week=tw))
  tests=pd.DataFrame(tests); trades=pd.concat(selected_all,ignore_index=True)
  tests.to_csv(OUT/'fold_results.csv',index=False); trades.to_parquet(OUT/'selected_trades.parquet',index=False)
+ (OUT/'candidate_choices.json').write_text(json.dumps(choices,default=str,indent=2))
  agg=[]
  for cov,g in tests.groupby('coverage'):
   tr=trades[trades.coverage==cov]
@@ -179,7 +183,7 @@ def run():
   agg.append({'coverage':cov,'test_trades':len(tr),'trades_per_hour':len(tr)/elapsed,'worst_test_arith':g.arith.min(),'mean_test_arith':g.arith.mean(),'worst_test_win_rate':g.win_rate.min(),'mean_test_win_rate':g.win_rate.mean(),'base_terminal':base['terminal'],'base_mdd':base['mdd'],'slip2_terminal':slip2['terminal'],'slip2_mdd':slip2['mdd'],'zero_fee_terminal':zero['terminal'],'fok_ge_10':float((cap>=10).mean()),'fok_ge_25':float((cap>=25).mean()),'fok_ge_50':float((cap>=50).mean()),'median_top_ask_capacity':float(cap.median()),'quality_floor_pass':bool(g.arith.min()>=1.7563518376043876)})
  agg=pd.DataFrame(agg); agg.to_csv(OUT/'coverage_frontier.csv',index=False)
  trades.groupby(['coverage','asset']).agg(n=('won','size'),win_rate=('won','mean'),arith=('contract_multiple','mean'),median_capacity=('ask_size','median')).reset_index().to_csv(OUT/'asset_breakdown.csv',index=False)
- manifest={'dataset_repo':REPO,'dataset_revision':rev,'hashes':hashes,'weeks':[str(x) for x in weeks],'quality_floor':1.7563518376043876,'selection':'two-week cross-fit validation, refit on both, one untouched next week','generated_utc':pd.Timestamp.now(tz='UTC').isoformat()}
+ manifest={'dataset_repo':REPO,'dataset_revision':rev,'hashes':hashes,'weeks':[str(x) for x in weeks],'eligibility':{'min_unique_starts':1600,'min_rows_per_asset':1200},'quality_floor':1.7563518376043876,'selection':'two-week cross-fit validation, refit on both, one untouched next week','generated_utc':pd.Timestamp.now(tz='UTC').isoformat()}
  (OUT/'manifest.json').write_text(json.dumps(manifest,indent=2))
  report=['# Multi-Asset Frequency Backtest','',f'Dataset revision: `{rev}`','','## Coverage frontier','',agg.to_markdown(index=False),'','## Fold results','',tests.to_markdown(index=False),'','## Interpretation','','A coverage row passes the frozen quality requirement only when every untouched test week has arithmetic contract multiple >= 1.7563518376043876. Portfolio results use a 40% total concurrent risk ceiling split into 20% Up and 20% Down buckets with a 12% per-position cap.','','The seven-asset corpus covers only 5-minute markets. Fifteen-minute and hourly transfer require separate historical datasets and are not inferred from this result.']
  (OUT/'REPORT.md').write_text('\n'.join(report))
