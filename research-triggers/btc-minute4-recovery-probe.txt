@@ -1,0 +1,1 @@
+Trigger the BTC minute4 public-source recovery probe for the verified checkpoint restoration pass.
