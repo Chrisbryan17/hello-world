@@ -1,0 +1,1 @@
+Public-data-only trigger for the ten frozen-rule BTC5m market depth and event files.
