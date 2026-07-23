@@ -77,7 +77,8 @@ jobs:
           set +e
           mkdir -p "$FREECAD_USER_HOME" collapsecad_ci/build
           SCRIPT="$PWD/collapsecad_ci/scripts/generate_freecad.py"
-          printf 'import runpy\nrunpy.run_path(%q, run_name="__main__")\n' "$SCRIPT" \
+          SCRIPT_LITERAL="$(python -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$SCRIPT")"
+          printf 'import runpy\nrunpy.run_path(%s, run_name="__main__")\n' "$SCRIPT_LITERAL" \
             | PYTHONPATH="$PWD/collapsecad_ci/src" "$FREECAD_CMD" \
             > collapsecad_ci/build/native-freecad-generation.log 2>&1
           STATUS=$?
@@ -98,7 +99,8 @@ jobs:
           set +e
           mkdir -p collapsecad_ci/build
           SCRIPT="$PWD/collapsecad_ci/scripts/inspect_native_freecad.py"
-          printf 'import runpy\nrunpy.run_path(%q, run_name="__main__")\n' "$SCRIPT" \
+          SCRIPT_LITERAL="$(python -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$SCRIPT")"
+          printf 'import runpy\nrunpy.run_path(%s, run_name="__main__")\n' "$SCRIPT_LITERAL" \
             | PYTHONPATH="$PWD/collapsecad_ci/src" "$FREECAD_CMD" \
             > collapsecad_ci/build/native-freecad-inspection.log 2>&1
           STATUS=$?
