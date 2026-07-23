@@ -1,0 +1,1 @@
+Export the frozen BTC minute-four causal snapshot panel enriched with public Binance one-second spot, inferred opening strike, signed distance, momentum, and volatility. Preserve chronological splits and outcomes.
