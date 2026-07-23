@@ -80,20 +80,31 @@ jobs:
             "$FREECAD_CMD" collapsecad_ci/scripts/generate_freecad.py
 
       - name: Reopen and inspect native FreeCAD documents
+        id: inspect
         shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
+          set +e
+          mkdir -p collapsecad_ci/build
           PYTHONPATH="$PWD/collapsecad_ci/src" \
-            "$FREECAD_CMD" collapsecad_ci/scripts/inspect_native_freecad.py
-          cat collapsecad_ci/build/native-freecad-manifest.json
+            "$FREECAD_CMD" collapsecad_ci/scripts/inspect_native_freecad.py \
+            > collapsecad_ci/build/native-freecad-inspection.log 2>&1
+          STATUS=$?
+          cat collapsecad_ci/build/native-freecad-inspection.log
+          if test -f collapsecad_ci/build/native-freecad-manifest.json; then
+            cat collapsecad_ci/build/native-freecad-manifest.json
+          fi
+          exit "$STATUS"
 
-      - name: Upload native FreeCAD proof artifact
+      - name: Upload native FreeCAD proof and diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: collapsecad-native-freecad
           path: |
             collapsecad_ci/build/freecad
             collapsecad_ci/build/native-freecad-manifest.json
+            collapsecad_ci/build/native-freecad-inspection.log
           if-no-files-found: error
           retention-days: 30
