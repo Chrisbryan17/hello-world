@@ -5,6 +5,7 @@ on:
     branches:
       - eg64-cubic-cap-census
     paths:
+      - 'eg64-gadget/heterogeneous_spectrum_search.py'
       - '.github/workflows/eg64-heterogeneous-base8.yml'
   workflow_dispatch:
 
