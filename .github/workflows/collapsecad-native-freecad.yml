@@ -76,9 +76,16 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           FREECAD_USER_HOME: ${{ github.workspace }}/.freecad-user
         run: |
-          mkdir -p "$FREECAD_USER_HOME"
+          set +e
+          mkdir -p "$FREECAD_USER_HOME" collapsecad_ci/build
           PYTHONPATH="$PWD/collapsecad_ci/src" \
-            "$FREECAD_CMD" "$PWD/collapsecad_ci/scripts/generate_freecad.py"
+            "$FREECAD_CMD" "$PWD/collapsecad_ci/scripts/generate_freecad.py" \
+            > collapsecad_ci/build/native-freecad-generation.log 2>&1
+          STATUS=$?
+          cat collapsecad_ci/build/native-freecad-generation.log
+          if test "$STATUS" -ne 0; then
+            exit "$STATUS"
+          fi
           find "$PWD/collapsecad_ci/build/freecad" -type f -name '*.FCStd' -print -exec ls -lh {} \;
           MODEL_COUNT="$(find "$PWD/collapsecad_ci/build/freecad" -type f -name '*.FCStd' | wc -l)"
           test "$MODEL_COUNT" -eq 9
@@ -110,6 +117,7 @@ jobs:
           path: |
             collapsecad_ci/build/freecad
             collapsecad_ci/build/native-freecad-manifest.json
+            collapsecad_ci/build/native-freecad-generation.log
             collapsecad_ci/build/native-freecad-inspection.log
           if-no-files-found: error
           retention-days: 30
