@@ -1,0 +1,40 @@
+name: PyArrow 3.13 Wheel Courier
+
+on:
+  push:
+    branches:
+      - courier/polymarket-5m-data
+    paths:
+      - .github/workflows/pyarrow313-wheel-courier.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/pyarrow313-wheel-courier.yml
+  workflow_dispatch:
+
+jobs:
+  wheel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Download compatible parquet reader
+        run: |
+          mkdir -p wheel
+          python -m pip download --only-binary=:all: --no-deps --dest wheel pyarrow==18.1.0
+          sha256sum wheel/* > wheel/SHA256SUMS.txt
+          ls -lh wheel
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyarrow-cp313-wheel
+          path: wheel
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
