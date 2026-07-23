@@ -1,0 +1,205 @@
+name: EG64 SAT terminal caps with static C4 elimination
+
+on:
+  push:
+    branches:
+      - eg64-cubic-cap-census
+    paths:
+      - 'eg64-sat/terminal_cap_sat_static_c4.py'
+      - '.github/workflows/eg64-terminal-cap-sat-static-c4.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - run: python3 -m pip install --disable-pip-version-check --quiet python-sat networkx
+      - name: Prove order 5 UNSAT with static C4 clauses
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p smoke
+          python3 -m py_compile \
+            eg64-sat/terminal_cap_sat.py \
+            eg64-sat/terminal_cap_sat_static_c4.py
+          python3 eg64-sat/terminal_cap_sat_static_c4.py \
+            --order 5 --wall-seconds 300 --cycle-batch 512 \
+            --max-iterations 100000 --output smoke/order-5.json
+          python3 - <<'PY'
+          import json
+          result=json.load(open('smoke/order-5.json'))
+          stats=result['stats']
+          assert stats['status']=='unsat',result
+          assert stats['solver'] in ('Glucose4','Minisat22')
+          # The static driver adds all 15 C4 clauses before solving.
+          assert stats['clauses_initial']>=15
+          print('STATIC_C4_ORDER5_UNSAT=PASS')
+          PY
+
+  search:
+    needs: smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        order: [23, 25, 27, 29, 31]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - run: python3 -m pip install --disable-pip-version-check --quiet python-sat networkx
+      - name: Search cap order ${{ matrix.order }} with complete C4 clauses
+        id: search
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          order="${{ matrix.order }}"
+          set +e
+          python3 eg64-sat/terminal_cap_sat_static_c4.py \
+            --order "$order" \
+            --wall-seconds 2700 \
+            --cycle-batch 1024 \
+            --max-iterations 5000000 \
+            --progress-every 1000 \
+            --output "results/order-${order}.json" \
+            --witness-out "results/witness-${order}.json" \
+            > "results/stdout-${order}.txt" \
+            2> "results/stderr-${order}.txt"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "results/exit-${order}.txt"
+          if [[ "$status" == "10" ]]; then
+            python3 eg64-sat/verify_terminal_cap_sat.py \
+              "results/witness-${order}.json" \
+              --output "results/independent-verification-${order}.json"
+            echo "found=1" >> "$GITHUB_OUTPUT"
+          elif [[ "$status" == "0" || "$status" == "3" ]]; then
+            echo "found=0" >> "$GITHUB_OUTPUT"
+          else
+            cat "results/stderr-${order}.txt" >&2
+            exit "$status"
+          fi
+      - name: Audit static-C4 result semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import math
+          import os
+          from pathlib import Path
+          order=int("${{ matrix.order }}")
+          result=json.loads(Path(f'results/order-{order}.json').read_text())
+          stats=result['stats']
+          assert stats['order']==order
+          assert stats['solver'] in ('Glucose4','Minisat22')
+          assert stats['clauses_added']==(
+              stats['connectivity_cuts']+stats['articulation_cuts']
+              +sum(stats['cycle_clauses'].values())
+          )
+          # Every 4-set contributes the three undirected C4 clauses.
+          assert stats['clauses_initial'] >= 3*math.comb(order,4)
+          status=stats['status']
+          assert status in ('unsat','sat_witness','timeout','iteration_limit')
+          if status=='sat_witness':
+              verification=json.loads(Path(f'results/independent-verification-{order}.json').read_text())
+              assert verification['verified'] is True
+          else:
+              assert result['witness'] is None
+          audit={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'order':order,
+              'complete':status in ('unsat','sat_witness'),
+              'static_c4_clauses':3*math.comb(order,4),
+              'result':result,
+          }
+          Path(f'results/audit-{order}.json').write_text(json.dumps(audit,indent=2,sort_keys=True)+'\n')
+          print(json.dumps({
+              'order':order,'status':status,'models':stats['models'],
+              'clauses_initial':stats['clauses_initial'],
+              'clauses_added':stats['clauses_added'],
+              'witness':result['witness'] is not None,
+          }))
+          PY
+          sha256sum results/* > results/SHA256SUMS
+      - name: Upload exact static-C4 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-terminal-cap-static-c4-order${{ matrix.order }}
+          path: |
+            results/
+            eg64-sat/terminal_cap_sat.py
+            eg64-sat/terminal_cap_sat_static_c4.py
+            eg64-sat/verify_terminal_cap_sat.py
+          if-no-files-found: error
+          retention-days: 90
+      - name: Flag an independently verified counterexample
+        if: steps.search.outputs.found == '1'
+        run: exit 10
+
+  aggregate:
+    if: always()
+    needs: [smoke, search]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-terminal-cap-static-c4-order*
+          path: gathered
+      - name: Aggregate complete and incomplete orders separately
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          records=[]; complete=[]; incomplete=[]; witnesses=[]
+          for order in (23,25,27,29,31):
+              directory=Path('gathered')/f'eg64-terminal-cap-static-c4-order{order}'/'results'
+              audit=json.loads((directory/f'audit-{order}.json').read_text())
+              (complete if audit['complete'] else incomplete).append(order)
+              if audit['result']['stats']['status']=='sat_witness':
+                  verification=json.loads((directory/f'independent-verification-{order}.json').read_text())
+                  assert verification['verified'] is True
+                  witnesses.append({'order':order,'verification':verification})
+              records.append(audit)
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'complete_orders':complete,
+              'incomplete_orders':incomplete,
+              'witnesses':witnesses,
+              'records':records,
+          }
+          Path('terminal-cap-static-c4-summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          print(json.dumps({'complete_orders':complete,'incomplete_orders':incomplete,'witnesses':len(witnesses)}))
+          if witnesses: raise SystemExit(10)
+          PY
+          sha256sum terminal-cap-static-c4-summary.json > terminal-cap-static-c4-summary.sha256
+      - name: Upload aggregate static-C4 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-terminal-cap-static-c4-complete-${{ github.run_id }}
+          path: |
+            terminal-cap-static-c4-summary.json
+            terminal-cap-static-c4-summary.sha256
+            gathered/
+            eg64-sat/terminal_cap_sat.py
+            eg64-sat/terminal_cap_sat_static_c4.py
+            eg64-sat/verify_terminal_cap_sat.py
+          if-no-files-found: error
+          retention-days: 90
