@@ -1,0 +1,79 @@
+name: EG64 zero-size order-23 surgery
+
+on:
+  push:
+    branches:
+      - eg64-markstrom-surgery
+    paths:
+      - 'eg64-zero-surgery/**'
+      - '.github/workflows/eg64-zero-surgery.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Clone public extremal graphs
+        run: |
+          git clone --quiet --depth 1 --branch special-graphs \
+            https://github.com/rbsandeep/Erdos-Gyarfas.git public-extremals
+      - name: Compile exact search and independent verifier
+        run: |
+          python3 -m py_compile \
+            eg64-zero-surgery/delete_vertex_join_pair.py \
+            eg64-surgery/markstrom_gadget_surgery.py \
+            eg64-surgery/verify_surgery_witness.py
+      - name: Exhaust all zero-size surgeries
+        id: search
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          set +e
+          python3 eg64-zero-surgery/delete_vertex_join_pair.py \
+            --special-dir public-extremals/special \
+            --result results/zero-surgery.json \
+            --witness-out results/witness.json \
+            > results/stdout.json
+          status=$?
+          set -e
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          if [[ "$status" == "10" ]]; then
+            python3 eg64-surgery/verify_surgery_witness.py \
+              results/witness.json \
+              --output results/independent-verification.json
+          else
+            [[ "$status" == "0" ]]
+            test "$(python3 -c 'import json; print(json.load(open("results/zero-surgery.json"))["status"])')" = "exhausted"
+          fi
+          python3 - <<'PY'
+          import json
+          result=json.load(open('results/zero-surgery.json'))
+          assert result['stats']['base_graphs']==4
+          assert result['stats']['surgeries']+result['stats']['skipped_existing_edge']==288
+          if result['status']=='exhausted':
+              assert (result['stats']['rejected_c4']+result['stats']['rejected_c8']+
+                      result['stats']['rejected_c16'])==result['stats']['surgeries']
+          print('ZERO_SURGERY_ACCOUNTING=PASS')
+          PY
+          sha256sum results/* > results/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eg64-zero-surgery-${{ github.run_id }}
+          path: |
+            results/
+            eg64-zero-surgery/
+            eg64-surgery/verify_surgery_witness.py
+          if-no-files-found: error
+          retention-days: 90
+      - name: Flag independently verified counterexample
+        if: steps.search.outputs.exit_code == '10'
+        run: exit 10
