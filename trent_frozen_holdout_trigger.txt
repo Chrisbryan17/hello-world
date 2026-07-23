@@ -1,0 +1,1 @@
+Trigger untouched BTC5m holdout-day downloads for the pre-registered evaluator.
