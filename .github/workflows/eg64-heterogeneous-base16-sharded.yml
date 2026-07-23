@@ -1,0 +1,246 @@
+name: EG64 sharded heterogeneous gadget assemblies on cubic bases of order 16
+
+on:
+  push:
+    branches:
+      - eg64-cubic-cap-census
+    paths:
+      - '.github/workflows/eg64-heterogeneous-base16-sharded.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shard:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Install nauty
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nauty
+          GENG="$(command -v geng || command -v nauty-geng || true)"
+          test -n "$GENG"
+          echo "GENG=$GENG" >> "$GITHUB_ENV"
+
+      - name: Generate exact source catalog and base shard
+        shell: bash
+        run: |
+          set -euo pipefail
+          shard="${{ matrix.shard }}"
+          mkdir -p results
+          "$GENG" -q -c -d3 -D3 4 > results/source-4.g6
+          "$GENG" -q -c -d3 -D3 8 > results/source-8.g6
+          "$GENG" -q -c -d3 -D3 16 > results/source-16.g6
+          "$GENG" -q -c -d3 -D3 16 "${shard}/16" > "results/bases-16-shard-${shard}.g6"
+          test -s "results/bases-16-shard-${shard}.g6"
+          python3 eg64-gadget/heterogeneous_spectrum_search.py --self-test
+          python3 eg64-gadget/collect_gadget_catalog.py \
+            --order 4 --expected-sources 1 --expected-candidates 4 \
+            --output results/catalog-4.json < results/source-4.g6
+          python3 eg64-gadget/collect_gadget_catalog.py \
+            --order 8 --expected-sources 5 --expected-candidates 4 \
+            --output results/catalog-8.json < results/source-8.g6
+          python3 eg64-gadget/collect_gadget_catalog.py \
+            --order 16 --expected-sources 4060 --expected-candidates 1 \
+            --output results/catalog-16.json < results/source-16.g6
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          candidates=[]
+          for order in (4,8,16):
+              candidates.extend(json.loads(Path(f'results/catalog-{order}.json').read_text())['candidates'])
+          assert len(candidates)==9
+          Path('results/catalog-all.json').write_text(
+              json.dumps({'candidates':candidates},indent=2,sort_keys=True)+'\n'
+          )
+          PY
+
+      - name: Exhaust base shard ${{ matrix.shard }}/16
+        id: search
+        shell: bash
+        run: |
+          set -euo pipefail
+          shard="${{ matrix.shard }}"
+          set +e
+          python3 eg64-gadget/heterogeneous_spectrum_search.py \
+            --catalog results/catalog-all.json \
+            --base-file "results/bases-16-shard-${shard}.g6" \
+            --witness-out "results/witness-${shard}.json" \
+            > "results/search-${shard}.json"
+          status=$?
+          set -e
+          if [[ "$status" == "10" ]]; then
+            python3 eg64-gadget/verify_heterogeneous_witness.py \
+              "results/witness-${shard}.json" \
+              --output "results/independent-verification-${shard}.json"
+            echo "found=1" >> "$GITHUB_OUTPUT"
+          else
+            [[ "$status" == "0" ]]
+            echo "found=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate shard accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          shard=int("${{ matrix.shard }}")
+          base_file=Path(f'results/bases-16-shard-{shard}.g6')
+          base_count=sum(1 for line in base_file.read_text().splitlines() if line.strip())
+          assert base_count>0
+          result=json.loads(Path(f'results/search-{shard}.json').read_text())
+          stats=result['stats']
+          assert stats['raw_catalog_entries']==9
+          assert stats['distinct_spectrum_types']==4
+          assert stats['domain_size']==24
+          assert stats['base_graphs']==base_count
+          if result.get('witness') is None:
+              expected=base_count*(24**16)
+              assert stats['configurations_covered']==expected,(
+                  stats['configurations_covered'],expected
+              )
+          else:
+              verification=json.loads(
+                  Path(f'results/independent-verification-{shard}.json').read_text()
+              )
+              assert verification['verified'] is True
+          audit={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'shard':shard,
+              'modulus':16,
+              'base_count':base_count,
+              'result':result,
+          }
+          Path(f'results/audit-{shard}.json').write_text(
+              json.dumps(audit,indent=2,sort_keys=True)+'\n'
+          )
+          print(json.dumps({
+              'shard':shard,
+              'base_count':base_count,
+              'configurations_covered':stats['configurations_covered'],
+              'search_nodes':stats['search_nodes'],
+              'witness':result.get('witness') is not None,
+          }))
+          PY
+          sha256sum results/* > "results/SHA256SUMS-${{ matrix.shard }}"
+
+      - name: Upload exact shard evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-heterogeneous-base16-shard-${{ matrix.shard }}
+          path: |
+            results/
+            eg64-gadget/spectrum_wiring_search.py
+            eg64-gadget/collect_gadget_catalog.py
+            eg64-gadget/heterogeneous_spectrum_search.py
+            eg64-gadget/verify_heterogeneous_witness.py
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Flag an independently verified counterexample
+        if: steps.search.outputs.found == '1'
+        run: exit 10
+
+  aggregate:
+    if: always()
+    needs: shard
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-heterogeneous-base16-shard-*
+          path: gathered
+      - name: Verify all sixteen partitions and aggregate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          records=[]
+          witnesses=[]
+          for shard in range(16):
+              directory=Path('gathered')/f'eg64-heterogeneous-base16-shard-{shard}'/'results'
+              audit=json.loads((directory/f'audit-{shard}.json').read_text())
+              assert audit['shard']==shard
+              assert audit['modulus']==16
+              result=audit['result']
+              if result.get('witness') is not None:
+                  verification=json.loads(
+                      (directory/f'independent-verification-{shard}.json').read_text()
+                  )
+                  assert verification['verified'] is True
+                  witnesses.append({'shard':shard,'verification':verification})
+              records.append(audit)
+          base_count=sum(record['base_count'] for record in records)
+          assert base_count==4060,base_count
+          total=sum(
+              record['result']['stats']['configurations_covered']
+              for record in records
+          )
+          expected=4060*(24**16)
+          if not witnesses:
+              assert total==expected,(total,expected)
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'base_order':16,
+              'base_count':base_count,
+              'configurations_covered':total,
+              'expected_configurations':expected,
+              'search_nodes':sum(
+                  record['result']['stats']['search_nodes'] for record in records
+              ),
+              'witnesses':witnesses,
+              'records':records,
+          }
+          Path('heterogeneous-base16-summary.json').write_text(
+              json.dumps(summary,indent=2,sort_keys=True)+'\n'
+          )
+          print(json.dumps({
+              'base_count':base_count,
+              'configurations_covered':total,
+              'search_nodes':summary['search_nodes'],
+              'witnesses':len(witnesses),
+          }))
+          if witnesses:
+              raise SystemExit(10)
+          PY
+          sha256sum heterogeneous-base16-summary.json > heterogeneous-base16-summary.sha256
+
+      - name: Upload aggregate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-heterogeneous-base16-complete-${{ github.run_id }}
+          path: |
+            heterogeneous-base16-summary.json
+            heterogeneous-base16-summary.sha256
+            gathered/
+            eg64-gadget/spectrum_wiring_search.py
+            eg64-gadget/collect_gadget_catalog.py
+            eg64-gadget/heterogeneous_spectrum_search.py
+            eg64-gadget/verify_heterogeneous_witness.py
+          if-no-files-found: error
+          retention-days: 90
