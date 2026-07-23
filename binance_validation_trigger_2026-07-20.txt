@@ -1,0 +1,1 @@
+Public-data-only trigger for untouched March 15-23 BTC5m 100ms step validation data.
