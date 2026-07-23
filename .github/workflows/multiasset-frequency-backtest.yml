@@ -7,6 +7,12 @@ on:
     paths:
       - research/multiasset_frequency.py
       - .github/workflows/multiasset-frequency-backtest.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - research/multiasset_frequency.py
+      - .github/workflows/multiasset-frequency-backtest.yml
   workflow_dispatch:
 
 permissions:
