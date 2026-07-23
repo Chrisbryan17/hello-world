@@ -1,0 +1,86 @@
+name: native-freecad
+
+on:
+  push:
+    branches: [jamaica-collapsible-container]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-native-family:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      FREECAD_VERSION: "1.1.1"
+      FREECAD_APPIMAGE: FreeCAD_1.1.1-Linux-x86_64-py311.AppImage
+      FREECAD_SHA256: e2006138400b2fa85fa2e160e872d00767eb32964e85075830f7e198a3a876e1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache pinned FreeCAD AppImage
+        uses: actions/cache@v4
+        with:
+          path: .cache/freecad/${{ env.FREECAD_APPIMAGE }}
+          key: freecad-${{ runner.os }}-${{ env.FREECAD_VERSION }}-${{ env.FREECAD_SHA256 }}
+
+      - name: Download and verify pinned FreeCAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .cache/freecad
+          asset=".cache/freecad/${FREECAD_APPIMAGE}"
+          if [[ ! -s "$asset" ]]; then
+            curl --fail --location --retry 5 --retry-all-errors \
+              --output "$asset" \
+              "https://github.com/FreeCAD/FreeCAD/releases/download/${FREECAD_VERSION}/${FREECAD_APPIMAGE}"
+          fi
+          echo "${FREECAD_SHA256}  ${asset}" | sha256sum --check --strict
+          chmod +x "$asset"
+
+      - name: Extract headless runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf squashfs-root
+          .cache/freecad/${FREECAD_APPIMAGE} --appimage-extract >/dev/null
+          freecad_cmd="$(find squashfs-root -type f \( -name freecadcmd -o -name FreeCADCmd \) -perm -u+x | head -n 1)"
+          test -n "$freecad_cmd"
+          echo "FREECAD_CMD=$GITHUB_WORKSPACE/$freecad_cmd" >> "$GITHUB_ENV"
+
+      - name: Report native runtime
+        run: '"$FREECAD_CMD" --version'
+
+      - name: Generate native three-variant family
+        shell: bash
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src
+          JCC_FREECAD_OUTPUT: ${{ github.workspace }}/build/freecad
+          JCC_FREECAD_SAMPLES: "3"
+        run: |
+          set -euo pipefail
+          "$FREECAD_CMD" scripts/build_native_freecad.py
+
+      - name: Validate native documents
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find build/freecad -maxdepth 1 -type f -name '*.FCStd' | sort)
+          test "${#files[@]}" -eq 9
+          for file in "${files[@]}"; do
+            test -s "$file"
+            unzip -t "$file" >/dev/null
+          done
+          for variant in 20std 40std 40hc; do
+            test "$(find build/freecad -maxdepth 1 -type f -name "${variant}_*.FCStd" | wc -l)" -eq 3
+          done
+          sha256sum "${files[@]}" > build/freecad/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: freecad-native-family
+          path: build/freecad
+          if-no-files-found: error
+          retention-days: 30
