@@ -1,0 +1,216 @@
+name: EG64 exhaustive odd cyclic voltage lifts
+
+on:
+  push:
+    branches:
+      - eg64-cyclic-voltage-lifts
+    paths:
+      - 'eg64-lifts/**'
+      - '.github/workflows/eg64-cyclic-voltage-lifts.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Compile and reject a deliberately invalid lift witness
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            eg64-lifts/cyclic_lift_search.py \
+            eg64-lifts/verify_cyclic_lift.py
+          mkdir -p smoke
+          python3 - <<'PY'
+          import hashlib, json
+          q=3
+          edges=[(0,1),(0,2),(0,3),(1,2),(1,3),(2,3)]
+          digest=hashlib.sha256()
+          for copy in range(q):
+              for u,v in edges:
+                  digest.update(f"{u*q+copy},{v*q+copy}\n".encode())
+          witness={
+              "kind":"cyclic_voltage_lift",
+              "base_graph6":"C~",
+              "base_order":4,
+              "q":q,
+              "edge_voltages":[[u,v,0] for u,v in edges],
+              "lift_order":12,
+              "lift_adjacency_sha256":digest.hexdigest(),
+          }
+          open('smoke/invalid.json','w').write(json.dumps(witness))
+          PY
+          set +e
+          output="$(python3 eg64-lifts/verify_cyclic_lift.py smoke/invalid.json 2>&1)"
+          status=$?
+          set -e
+          test "$status" -ne 0
+          grep -q 'forbidden C_4' <<<"$output"
+          printf 'ADVERSARIAL_LIFT_VERIFIER=PASS\n'
+
+  search:
+    needs: smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {order: 4, q: 3, bases: 1}
+          - {order: 4, q: 5, bases: 1}
+          - {order: 4, q: 7, bases: 1}
+          - {order: 4, q: 9, bases: 1}
+          - {order: 4, q: 11, bases: 1}
+          - {order: 4, q: 13, bases: 1}
+          - {order: 6, q: 3, bases: 2}
+          - {order: 6, q: 5, bases: 2}
+          - {order: 6, q: 7, bases: 2}
+          - {order: 6, q: 9, bases: 2}
+          - {order: 6, q: 11, bases: 2}
+          - {order: 8, q: 3, bases: 5}
+          - {order: 8, q: 5, bases: 5}
+          - {order: 8, q: 7, bases: 5}
+          - {order: 10, q: 3, bases: 19}
+          - {order: 10, q: 5, bases: 19}
+          - {order: 12, q: 3, bases: 85}
+          - {order: 14, q: 3, bases: 509}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Install nauty
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nauty
+          GENG="$(command -v geng || command -v nauty-geng || true)"
+          test -n "$GENG"
+          echo "GENG=$GENG" >> "$GITHUB_ENV"
+      - name: Exhaust order ${{ matrix.order }} modulus ${{ matrix.q }}
+        id: search
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          label="n${{ matrix.order }}-q${{ matrix.q }}"
+          set +e
+          "$GENG" -q -c -d3 -D3 "${{ matrix.order }}" \
+            | python3 eg64-lifts/cyclic_lift_search.py \
+                --order "${{ matrix.order }}" \
+                --q "${{ matrix.q }}" \
+                --expected-bases "${{ matrix.bases }}" \
+                --progress 100000 \
+                --witness-out "results/witness-${label}.json" \
+                > "results/result-${label}.json"
+          pipeline=("${PIPESTATUS[@]}")
+          set -e
+          generator_status="${pipeline[0]}"
+          search_status="${pipeline[1]}"
+          if [[ "$search_status" == "10" ]]; then
+            [[ "$generator_status" == "0" || "$generator_status" == "141" ]]
+            python3 eg64-lifts/verify_cyclic_lift.py \
+              "results/witness-${label}.json" \
+              --output "results/independent-verification-${label}.json"
+            echo "found=1" >> "$GITHUB_OUTPUT"
+          else
+            [[ "$generator_status" == "0" ]]
+            [[ "$search_status" == "0" ]]
+            echo "found=0" >> "$GITHUB_OUTPUT"
+          fi
+          sha256sum results/*.json > "results/SHA256SUMS-${label}"
+      - name: Upload exact search evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-lift-n${{ matrix.order }}-q${{ matrix.q }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Flag independently verified counterexample
+        if: steps.search.outputs.found == '1'
+        run: exit 10
+
+  aggregate:
+    if: always()
+    needs: [smoke, search]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-lift-n*-q*
+          path: gathered
+      - name: Validate assignment accounting and candidate state
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          specs=[
+            (4,3,1),(4,5,1),(4,7,1),(4,9,1),(4,11,1),(4,13,1),
+            (6,3,2),(6,5,2),(6,7,2),(6,9,2),(6,11,2),
+            (8,3,5),(8,5,5),(8,7,5),
+            (10,3,19),(10,5,19),(12,3,85),(14,3,509),
+          ]
+          records=[]; witnesses=[]
+          for order,q,bases in specs:
+              directory=Path('gathered')/f'eg64-lift-n{order}-q{q}'
+              result_path=directory/f'result-n{order}-q{q}.json'
+              assert result_path.exists(),result_path
+              result=json.loads(result_path.read_text())
+              stats=result['stats']
+              rank=order//2+1
+              assert stats['bases']==bases,(order,q,stats['bases'],bases)
+              if result.get('witness') is None:
+                  assert stats['assignments']==bases*(q**rank)
+                  rejected=sum(
+                      stats.get(f'rejected_c{length}',0)
+                      for length in (4,8,16,32,64)
+                  )
+                  assert rejected==stats['assignments'],(order,q,rejected,stats['assignments'])
+              else:
+                  witnesses.append(result['witness'])
+                  proof=directory/f'independent-verification-n{order}-q{q}.json'
+                  assert proof.exists() and json.loads(proof.read_text())['verified'] is True
+              records.append(result)
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'families':len(records),
+              'assignments_tested':sum(item['stats']['assignments'] for item in records),
+              'verified_witnesses':witnesses,
+              'records':records,
+          }
+          Path('cyclic-lift-summary.json').write_text(
+              json.dumps(summary,indent=2,sort_keys=True)+'\n'
+          )
+          print(json.dumps({
+              'families':summary['families'],
+              'assignments_tested':summary['assignments_tested'],
+              'verified_witnesses':len(witnesses),
+          }))
+          if witnesses:
+              raise SystemExit(10)
+          PY
+          sha256sum cyclic-lift-summary.json > cyclic-lift-summary.sha256
+      - name: Upload aggregate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-cyclic-lifts-complete-${{ github.run_id }}
+          path: |
+            cyclic-lift-summary.json
+            cyclic-lift-summary.sha256
+            gathered/
+            eg64-lifts/
+          if-no-files-found: error
+          retention-days: 90
