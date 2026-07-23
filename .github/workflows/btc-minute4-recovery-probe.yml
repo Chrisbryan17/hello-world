@@ -1,0 +1,38 @@
+name: BTC minute4 recovery probe
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - tools/btc_minute4_recovery_probe.py
+      - .github/workflows/btc-minute4-recovery-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-public-sources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      HF_XET_HIGH_PERFORMANCE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install pinned recovery dependencies
+        run: python -m pip install 'huggingface_hub==0.34.4' 'hf_xet==1.1.8' 'pyarrow==18.1.0'
+      - name: Compile probe
+        run: python -m py_compile tools/btc_minute4_recovery_probe.py
+      - name: Verify public BTC and spot sources
+        run: python tools/btc_minute4_recovery_probe.py
+      - name: Upload checksummed probe evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: btc-minute4-recovery-probe
+          path: recovery-probe-output/
+          retention-days: 2
+          if-no-files-found: error
