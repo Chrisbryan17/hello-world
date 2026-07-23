@@ -1,0 +1,59 @@
+name: EG64 SAT cap smoke diagnostic
+
+on:
+  push:
+    branches:
+      - eg64-cubic-cap-census
+    paths:
+      - '.github/workflows/eg64-terminal-cap-sat-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Install dependencies
+        run: python3 -m pip install --disable-pip-version-check --quiet python-sat networkx
+      - name: Capture the complete order-5 boundary
+        id: run
+        shell: bash
+        run: |
+          set -u
+          mkdir -p diagnostic
+          python3 -m py_compile eg64-sat/terminal_cap_sat.py eg64-sat/verify_terminal_cap_sat.py \
+            > diagnostic/compile.stdout 2> diagnostic/compile.stderr
+          compile_status=$?
+          printf '%s\n' "$compile_status" > diagnostic/compile.status
+          set +e
+          python3 eg64-sat/terminal_cap_sat.py \
+            --order 5 \
+            --wall-seconds 300 \
+            --cycle-batch 1024 \
+            --max-iterations 100000 \
+            --output diagnostic/order-5.json \
+            > diagnostic/search.stdout 2> diagnostic/search.stderr
+          search_status=$?
+          set -e
+          printf '%s\n' "$search_status" > diagnostic/search.status
+          echo '=== COMPILE STDERR ==='
+          cat diagnostic/compile.stderr
+          echo '=== SEARCH STDOUT ==='
+          cat diagnostic/search.stdout
+          echo '=== SEARCH STDERR ==='
+          cat diagnostic/search.stderr
+          echo "compile_status=$compile_status search_status=$search_status"
+      - name: Upload complete diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-sat-order5-diagnostic-${{ github.run_id }}
+          path: diagnostic/
+          if-no-files-found: error
+          retention-days: 30
