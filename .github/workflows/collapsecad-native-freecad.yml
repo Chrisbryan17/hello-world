@@ -20,7 +20,7 @@ jobs:
       - name: Check out isolated CI branch
         uses: actions/checkout@v4
 
-      - name: Verify and extract detailed engineering payload
+      - name: Verify, extract, and patch detailed engineering payload
         shell: bash
         run: |
           python - <<'PY'
@@ -46,7 +46,15 @@ jobs:
                   if root != target and root not in target.parents:
                       raise SystemExit(f'unsafe archive path: {member.name}')
               archive.extractall(root, filter='data')
-          print(f'detailed payload verified: sha256={actual}')
+
+          adapter = Path('collapsecad_ci/src/collapsecad/freecad_adapter.py')
+          source = adapter.read_text()
+          old = '''    existing = App.getDocument(document_name)\n    if existing is not None:\n        App.closeDocument(document_name)\n'''
+          new = '''    try:\n        existing = App.getDocument(document_name)\n    except (NameError, RuntimeError):\n        existing = None\n    if existing is not None:\n        App.closeDocument(document_name)\n'''
+          if old not in source:
+              raise SystemExit('expected FreeCAD document lookup block not found')
+          adapter.write_text(source.replace(old, new))
+          print(f'detailed payload verified: sha256={actual}; FreeCAD 1.1 document lookup patch applied')
           PY
 
       - name: Install checksum-pinned FreeCAD command runtime
