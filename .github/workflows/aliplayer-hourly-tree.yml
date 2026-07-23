@@ -1,0 +1,55 @@
+name: Aliplayer Hourly Tree
+
+on:
+  push:
+    branches: [polymarket-multiasset-frequency-20260723]
+    paths: [.github/workflows/aliplayer-hourly-tree.yml]
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/aliplayer-hourly-tree.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --quiet requests
+      - name: List pinned hourly partitions
+        shell: bash
+        run: |
+          set -o pipefail
+          python - <<'PY' 2>&1 | tee aliplayer-hourly-tree.log
+          import json, requests
+          from pathlib import Path
+          repo='aliplayer1/polymarket-crypto-updown'; rev='ba1ad37cbcdd720cced20f1cdc97c2cf347cad6c'
+          out={'repo':repo,'revision':rev,'paths':{}}
+          paths=['data','data/orderbook/crypto=BTC/timeframe=1-hour','data/orderbook/crypto=ETH/timeframe=1-hour']
+          for path in paths:
+            url=f'https://huggingface.co/api/datasets/{repo}/tree/{rev}/{path}'
+            rows=[]; cursor=None
+            while True:
+              params={'recursive':'true','expand':'true','limit':1000}
+              if cursor: params['cursor']=cursor
+              r=requests.get(url,params=params,timeout=180); print(path,r.status_code,r.url)
+              r.raise_for_status(); batch=r.json(); rows.extend(batch)
+              link=r.links.get('next',{}).get('url')
+              if not link: break
+              url=link; cursor=None
+            out['paths'][path]=rows
+            print('rows',len(rows),'bytes',sum((x.get('size') or 0) for x in rows if x.get('type')=='file'))
+            for x in rows[:20]: print(x.get('path'),x.get('size'),x.get('lfs'))
+          Path('aliplayer-hourly-tree.json').write_text(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliplayer-hourly-tree
+          path: |
+            aliplayer-hourly-tree.json
+            aliplayer-hourly-tree.log
+          retention-days: 30
