@@ -1,0 +1,50 @@
+name: Frozen Spot Transfer
+
+on:
+  push:
+    branches: [polymarket-multiasset-frequency-20260723]
+    paths:
+      - research/frozen_spot_transfer.py
+      - .github/workflows/frozen-spot-transfer.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - research/frozen_spot_transfer.py
+      - .github/workflows/frozen-spot-transfer.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned backtest stack
+        run: python -m pip install --upgrade pip pandas numpy pyarrow requests tabulate 'honest-backtest[parquet]==0.2.0'
+      - name: Compile transfer
+        run: python -m py_compile research/frozen_spot_transfer.py
+      - name: Run independent transfer
+        shell: bash
+        run: |
+          set -o pipefail
+          python research/frozen_spot_transfer.py 2>&1 | tee frozen-spot-transfer.log
+      - name: Show summary
+        if: always()
+        run: |
+          cat results/frozen_spot_transfer/summary.csv || true
+          tail -200 frozen-spot-transfer.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frozen-spot-transfer
+          path: |
+            results/frozen_spot_transfer/
+            frozen-spot-transfer.log
+          if-no-files-found: warn
+          retention-days: 30
