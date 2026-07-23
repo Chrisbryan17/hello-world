@@ -5,8 +5,8 @@ For every connected cubic source graph Q, delete any vertex lying on every
 power-of-two cycle. The remaining graph H is a cubic three-terminal gadget
 with no internal power-of-two cycle. Instead of requiring a uniform modular
 path condition, this program directly assembles copies of H over every supplied
-cubic base graph and exhausts all terminal assignments, modulo the harmless
-global relabelling that fixes the first copy's assignment.
+cubic base graph and exhausts every physical terminal assignment. No terminal
+symmetry quotient is taken unless separately proved.
 """
 from __future__ import annotations
 
@@ -199,10 +199,10 @@ def exhaust_assignments(
 ) -> tuple[tuple[tuple[int, int, int], ...] | None, int, int]:
     tested = 0
     deepest_survival = 0
-    # Terminal labels are arbitrary globally, so compose every assignment by
-    # the inverse of the first assignment and fix the first copy to identity.
-    for tail in itertools.product(PERMUTATIONS, repeat=len(base) - 1):
-        assignments = ((0, 1, 2),) + tail
+    # Enumerate every physical terminal assignment. A global terminal-label
+    # normalization is not valid unless the gadget has a proved S3 action on
+    # its three terminals; no such symmetry is assumed here.
+    for assignments in itertools.product(PERMUTATIONS, repeat=len(base)):
         tested += 1
         graph = assemble(gadget, terminals, base, assignments)
         forbidden = first_forbidden_power(graph)
