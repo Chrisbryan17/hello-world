@@ -1,0 +1,189 @@
+name: EG64 exact three-pole multiplier search
+
+on:
+  push:
+    branches:
+      - eg64-cubic-cap-census
+    paths:
+      - 'eg64-gadget/**'
+      - '.github/workflows/eg64-three-pole-gadget.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  through-20:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Install nauty
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nauty
+          GENG="$(command -v geng || command -v nauty-geng || true)"
+          test -n "$GENG"
+          echo "GENG=$GENG" >> "$GITHUB_ENV"
+      - name: Exhaust connected cubic graphs through order 20
+        id: census
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          found=0
+          specs=("4:1" "6:2" "8:5" "10:19" "12:85" "14:509" "16:4060" "18:41301" "20:510489")
+          for spec in "${specs[@]}"; do
+            n="${spec%%:*}"; expected="${spec##*:}"
+            set +e
+            "$GENG" -q -c -d3 -D3 "$n" \
+              | python3 eg64-gadget/vertex_gadget_census.py \
+                  --order "$n" --expected "$expected" --progress 100000 \
+                  --witness-out "results/witness-${n}.json" \
+                  > "results/order-${n}.json"
+            pipeline=("${PIPESTATUS[@]}")
+            set -e
+            gs="${pipeline[0]}"; cs="${pipeline[1]}"
+            if [[ "$cs" == "10" ]]; then
+              [[ "$gs" == "0" || "$gs" == "141" ]]
+              found=1; break
+            fi
+            [[ "$gs" == "0" ]]; [[ "$cs" == "0" ]]
+          done
+          echo "found=$found" >> "$GITHUB_OUTPUT"
+          sha256sum results/*.json > results/SHA256SUMS
+      - name: Upload through-20 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-three-pole-through20-${{ github.run_id }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Flag candidate
+        if: steps.census.outputs.found == '1'
+        run: exit 10
+
+  order-22-shard:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Install nauty
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nauty
+          GENG="$(command -v geng || command -v nauty-geng || true)"
+          test -n "$GENG"
+          echo "GENG=$GENG" >> "$GITHUB_ENV"
+      - name: Search residue ${{ matrix.shard }}/16
+        id: census
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          shard="${{ matrix.shard }}"
+          set +e
+          "$GENG" -q -c -d3 -D3 22 "${shard}/16" \
+            | python3 eg64-gadget/vertex_gadget_census.py \
+                --order 22 --progress 100000 \
+                --witness-out "results/witness-${shard}.json" \
+                > "results/shard-${shard}.json"
+          pipeline=("${PIPESTATUS[@]}")
+          set -e
+          gs="${pipeline[0]}"; cs="${pipeline[1]}"
+          if [[ "$cs" == "10" ]]; then
+            [[ "$gs" == "0" || "$gs" == "141" ]]
+            echo "found=1" >> "$GITHUB_OUTPUT"
+          else
+            [[ "$gs" == "0" ]]; [[ "$cs" == "0" ]]
+            echo "found=0" >> "$GITHUB_OUTPUT"
+          fi
+          sha256sum results/*.json > "results/SHA256SUMS-${shard}"
+      - name: Upload shard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-three-pole-order22-shard-${{ matrix.shard }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Flag candidate
+        if: steps.census.outputs.found == '1'
+        run: exit 10
+
+  aggregate:
+    if: always()
+    needs: [through-20, order-22-shard]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-three-pole-*
+          path: gathered
+      - name: Audit counts and candidate state
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          root=Path('gathered')
+          through=next(root.glob('eg64-three-pole-through20-*'))
+          expected={4:1,6:2,8:5,10:19,12:85,14:509,16:4060,18:41301,20:510489}
+          records=[]; witnesses=[]
+          for n,count in expected.items():
+              result=json.loads((through/f'order-{n}.json').read_text())
+              assert result['stats']['graphs']==count
+              if result.get('witness'): witnesses.append(result['witness'])
+              records.append(result)
+          shards=[]
+          for shard in range(16):
+              directory=root/f'eg64-three-pole-order22-shard-{shard}'
+              result=json.loads((directory/f'shard-{shard}.json').read_text())
+              if result.get('witness'): witnesses.append(result['witness'])
+              shards.append({'shard':shard,**result})
+          total22=sum(item['stats']['graphs'] for item in shards)
+          assert total22==7_319_447,total22
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'graphs_through_20':sum(expected.values()),
+              'graphs_order_22':total22,
+              'graphs_total':sum(expected.values())+total22,
+              'witnesses':witnesses,
+              'through20':records,
+              'order22_shards':shards,
+          }
+          Path('three-pole-summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          print(json.dumps({'graphs_total':summary['graphs_total'],'witnesses':len(witnesses)}))
+          if witnesses: raise SystemExit(10)
+          PY
+          sha256sum three-pole-summary.json > three-pole-summary.sha256
+      - name: Upload aggregate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-three-pole-complete-${{ github.run_id }}
+          path: |
+            three-pole-summary.json
+            three-pole-summary.sha256
+            gathered/
+            eg64-gadget/vertex_gadget_census.py
+          if-no-files-found: error
+          retention-days: 90
