@@ -1,0 +1,198 @@
+name: EG64 stable lazy SAT terminal-cap search
+
+on:
+  push:
+    branches:
+      - eg64-sat-terminal-stable
+    paths:
+      - 'eg64-sat/**'
+      - '.github/workflows/eg64-sat-terminal-stable.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Install SAT runtime
+        run: python3 -m pip install --disable-pip-version-check python-sat
+      - name: Compile scripts
+        run: |
+          python3 -m py_compile \
+            eg64-sat/lazy_terminal_sat.py \
+            eg64-sat/lazy_terminal_sat_stable.py \
+            eg64-sat/verify_terminal_witness.py
+      - name: Prove native solver interruption works
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=eg64-sat python3 - <<'PY'
+          from pysat.examples.genhard import PHP
+          from pysat.solvers import Solver
+          from lazy_terminal_sat_stable import solve_with_deadline
+
+          formula=PHP(nof_holes=20)
+          with Solver(name='m22', bootstrap_with=formula.clauses) as solver:
+              result=solve_with_deadline(solver,0.01)
+          assert result is None,result
+          print('NATIVE_SOLVER_INTERRUPT=PASS')
+          PY
+      - name: Known-UNSAT smoke at orders 5 and 7
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p smoke
+          for n in 5 7; do
+            PYTHONPATH=eg64-sat python3 eg64-sat/lazy_terminal_sat_stable.py \
+              --order "$n" --solver m22 --max-seconds 300 \
+              --checkpoint "smoke/order-${n}.json" \
+              > "smoke/order-${n}.stdout.json"
+            python3 - "$n" <<'PY'
+          import json,sys
+          n=int(sys.argv[1])
+          result=json.load(open(f'smoke/order-{n}.json'))
+          assert result['stats']['status']=='unsat',result
+          print(f'KNOWN_UNSAT_{n}=PASS')
+          PY
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eg64-stable-sat-smoke-${{ github.run_id }}
+          path: smoke/
+          if-no-files-found: error
+          retention-days: 90
+
+  search:
+    needs: smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        order: [23, 25, 27, 29, 31]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 58
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Install SAT runtime
+        run: python3 -m pip install --disable-pip-version-check python-sat
+      - name: Run stable lazy SAT at order ${{ matrix.order }}
+        id: solve
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          order="${{ matrix.order }}"
+          set +e
+          PYTHONPATH=eg64-sat python3 eg64-sat/lazy_terminal_sat_stable.py \
+            --order "$order" --solver m22 --max-seconds 3000 \
+            --log-every 50 \
+            --checkpoint "results/order-${order}.json" \
+            --witness-out "results/witness-${order}.json" \
+            > "results/order-${order}.progress.log" 2>&1
+          status=$?
+          set -e
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          case "$status" in
+            0)
+              test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["stats"]["status"])' "results/order-${order}.json")" = "unsat"
+              ;;
+            10)
+              python3 eg64-sat/verify_terminal_witness.py \
+                "results/witness-${order}.json" \
+                --output "results/independent-verification-${order}.json"
+              ;;
+            124)
+              test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["stats"]["status"])' "results/order-${order}.json")" = "timeout"
+              ;;
+            *)
+              echo "unexpected search exit code $status" >&2
+              tail -n 120 "results/order-${order}.progress.log" >&2 || true
+              exit "$status"
+              ;;
+          esac
+          sha256sum results/* > "results/SHA256SUMS-${order}"
+      - name: Upload order evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-stable-sat-order-${{ matrix.order }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Flag independently verified witness
+        if: steps.solve.outputs.exit_code == '10'
+        run: exit 10
+
+  aggregate:
+    if: always()
+    needs: [smoke, search]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-stable-sat-order-*
+          path: gathered
+      - name: Aggregate exact solver states
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+
+          records=[]
+          witnesses=[]
+          for order in (23,25,27,29,31):
+              directory=Path('gathered')/f'eg64-stable-sat-order-{order}'
+              checkpoint=directory/f'order-{order}.json'
+              assert checkpoint.exists(),checkpoint
+              result=json.loads(checkpoint.read_text())
+              status=result['stats']['status']
+              assert status in {'unsat','timeout','witness'},result
+              if status=='witness':
+                  proof=directory/f'independent-verification-{order}.json'
+                  assert proof.exists()
+                  verification=json.loads(proof.read_text())
+                  assert verification['verified'] is True
+                  witnesses.append({'order':order,'witness':result.get('witness'),'verification':verification})
+              records.append({'order':order,**result})
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'engine':'memory-bounded one-cycle-per-model lazy SAT with interruptible MiniSat22 calls',
+              'records':records,
+              'verified_witnesses':witnesses,
+          }
+          out=Path('stable-sat-summary.json')
+          out.write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          Path('stable-sat-summary.sha256').write_text(
+              hashlib.sha256(out.read_bytes()).hexdigest()+'  stable-sat-summary.json\n'
+          )
+          print(json.dumps({
+              'statuses':{str(record['order']):record['stats']['status'] for record in records},
+              'verified_witnesses':len(witnesses),
+          },sort_keys=True))
+          if witnesses:
+              raise SystemExit(10)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eg64-stable-sat-complete-${{ github.run_id }}
+          path: |
+            stable-sat-summary.json
+            stable-sat-summary.sha256
+            gathered/
+            eg64-sat/
+          if-no-files-found: error
+          retention-days: 90
