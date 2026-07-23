@@ -83,11 +83,11 @@ def relevant_precursor_lengths(cap_order: int) -> tuple[int, ...]:
 
 def candidate_edges(
     base: tuple[int, ...],
-) -> tuple[list[tuple[int, int]], dict[int, int], str | None]:
+) -> tuple[list[tuple[int, int]], dict[int, int], int, str | None]:
     edges, _index = edge_index_map(base)
     saw_power, intersection, scanned = power_cycle_intersection(base)
     if not saw_power:
-        return [], scanned, "base_graph_is_counterexample"
+        return [], scanned, intersection, "base_graph_is_counterexample"
     candidates = []
     precursors = relevant_precursor_lengths(len(base) + 3)
     for index, edge in enumerate(edges):
@@ -96,7 +96,7 @@ def candidate_edges(
         if any(has_cycle_length_through_edge(base, length, edge) for length in precursors):
             continue
         candidates.append(edge)
-    return candidates, scanned, None
+    return candidates, scanned, intersection, None
 
 
 @dataclass
@@ -133,7 +133,7 @@ def main() -> int:
             raise ValueError(f"expected order {args.order}, got {order}")
         validate_connected_cubic(base)
         stats.graphs += 1
-        candidates, scanned, special = candidate_edges(base)
+        candidates, scanned, intersection, special = candidate_edges(base)
         if special == "base_graph_is_counterexample":
             witness = {
                 "kind": special,
@@ -143,9 +143,7 @@ def main() -> int:
                 "cycles_scanned": scanned,
             }
             break
-        _edges, _ = edge_index_map(base)
-        saw, intersection, _ = power_cycle_intersection(base)
-        if saw and intersection:
+        if intersection:
             stats.graphs_with_common_power_edge += 1
             stats.rooted_edges_tested += intersection.bit_count()
         if candidates:
