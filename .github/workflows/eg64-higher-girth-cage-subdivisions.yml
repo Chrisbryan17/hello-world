@@ -1,0 +1,181 @@
+name: EG64 higher-girth cage subdivisions
+
+on:
+  push:
+    branches:
+      - eg64-cubic-cap-census
+    paths:
+      - '.github/workflows/eg64-higher-girth-cage-subdivisions.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {girth: 10, order: 70, file: cagesk3g10.g6}
+          - {girth: 11, order: 112, file: cagesk3g11.g6}
+          - {girth: 12, order: 126, file: cagesk3g12.g6}
+          - {girth: 13, order: 272, file: k3_g13_n272.g6}
+          - {girth: 14, order: 384, file: k3_g14_n384.g6}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Fetch exact cage/record list
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          url="https://houseofgraphs.org/data/cages/${{ matrix.file }}"
+          curl -fsSL -D results/download.headers "$url" -o results/source.g6
+          python3 - <<'PY'
+          from pathlib import Path
+          expected_order=${{ matrix.order }}
+          records=[]
+          for raw in Path('results/source.g6').read_bytes().splitlines():
+              line=raw.strip()
+              if not line or line==b'>>graph6<<':
+                  continue
+              if line.startswith(b'>>graph6<<'):
+                  line=line[len(b'>>graph6<<'):]
+              vals=[byte-63 for byte in line]
+              if vals[0]<=62:
+                  order=vals[0]
+              elif vals[0]==63 and vals[1]!=63:
+                  order=(vals[1]<<12)|(vals[2]<<6)|vals[3]
+              else:
+                  raise SystemExit('unsupported graph6 order encoding')
+              if order!=expected_order:
+                  raise SystemExit(f'expected order {expected_order}, received {order}')
+              records.append(line)
+          if not records:
+              raise SystemExit('source list is empty')
+          Path('results/normalized.g6').write_bytes(b'\n'.join(records)+b'\n')
+          Path('results/source-count.txt').write_text(str(len(records))+'\n')
+          print(f'SOURCE_GRAPHS={len(records)}')
+          PY
+          sha256sum results/source.g6 results/normalized.g6 > results/source.sha256
+
+      - name: Exhaust every edge subdivision
+        id: census
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          python3 eg64-census/cubic_cap_census.py \
+            --order "${{ matrix.order }}" \
+            --progress 1 \
+            --witness-out results/witness.json \
+            < results/normalized.g6 \
+            > results/census.json
+          status=$?
+          set -e
+          if [[ "$status" == "10" ]]; then
+            python3 eg64-census/verify_cap_witness.py \
+              results/witness.json \
+              --output results/independent-verification.json
+            echo 'found=1' >> "$GITHUB_OUTPUT"
+          else
+            [[ "$status" == "0" ]]
+            echo 'found=0' >> "$GITHUB_OUTPUT"
+          fi
+          cat results/census.json
+
+      - name: Validate accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          source_count=int(Path('results/source-count.txt').read_text())
+          result=json.loads(Path('results/census.json').read_text())
+          stats=result['stats']
+          assert stats['order']==${{ matrix.order }}
+          if result.get('witness') is None:
+              assert stats['graphs']==source_count,(stats['graphs'],source_count)
+              assert stats['subdivision_candidates']==0
+          else:
+              proof=Path('results/independent-verification.json')
+              assert proof.exists() and json.loads(proof.read_text())['verified'] is True
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'girth':${{ matrix.girth }},
+              'order':${{ matrix.order }},
+              'source_url':'https://houseofgraphs.org/data/cages/${{ matrix.file }}',
+              'source_graph_count':source_count,
+              'source_sha256':hashlib.sha256(Path('results/source.g6').read_bytes()).hexdigest(),
+              'result':result,
+          }
+          Path('results/summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          PY
+          sha256sum results/* > results/SHA256SUMS.tmp
+          grep -v 'SHA256SUMS' results/SHA256SUMS.tmp > results/SHA256SUMS
+          rm results/SHA256SUMS.tmp
+
+      - name: Upload exact evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-cage-g${{ matrix.girth }}-n${{ matrix.order }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Flag independently verified counterexample
+        if: steps.census.outputs.found == '1'
+        run: exit 10
+
+  aggregate:
+    if: always()
+    needs: audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-cage-g*-n*
+          path: gathered
+      - name: Aggregate completed results
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          records=[]; witnesses=[]
+          for path in sorted(Path('gathered').glob('eg64-cage-g*-n*/summary.json')):
+              record=json.loads(path.read_text())
+              records.append(record)
+              if record['result'].get('witness') is not None:
+                  witnesses.append(record['result']['witness'])
+          assert len(records)==5,len(records)
+          summary={
+              'families':len(records),
+              'source_graphs':sum(r['source_graph_count'] for r in records),
+              'verified_witnesses':witnesses,
+              'records':records,
+          }
+          Path('higher-girth-cage-summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          print(json.dumps({'families':len(records),'source_graphs':summary['source_graphs'],'witnesses':len(witnesses)}))
+          if witnesses:
+              raise SystemExit(10)
+          PY
+          sha256sum higher-girth-cage-summary.json > higher-girth-cage-summary.sha256
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eg64-higher-girth-cages-complete-${{ github.run_id }}
+          path: |
+            higher-girth-cage-summary.json
+            higher-girth-cage-summary.sha256
+            gathered/
+          if-no-files-found: error
+          retention-days: 90
