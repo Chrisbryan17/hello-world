@@ -40,14 +40,39 @@ jobs:
           echo "${FREECAD_SHA256}  ${asset}" | sha256sum --check --strict
           chmod +x "$asset"
 
-      - name: Extract headless runtime
+      - name: Extract and inspect headless runtime
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p build/freecad
           rm -rf squashfs-root
           .cache/freecad/${FREECAD_APPIMAGE} --appimage-extract >/dev/null
           freecad_cmd="$(find squashfs-root -type f \( -name freecadcmd -o -name FreeCADCmd \) -perm -u+x | head -n 1)"
           test -n "$freecad_cmd"
+          {
+            echo "selected_relative=$freecad_cmd"
+            echo "selected_absolute=$GITHUB_WORKSPACE/$freecad_cmd"
+            echo "=== selected executable ==="
+            file "$freecad_cmd" || true
+            ls -l "$freecad_cmd" || true
+            readlink -f "$freecad_cmd" || true
+            ldd "$freecad_cmd" || true
+            echo "=== AppRun ==="
+            file squashfs-root/AppRun || true
+            ls -l squashfs-root/AppRun || true
+            readlink -f squashfs-root/AppRun || true
+            head -n 240 squashfs-root/AppRun || true
+            echo "=== candidate runtimes ==="
+            find squashfs-root -maxdepth 5 -type f \
+              \( -iname '*freecad*' -o -iname 'python3*' -o -name 'AppRun' \) \
+              -printf '%p\t%s bytes\n' | sort
+            echo "=== candidate launchers and symlinks ==="
+            find squashfs-root -maxdepth 4 \
+              \( -type f -o -type l \) \
+              \( -iname '*freecad*' -o -name 'AppRun' \) \
+              -exec ls -ld {} \; | sort
+          } > build/freecad/RUNTIME_PATHS.txt 2>&1
+          cp squashfs-root/AppRun build/freecad/AppRun.txt || true
           echo "FREECAD_CMD=$GITHUB_WORKSPACE/$freecad_cmd" >> "$GITHUB_ENV"
 
       - name: Report native runtime
@@ -56,7 +81,6 @@ jobs:
       - name: Capture FreeCAD CLI contract
         shell: bash
         run: |
-          mkdir -p build/freecad
           "$FREECAD_CMD" --help > build/freecad/FREECAD_HELP.txt 2>&1 || true
 
       - name: Generate native three-variant family
