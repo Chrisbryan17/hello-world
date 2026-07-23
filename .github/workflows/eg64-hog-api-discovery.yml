@@ -1,0 +1,62 @@
+name: EG64 discover deployed HoG API routes
+
+on:
+  push:
+    branches:
+      - eg64-terminal-cap-census
+    paths:
+      - '.github/workflows/eg64-hog-api-discovery.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fetch deployed frontend and extract routes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          curl -fsSL https://houseofgraphs.org/ -o results/index.html
+          bundle="$(grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' results/index.html | head -1)"
+          test -n "$bundle"
+          curl -fsSL "https://houseofgraphs.org${bundle}" -o results/frontend.js
+          printf '%s\n' "$bundle" > results/bundle-path.txt
+          python3 - <<'PY'
+          import json,re
+          from pathlib import Path
+          text=Path('results/frontend.js').read_text(errors='replace')
+          strings=re.findall(r'(?:(?<=")|(?<=\'))([^"\']{1,300})(?=["\'])',text)
+          keywords=('api','download','export','graph6','sparse6','format','graphs/')
+          hits=[]
+          for value in strings:
+              low=value.lower()
+              if any(k in low for k in keywords):
+                  hits.append(value)
+          # Also capture absolute URLs and slash-routes near relevant keywords.
+          absolute=sorted(set(re.findall(r'https?://[^"\'`\\ ]+',text)))
+          routes=sorted(set(re.findall(r'/[A-Za-z0-9_?=&${}./:-]{3,160}',text)))
+          relevant_routes=[r for r in routes if any(k in r.lower() for k in keywords)]
+          out={
+              'bundle_bytes':len(text.encode()),
+              'absolute_urls':absolute,
+              'string_hits':sorted(set(hits)),
+              'relevant_routes':relevant_routes,
+          }
+          Path('results/routes.json').write_text(json.dumps(out,indent=2,sort_keys=True)+'\n')
+          print(json.dumps({
+              'absolute_urls':len(absolute),
+              'string_hits':len(out['string_hits']),
+              'relevant_routes':len(relevant_routes),
+          }))
+          PY
+          sha256sum results/* > results/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eg64-hog-api-routes-${{ github.run_id }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 30
