@@ -1,0 +1,212 @@
+name: EG64 exact irregular minimal-counterexample SAT census
+
+on:
+  push:
+    branches:
+      - eg64-cubic-cap-census
+    paths:
+      - 'eg64-sat/minimal_structural_sat.py'
+      - 'eg64-sat/verify_minimal_structural.py'
+      - '.github/workflows/eg64-irregular-minimal-sat.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  search-order:
+    strategy:
+      fail-fast: false
+      matrix:
+        order: [17, 18, 19, 20, 21, 22]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Install exact SAT dependencies
+        run: python3 -m pip install --disable-pip-version-check --quiet python-sat networkx
+
+      - name: Compile search and independent verifier
+        run: |
+          python3 -m py_compile \
+            eg64-sat/minimal_structural_sat.py \
+            eg64-sat/verify_minimal_structural.py
+
+      - name: Search every admissible B-class size at order ${{ matrix.order }}
+        id: search
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          order="${{ matrix.order }}"
+          max_b=$((order / 3))
+          found=0
+          for b in $(seq 1 "$max_b"); do
+            echo "=== order ${order}, |B|=${b}, |A|=$((order-b)) ==="
+            set +e
+            python3 eg64-sat/minimal_structural_sat.py \
+              --order "$order" \
+              --b-size "$b" \
+              --wall-seconds 600 \
+              --cycle-batch 1024 \
+              --max-iterations 5000000 \
+              --output "results/order-${order}-b${b}.json" \
+              --witness-out "results/witness-order-${order}-b${b}.json" \
+              > "results/stdout-order-${order}-b${b}.txt" \
+              2> "results/stderr-order-${order}-b${b}.txt"
+            status=$?
+            set -e
+            printf '%s\n' "$status" > "results/exit-order-${order}-b${b}.txt"
+            if [[ "$status" == "10" ]]; then
+              python3 eg64-sat/verify_minimal_structural.py \
+                "results/witness-order-${order}-b${b}.json" \
+                --output "results/independent-verification-order-${order}-b${b}.json"
+              found=1
+              break
+            elif [[ "$status" != "0" && "$status" != "3" ]]; then
+              cat "results/stderr-order-${order}-b${b}.txt" >&2
+              exit "$status"
+            fi
+          done
+          echo "found=$found" >> "$GITHUB_OUTPUT"
+
+      - name: Audit all attempted partitions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          order=int("${{ matrix.order }}")
+          records=[]; complete_b=[]; incomplete_b=[]; witnesses=[]
+          for b in range(1,order//3+1):
+              path=Path(f'results/order-{order}-b{b}.json')
+              if not path.exists():
+                  break
+              result=json.loads(path.read_text())
+              stats=result['stats']
+              assert stats['order']==order
+              assert stats['a_size']==order-b
+              assert stats['b_size']==b
+              assert stats['solver'] in ('Glucose4','Minisat22')
+              assert stats['clauses_added']==(
+                  stats['connectivity_cuts']+sum(stats['cycle_clauses'].values())
+              )
+              status=stats['status']
+              assert status in ('unsat','sat_witness','timeout','iteration_limit')
+              if status in ('unsat','sat_witness'):
+                  complete_b.append(b)
+              else:
+                  incomplete_b.append(b)
+              if status=='sat_witness':
+                  verification=json.loads(
+                      Path(f'results/independent-verification-order-{order}-b{b}.json').read_text()
+                  )
+                  assert verification['verified'] is True
+                  witnesses.append({'b_size':b,'verification':verification})
+              else:
+                  assert result['witness'] is None
+              records.append(result)
+          audit={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'order':order,
+              'attempted_b_sizes':[record['stats']['b_size'] for record in records],
+              'complete_b_sizes':complete_b,
+              'incomplete_b_sizes':incomplete_b,
+              'witnesses':witnesses,
+              'records':records,
+          }
+          Path(f'results/audit-order-{order}.json').write_text(
+              json.dumps(audit,indent=2,sort_keys=True)+'\n'
+          )
+          print(json.dumps({
+              'order':order,
+              'complete_b_sizes':complete_b,
+              'incomplete_b_sizes':incomplete_b,
+              'witnesses':len(witnesses),
+          }))
+          PY
+          sha256sum results/* > results/SHA256SUMS
+
+      - name: Upload exact order evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-irregular-minimal-order${{ matrix.order }}
+          path: |
+            results/
+            eg64-sat/minimal_structural_sat.py
+            eg64-sat/verify_minimal_structural.py
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Flag an independently verified counterexample
+        if: steps.search.outputs.found == '1'
+        run: exit 10
+
+  aggregate:
+    if: always()
+    needs: search-order
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eg64-irregular-minimal-order*
+          path: gathered
+      - name: Aggregate complete and incomplete structural partitions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          records=[]; witnesses=[]
+          for order in range(17,23):
+              directory=Path('gathered')/f'eg64-irregular-minimal-order{order}'/'results'
+              audit=json.loads((directory/f'audit-order-{order}.json').read_text())
+              assert audit['order']==order
+              witnesses.extend({'order':order,**item} for item in audit['witnesses'])
+              records.append(audit)
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'orders':list(range(17,23)),
+              'witnesses':witnesses,
+              'records':records,
+          }
+          Path('irregular-minimal-summary.json').write_text(
+              json.dumps(summary,indent=2,sort_keys=True)+'\n'
+          )
+          print(json.dumps({
+              'orders':summary['orders'],
+              'witnesses':len(witnesses),
+              'complete_partitions':sum(len(r['complete_b_sizes']) for r in records),
+              'incomplete_partitions':sum(len(r['incomplete_b_sizes']) for r in records),
+          }))
+          if witnesses:
+              raise SystemExit(10)
+          PY
+          sha256sum irregular-minimal-summary.json > irregular-minimal-summary.sha256
+
+      - name: Upload aggregate irregular evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-irregular-minimal-complete-${{ github.run_id }}
+          path: |
+            irregular-minimal-summary.json
+            irregular-minimal-summary.sha256
+            gathered/
+            eg64-sat/minimal_structural_sat.py
+            eg64-sat/verify_minimal_structural.py
+          if-no-files-found: error
+          retention-days: 90
