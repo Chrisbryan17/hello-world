@@ -47,7 +47,6 @@ def select_single_btc_archive(files: list[str]) -> str:
         and "5m" in Path(name).name.lower().replace("-", "")
     ]
     if len(candidates) != 1:
-        # Fall back to the only BTC zip if the repo naming omits an explicit 5m token.
         candidates = [
             name
             for name in files
@@ -56,6 +55,21 @@ def select_single_btc_archive(files: list[str]) -> str:
     if len(candidates) != 1:
         raise RuntimeError(f"expected one BTC archive; found {candidates}")
     return candidates[0]
+
+
+def resolve_btc_source_files(files: list[str]) -> dict[str, str]:
+    markets = [name for name in files if Path(name).name == "btc_markets.parquet"]
+    ticks = [name for name in files if Path(name).name == "btc_ticks.parquet"]
+    if len(markets) == 1 and len(ticks) == 1:
+        return {
+            "kind": "direct_parquet",
+            "markets": markets[0],
+            "ticks": ticks[0],
+        }
+    return {
+        "kind": "zip",
+        "archive": select_single_btc_archive(files),
+    }
 
 
 def find_exact_file(root: Path, basename: str) -> Path:
@@ -77,15 +91,14 @@ def verify_spot_sample(spot_path: Path) -> dict[str, object]:
         batch_size=262_144,
         columns=expected_schema,
     ):
-        table = batch.to_table()
         mask = pc.and_(
-            pc.equal(table["ts_ms"], KNOWN_SPOT_TS_MS),
+            pc.equal(batch.column(batch.schema.get_field_index("ts_ms")), KNOWN_SPOT_TS_MS),
             pc.and_(
-                pc.equal(table["symbol"], "btcusdt"),
-                pc.equal(table["source"], "binance"),
+                pc.equal(batch.column(batch.schema.get_field_index("symbol")), "btcusdt"),
+                pc.equal(batch.column(batch.schema.get_field_index("source")), "binance"),
             ),
         )
-        selected = table.filter(mask)
+        selected = batch.filter(mask)
         if selected.num_rows:
             found.extend(selected.to_pylist())
     if len(found) != 1:
@@ -104,6 +117,54 @@ def verify_spot_sample(spot_path: Path) -> dict[str, object]:
     }
 
 
+def download_btc_sources(source: dict[str, str], temp: Path) -> tuple[Path, Path, dict[str, object]]:
+    if source["kind"] == "direct_parquet":
+        markets = Path(
+            hf_hub_download(
+                repo_id=BTC_REPO,
+                repo_type="dataset",
+                filename=source["markets"],
+                local_dir=temp / "btc-download",
+            )
+        )
+        ticks = Path(
+            hf_hub_download(
+                repo_id=BTC_REPO,
+                repo_type="dataset",
+                filename=source["ticks"],
+                local_dir=temp / "btc-download",
+            )
+        )
+        return markets, ticks, {
+            "kind": "direct_parquet",
+            "files": [source["markets"], source["ticks"]],
+        }
+
+    archive_path = Path(
+        hf_hub_download(
+            repo_id=BTC_REPO,
+            repo_type="dataset",
+            filename=source["archive"],
+            local_dir=temp / "btc-download",
+        )
+    )
+    extracted = temp / "btc-extracted"
+    with zipfile.ZipFile(archive_path) as archive:
+        archive.extractall(extracted)
+        members = sorted(archive.namelist())
+    return (
+        find_exact_file(extracted, "btc_markets.parquet"),
+        find_exact_file(extracted, "btc_ticks.parquet"),
+        {
+            "kind": "zip",
+            "archive": source["archive"],
+            "archive_members": members,
+            "archive_sha256": sha256_file(archive_path),
+            "archive_size_bytes": archive_path.stat().st_size,
+        },
+    )
+
+
 def main() -> None:
     output_dir = Path("recovery-probe-output")
     if output_dir.exists():
@@ -112,25 +173,11 @@ def main() -> None:
 
     api = HfApi()
     btc_files = api.list_repo_files(BTC_REPO, repo_type="dataset")
-    btc_archive_name = select_single_btc_archive(btc_files)
+    btc_source = resolve_btc_source_files(btc_files)
 
     with tempfile.TemporaryDirectory(prefix="btc-minute4-probe-") as temporary:
         temp = Path(temporary)
-        btc_archive = Path(
-            hf_hub_download(
-                repo_id=BTC_REPO,
-                repo_type="dataset",
-                filename=btc_archive_name,
-                local_dir=temp / "btc-download",
-            )
-        )
-        extracted = temp / "btc-extracted"
-        with zipfile.ZipFile(btc_archive) as archive:
-            archive.extractall(extracted)
-            archive_members = sorted(archive.namelist())
-
-        markets = find_exact_file(extracted, "btc_markets.parquet")
-        ticks = find_exact_file(extracted, "btc_ticks.parquet")
+        markets, ticks, source_report = download_btc_sources(btc_source, temp)
         markets_sha = sha256_file(markets)
         ticks_sha = sha256_file(ticks)
         markets_rows = pq.ParquetFile(markets).metadata.num_rows
@@ -157,14 +204,11 @@ def main() -> None:
             "experiment_started": False,
             "btc": {
                 "repository": BTC_REPO,
-                "archive": btc_archive_name,
-                "archive_members": archive_members,
+                **source_report,
                 "markets_rows": markets_rows,
                 "ticks_rows": ticks_rows,
                 "markets_sha256": markets_sha,
                 "ticks_sha256": ticks_sha,
-                "archive_sha256": sha256_file(btc_archive),
-                "archive_size_bytes": btc_archive.stat().st_size,
             },
             "spot": {
                 "repository": SPOT_REPO,
