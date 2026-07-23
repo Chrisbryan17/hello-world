@@ -1,0 +1,48 @@
+name: Frozen FOK Retry Transfer
+
+on:
+  push:
+    branches: [fok-retry-research-20260723]
+    paths:
+      - research/fok_retry_transfer.py
+      - .github/workflows/fok-retry-transfer.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - research/fok_retry_transfer.py
+      - .github/workflows/fok-retry-transfer.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --quiet pandas numpy pyarrow requests tabulate 'honest-backtest[parquet]==0.2.0'
+      - run: python -m py_compile research/fok_retry_transfer.py
+      - name: Run frozen retry frontier
+        shell: bash
+        run: |
+          set -o pipefail
+          python research/fok_retry_transfer.py 2>&1 | tee fok-retry-transfer.log
+      - name: Show result
+        if: always()
+        run: |
+          cat results/fok_retry_transfer/summary.csv || true
+          tail -200 fok-retry-transfer.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fok-retry-transfer
+          path: |
+            results/fok_retry_transfer/
+            fok-retry-transfer.log
+          if-no-files-found: warn
+          retention-days: 30
