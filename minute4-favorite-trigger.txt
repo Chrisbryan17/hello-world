@@ -1,0 +1,1 @@
+Run the public-data minute-four favorite backtest across BTC, ETH, SOL, XRP, DOGE, BNB, and HYPE.
