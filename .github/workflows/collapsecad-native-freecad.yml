@@ -56,8 +56,18 @@ jobs:
             | sha256sum --check --strict
           chmod +x FreeCAD.AppImage
           ./FreeCAD.AppImage --appimage-extract >/dev/null
-          FREECAD_CMD="$(find "$PWD/squashfs-root/usr/bin" -maxdepth 1 -type f -iname 'freecadcmd' -print -quit)"
+          echo 'Extracted FreeCAD command candidates:'
+          find "$PWD/squashfs-root" -maxdepth 5 \
+            \( -type f -o -type l \) \
+            \( -iname 'freecadcmd' -o -iname 'FreeCADCmd' -o -iname '*freecad*cmd*' \) \
+            -print -exec ls -l {} \;
+          FREECAD_CMD="$(find "$PWD/squashfs-root" -maxdepth 5 \
+            \( -type f -o -type l \) \
+            \( -iname 'freecadcmd' -o -iname 'FreeCADCmd' \) \
+            -print -quit)"
           test -n "$FREECAD_CMD"
+          FREECAD_CMD="$(readlink -f "$FREECAD_CMD")"
+          test -x "$FREECAD_CMD"
           echo "FREECAD_CMD=$FREECAD_CMD" >> "$GITHUB_ENV"
           "$FREECAD_CMD" --version
 
