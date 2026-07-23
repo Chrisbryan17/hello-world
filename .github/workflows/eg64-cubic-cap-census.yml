@@ -1,0 +1,206 @@
+name: EG64 exact cubic cap census
+
+on:
+  push:
+    branches:
+      - eg64-cubic-cap-census
+    paths:
+      - 'eg64-census/**'
+      - '.github/workflows/eg64-cubic-cap-census.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  census-through-20:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Install nauty graph generator
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nauty
+          GENG="$(command -v geng || command -v nauty-geng || true)"
+          test -n "$GENG"
+          echo "GENG=$GENG" >> "$GITHUB_ENV"
+          "$GENG" --help >/dev/null 2>&1 || true
+
+      - name: Syntax and adversarial verifier smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            eg64-census/cubic_cap_census.py \
+            eg64-census/verify_cap_witness.py
+          mkdir -p results
+          python3 - <<'PY'
+          import json
+          import subprocess
+          import tempfile
+          from pathlib import Path
+
+          # K4 with edge (0,1) subdivided and doubled is not a counterexample;
+          # the independent verifier must reject it by finding a C4.
+          witness = {
+              "kind": "edge_subdivision_cap",
+              "base_graph6": "C~",
+              "edges": [[0, 1]],
+          }
+          with tempfile.TemporaryDirectory() as directory:
+              path = Path(directory) / "invalid.json"
+              path.write_text(json.dumps(witness), encoding="utf-8")
+              proc = subprocess.run(
+                  ["python3", "eg64-census/verify_cap_witness.py", str(path)],
+                  text=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.STDOUT,
+              )
+              if proc.returncode == 0 or "forbidden cycle C_4 found" not in proc.stdout:
+                  raise SystemExit(
+                      "independent verifier failed its adversarial rejection test\n"
+                      + proc.stdout
+                  )
+          print("ADVERSARIAL_VERIFIER_SMOKE=PASS")
+          PY
+
+      - name: Exhaust connected cubic census through order 20
+        id: census
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          specs=(
+            "4:1"
+            "6:2"
+            "8:5"
+            "10:19"
+            "12:85"
+            "14:509"
+            "16:4060"
+            "18:41301"
+            "20:510489"
+          )
+          found=0
+          for spec in "${specs[@]}"; do
+            n="${spec%%:*}"
+            expected="${spec##*:}"
+            echo "=== order $n; expected $expected connected cubic graphs ==="
+            set +e
+            "$GENG" -q -c -d3 -D3 "$n" \
+              | python3 eg64-census/cubic_cap_census.py \
+                  --order "$n" \
+                  --expected "$expected" \
+                  --progress 100000 \
+                  --witness-out "results/witness-${n}.json" \
+                  > "results/order-${n}.json"
+            pipe_status=("${PIPESTATUS[@]}")
+            set -e
+            generator_status="${pipe_status[0]}"
+            checker_status="${pipe_status[1]}"
+            if [[ "$checker_status" == "10" ]]; then
+              if [[ "$generator_status" != "0" && "$generator_status" != "141" ]]; then
+                echo "generator failed unexpectedly with status $generator_status" >&2
+                exit "$generator_status"
+              fi
+              python3 eg64-census/verify_cap_witness.py \
+                "results/witness-${n}.json" \
+                --output "results/independent-verification-${n}.json"
+              found=1
+              break
+            fi
+            if [[ "$generator_status" != "0" ]]; then
+              echo "generator failed with status $generator_status" >&2
+              exit "$generator_status"
+            fi
+            if [[ "$checker_status" != "0" ]]; then
+              echo "checker failed with status $checker_status" >&2
+              cat "results/order-${n}.json" >&2
+              exit "$checker_status"
+            fi
+          done
+          echo "found=$found" >> "$GITHUB_OUTPUT"
+
+      - name: Independently validate census result files
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          expected = {
+              4: 1,
+              6: 2,
+              8: 5,
+              10: 19,
+              12: 85,
+              14: 509,
+              16: 4060,
+              18: 41301,
+              20: 510489,
+          }
+          records = []
+          witness = None
+          for order, count in expected.items():
+              path = Path(f"results/order-{order}.json")
+              if not path.exists():
+                  break
+              result = json.loads(path.read_text(encoding="utf-8"))
+              stats = result["stats"]
+              if result.get("witness") is None:
+                  assert stats["graphs"] == count, (order, stats["graphs"], count)
+                  assert stats["expected"] == count
+                  assert stats["subdivision_candidates"] == 0
+                  assert len(stats["input_sha256"]) == 64
+              else:
+                  witness = result["witness"]
+                  verification = Path(f"results/independent-verification-{order}.json")
+                  assert verification.exists()
+                  checked = json.loads(verification.read_text(encoding="utf-8"))
+                  assert checked["verified"] is True
+              records.append(result)
+          summary = {
+              "source_commit": "${GITHUB_SHA}",
+              "generator": "${GENG}",
+              "orders_completed": [record["stats"]["order"] for record in records],
+              "graphs_exhausted": sum(record["stats"]["graphs"] for record in records),
+              "witness": witness,
+              "records": records,
+          }
+          Path("results/census-summary.json").write_text(
+              json.dumps(summary, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          for path in sorted(Path("results").glob("*.json")):
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              print(digest, path)
+          print("RESULT_VALIDATION=PASS")
+          PY
+          sha256sum results/*.json > results/SHA256SUMS
+
+      - name: Upload exact census evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-cubic-cap-census-${{ github.run_id }}
+          path: |
+            eg64-census/cubic_cap_census.py
+            eg64-census/verify_cap_witness.py
+            results/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Fail loudly on a verified counterexample witness
+        if: steps.census.outputs.found == '1'
+        shell: bash
+        run: |
+          echo "A candidate passed the independent verifier. Preserve the artifact and audit immediately." >&2
+          exit 10
