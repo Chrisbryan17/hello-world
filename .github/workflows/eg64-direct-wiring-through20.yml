@@ -1,0 +1,119 @@
+name: EG64 direct wiring through order 20
+
+on:
+  push:
+    branches:
+      - eg64-cubic-cap-census
+    paths:
+      - '.github/workflows/eg64-direct-wiring-through20.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Install nauty
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nauty
+          GENG="$(command -v geng || command -v nauty-geng || true)"
+          test -n "$GENG"
+          echo "GENG=$GENG" >> "$GITHUB_ENV"
+      - name: Build exact base census and verify smoke contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          "$GENG" -q -c -d3 -D3 4 > results/bases.g6
+          "$GENG" -q -c -d3 -D3 6 >> results/bases.g6
+          test "$(wc -l < results/bases.g6)" -eq 3
+          python3 -m py_compile eg64-gadget/direct_wiring_search.py
+          "$GENG" -q -c -d3 -D3 4 \
+            | python3 eg64-gadget/direct_wiring_search.py \
+                --base-file results/bases.g6 --order 4 --expected 1 \
+                > results/smoke.json
+          python3 - <<'PY'
+          import json
+          result=json.load(open('results/smoke.json'))
+          assert result['witness'] is None
+          assert result['stats']['candidate_vertices']==4
+          assert result['stats']['base_graphs']==3
+          assert result['stats']['wirings_tested']==63072
+          print('DIRECT_WIRING_SMOKE=PASS')
+          PY
+      - name: Exhaust source graphs through order 20
+        id: census
+        shell: bash
+        run: |
+          set -euo pipefail
+          found=0
+          specs=("4:1" "6:2" "8:5" "10:19" "12:85" "14:509" "16:4060" "18:41301" "20:510489")
+          for spec in "${specs[@]}"; do
+            n="${spec%%:*}"; expected="${spec##*:}"
+            set +e
+            "$GENG" -q -c -d3 -D3 "$n" \
+              | python3 eg64-gadget/direct_wiring_search.py \
+                  --base-file results/bases.g6 --order "$n" --expected "$expected" \
+                  --witness-out "results/witness-${n}.json" \
+                  > "results/order-${n}.json"
+            pipeline=("${PIPESTATUS[@]}")
+            set -e
+            generator_status="${pipeline[0]}"; checker_status="${pipeline[1]}"
+            if [[ "$checker_status" == "10" ]]; then
+              [[ "$generator_status" == "0" || "$generator_status" == "141" ]]
+              found=1
+              break
+            fi
+            [[ "$generator_status" == "0" ]]
+            [[ "$checker_status" == "0" ]]
+          done
+          echo "found=$found" >> "$GITHUB_OUTPUT"
+      - name: Validate exact counts and accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          expected={4:1,6:2,8:5,10:19,12:85,14:509,16:4060,18:41301,20:510489}
+          records=[]; witnesses=[]
+          for order,count in expected.items():
+              result=json.loads(Path(f'results/order-{order}.json').read_text())
+              assert result['stats']['source_graphs']==count
+              if result.get('witness'): witnesses.append(result['witness'])
+              records.append(result)
+          summary={
+              'source_commit':os.environ['GITHUB_SHA'],
+              'source_graphs':sum(expected.values()),
+              'candidate_vertices':sum(r['stats']['candidate_vertices'] for r in records),
+              'wirings_tested':sum(r['stats']['wirings_tested'] for r in records),
+              'witnesses':witnesses,
+              'records':records,
+          }
+          Path('results/direct-wiring-through20-summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          print(json.dumps({k:summary[k] for k in ('source_graphs','candidate_vertices','wirings_tested','witnesses')}))
+          if witnesses: raise SystemExit(10)
+          PY
+          sha256sum results/* > results/SHA256SUMS
+      - name: Upload exact evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-direct-wiring-through20-fixed-${{ github.run_id }}
+          path: |
+            results/
+            eg64-gadget/direct_wiring_search.py
+          if-no-files-found: error
+          retention-days: 90
+      - name: Flag candidate
+        if: steps.census.outputs.found == '1'
+        run: exit 10
