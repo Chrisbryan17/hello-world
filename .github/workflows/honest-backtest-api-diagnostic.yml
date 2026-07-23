@@ -1,0 +1,42 @@
+name: Honest Backtest API Diagnostic
+
+on:
+  push:
+    branches: [polymarket-multiasset-frequency-20260723]
+    paths: [.github/workflows/honest-backtest-api-diagnostic.yml]
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/honest-backtest-api-diagnostic.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --quiet 'honest-backtest[parquet]==0.2.0'
+      - name: Inspect public API and source
+        shell: bash
+        run: |
+          set -o pipefail
+          python - <<'PY' 2>&1 | tee honest-backtest-api.txt
+          import inspect, honest_backtest
+          from honest_backtest import Signal, Decision, SlotCtx, SlotMeta, evaluate, run_signal
+          from honest_backtest.adapters.parquet_pm import load_corpus
+          for obj in [Decision,SlotMeta,SlotCtx,Signal,evaluate,run_signal,load_corpus]:
+            print('\n###',getattr(obj,'__name__',str(obj)))
+            try: print('signature',inspect.signature(obj))
+            except Exception as e: print('signature error',e)
+            try: print(inspect.getsource(obj))
+            except Exception as e: print('source error',e)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: honest-backtest-api-diagnostic
+          path: honest-backtest-api.txt
+          retention-days: 30

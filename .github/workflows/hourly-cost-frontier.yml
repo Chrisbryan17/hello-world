@@ -1,0 +1,48 @@
+name: Hourly Cost Frontier
+
+on:
+  push:
+    branches: [polymarket-multiasset-frequency-20260723]
+    paths:
+      - research/hourly_cost_frontier.py
+      - .github/workflows/hourly-cost-frontier.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - research/hourly_cost_frontier.py
+      - .github/workflows/hourly-cost-frontier.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --quiet pandas numpy pyarrow requests tabulate
+      - run: python -m py_compile research/hourly_cost_frontier.py
+      - name: Run stage audit and holdout frontier
+        shell: bash
+        run: |
+          set -o pipefail
+          python research/hourly_cost_frontier.py 2>&1 | tee hourly-cost-frontier.log
+      - name: Show results
+        if: always()
+        run: |
+          cat results/hourly_cost_frontier/selection.json || true
+          tail -250 hourly-cost-frontier.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hourly-cost-frontier
+          path: |
+            results/hourly_cost_frontier/
+            hourly-cost-frontier.log
+          if-no-files-found: warn
+          retention-days: 30

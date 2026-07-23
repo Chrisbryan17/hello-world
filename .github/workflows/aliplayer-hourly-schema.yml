@@ -1,0 +1,73 @@
+name: Aliplayer Hourly Schema
+
+on:
+  push:
+    branches: [polymarket-multiasset-frequency-20260723]
+    paths: [.github/workflows/aliplayer-hourly-schema.yml]
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/aliplayer-hourly-schema.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --quiet requests pyarrow pandas
+      - name: Download and inspect pinned hourly inputs
+        shell: bash
+        run: |
+          set -o pipefail
+          python - <<'PY' 2>&1 | tee aliplayer-hourly-schema.log
+          import hashlib,json,requests
+          from pathlib import Path
+          import pandas as pd, pyarrow.parquet as pq
+          repo='aliplayer1/polymarket-crypto-updown'; rev='ba1ad37cbcdd720cced20f1cdc97c2cf347cad6c'
+          paths=[
+           'data/markets.parquet',
+           'data/prices/crypto=BTC/timeframe=1-hour/part-0.parquet',
+           'data/prices/crypto=ETH/timeframe=1-hour/part-0.parquet',
+           'data/ticks/crypto=BTC/timeframe=1-hour/part-0.parquet',
+           'data/ticks/crypto=ETH/timeframe=1-hour/part-0.parquet',
+           'data/spot_prices/part-0.parquet',
+          ]
+          out={}; root=Path('hourly_inputs'); root.mkdir(exist_ok=True)
+          for path in paths:
+            fn=root/path.replace('/','__'); url=f'https://huggingface.co/datasets/{repo}/resolve/{rev}/{path}'
+            print('\ndownload',path,flush=True)
+            with requests.get(url,stream=True,timeout=180) as r:
+              r.raise_for_status()
+              with open(fn,'wb') as f:
+                for b in r.iter_content(1<<20):
+                  if b: f.write(b)
+            h=hashlib.sha256(fn.read_bytes()).hexdigest(); pf=pq.ParquetFile(fn)
+            rec={'path':path,'bytes':fn.stat().st_size,'sha256':h,'rows':pf.metadata.num_rows,'row_groups':pf.num_row_groups,'schema':str(pf.schema_arrow)}
+            cols=pf.schema_arrow.names
+            sample_cols=cols[:min(30,len(cols))]
+            df=pd.read_parquet(fn,columns=sample_cols)
+            rec['sample']=df.head(3).astype(object).where(pd.notna(df.head(3)),None).to_dict('records')
+            for c in cols:
+              lc=c.lower()
+              if any(k in lc for k in ('time','timestamp','date','start','end','close','open')):
+                try:
+                  s=pd.read_parquet(fn,columns=[c])[c]
+                  rec.setdefault('ranges',{})[c]={'dtype':str(s.dtype),'min':str(s.min()),'max':str(s.max()),'non_null':int(s.notna().sum())}
+                except Exception as e: rec.setdefault('range_errors',{})[c]=str(e)
+            out[path]=rec
+            print('rows',rec['rows'],'bytes',rec['bytes']); print(rec['schema']); print(df.head(3).to_string())
+          Path('aliplayer-hourly-schema.json').write_text(json.dumps(out,indent=2,default=str))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliplayer-hourly-schema
+          path: |
+            aliplayer-hourly-schema.json
+            aliplayer-hourly-schema.log
+          retention-days: 30

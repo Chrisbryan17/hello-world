@@ -1,0 +1,56 @@
+name: Aliplayer Hourly Tree
+
+on:
+  push:
+    branches: [polymarket-multiasset-frequency-20260723]
+    paths: [.github/workflows/aliplayer-hourly-tree.yml]
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/aliplayer-hourly-tree.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --quiet requests
+      - name: List pinned hourly and price partitions
+        shell: bash
+        run: |
+          set -o pipefail
+          python - <<'PY' 2>&1 | tee aliplayer-hourly-tree.log
+          import json, requests
+          from pathlib import Path
+          repo='aliplayer1/polymarket-crypto-updown'; rev='ba1ad37cbcdd720cced20f1cdc97c2cf347cad6c'
+          r=requests.get(f'https://huggingface.co/api/datasets/{repo}',params={'blobs':'true'},timeout=180)
+          print('status',r.status_code,r.url); r.raise_for_status(); info=r.json()
+          print('reported revision',info.get('sha')); assert info.get('sha')==rev,(info.get('sha'),rev)
+          siblings=info.get('siblings',[])
+          hourly_prefixes=('data/orderbook/crypto=BTC/timeframe=1-hour/','data/orderbook/crypto=ETH/timeframe=1-hour/')
+          selected=[]; price_like=[]; market_like=[]
+          for x in siblings:
+            path=x.get('rfilename','')
+            rec={'path':path,'size':x.get('size'),'blob_id':x.get('blobId'),'lfs':x.get('lfs')}
+            low=path.lower()
+            if path.startswith(hourly_prefixes): selected.append(rec)
+            if any(k in low for k in ('spot','price','tick','kline','candle')) and path.endswith('.parquet'): price_like.append(rec)
+            if 'market' in low and path.endswith('.parquet'): market_like.append(rec)
+          out={'repo':repo,'revision':rev,'hourly':selected,'price_like':price_like,'market_like':market_like,'all_sibling_count':len(siblings)}
+          for label,rows in [('hourly',selected),('price_like',price_like),('market_like',market_like)]:
+            print('\n###',label,'count',len(rows),'bytes',sum((x.get('size') or (x.get('lfs') or {}).get('size') or 0) for x in rows))
+            for x in rows: print(x)
+          Path('aliplayer-hourly-tree.json').write_text(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliplayer-hourly-tree
+          path: |
+            aliplayer-hourly-tree.json
+            aliplayer-hourly-tree.log
+          retention-days: 30
