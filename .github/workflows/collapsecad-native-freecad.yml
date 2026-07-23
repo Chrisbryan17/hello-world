@@ -1,4 +1,4 @@
-name: CollapseCAD Native FreeCAD Proof
+name: CollapseCAD Detailed Native FreeCAD Proof
 
 on:
   pull_request:
@@ -15,12 +15,12 @@ permissions:
 jobs:
   native-freecad:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - name: Check out isolated CI branch
         uses: actions/checkout@v4
 
-      - name: Verify and extract engineering payload
+      - name: Verify and extract detailed engineering payload
         shell: bash
         run: |
           python - <<'PY'
@@ -30,9 +30,12 @@ jobs:
           import io
           import tarfile
 
-          source = Path('.collapsecad-native-ci/payload.tar.gz.b64')
-          payload = base64.b64decode(source.read_text(), validate=True)
-          expected = 'e834a96d0bbb5e4649cd169ecc9d90ac341bf1a34203673ea20395a9559e95cf'
+          parts = sorted(Path('.collapsecad-native-ci/detailed').glob('part-*.txt'))
+          if len(parts) != 5:
+              raise SystemExit(f'expected 5 payload parts, found {len(parts)}')
+          encoded = ''.join(part.read_text().strip() for part in parts)
+          payload = base64.b64decode(encoded, validate=True)
+          expected = '29cf1b7e6e15a3d25d80ba928d5151e3ea07f8b60a3b8dc942bce71267c48193'
           actual = hashlib.sha256(payload).hexdigest()
           if actual != expected:
               raise SystemExit(f'payload checksum mismatch: {actual} != {expected}')
@@ -43,7 +46,7 @@ jobs:
                   if root != target and root not in target.parents:
                       raise SystemExit(f'unsafe archive path: {member.name}')
               archive.extractall(root, filter='data')
-          print(f'payload verified: sha256={actual}')
+          print(f'detailed payload verified: sha256={actual}')
           PY
 
       - name: Install checksum-pinned FreeCAD AppImage
@@ -56,11 +59,6 @@ jobs:
             | sha256sum --check --strict
           chmod +x FreeCAD.AppImage
           ./FreeCAD.AppImage --appimage-extract >/dev/null
-          echo 'Extracted FreeCAD command candidates:'
-          find "$PWD/squashfs-root" -maxdepth 5 \
-            \( -type f -o -type l \) \
-            \( -iname 'freecadcmd' -o -iname 'FreeCADCmd' -o -iname '*freecad*cmd*' \) \
-            -print -exec ls -l {} \;
           FREECAD_CMD="$(find "$PWD/squashfs-root" -maxdepth 5 \
             \( -type f -o -type l \) \
             \( -iname 'freecadcmd' -o -iname 'FreeCADCmd' \) \
@@ -70,7 +68,7 @@ jobs:
           echo "FREECAD_CMD=$FREECAD_CMD" >> "$GITHUB_ENV"
           "$FREECAD_CMD" --version
 
-      - name: Generate nine native FreeCAD documents
+      - name: Generate nine detailed 1-to-1 FreeCAD documents
         shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
@@ -90,8 +88,7 @@ jobs:
           MODEL_COUNT="$(find "$PWD/collapsecad_ci/build/freecad" -type f -name '*.FCStd' | wc -l)"
           test "$MODEL_COUNT" -eq 9
 
-      - name: Reopen and inspect native FreeCAD documents
-        id: inspect
+      - name: Reopen and inspect every detailed FreeCAD document
         shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
@@ -109,11 +106,11 @@ jobs:
           fi
           exit "$STATUS"
 
-      - name: Upload native FreeCAD proof and diagnostics
+      - name: Upload detailed native FreeCAD proof and diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: collapsecad-native-freecad
+          name: collapsecad-detailed-native-freecad
           path: |
             collapsecad_ci/build/freecad
             collapsecad_ci/build/native-freecad-manifest.json
