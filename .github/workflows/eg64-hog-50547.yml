@@ -1,0 +1,103 @@
+name: EG64 audit HoG terminal cap 50547
+
+on:
+  push:
+    branches:
+      - eg64-terminal-cap-census
+    paths:
+      - '.github/workflows/eg64-hog-50547.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fetch-and-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Fetch exact graph6 record from House of Graphs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          endpoints=(
+            'https://houseofgraphs.org/DownloadGraphs.action'
+            'https://hog.grinvin.org/DownloadGraphs.action'
+          )
+          success=0
+          for endpoint in "${endpoints[@]}"; do
+            label="$(echo "$endpoint" | tr -c '[:alnum:]' '_')"
+            status="$(curl -sS -L \
+              -o "results/response-${label}.bin" \
+              -w '%{http_code}' \
+              --data 'graphFormatName=Graph6&id=50547' \
+              "$endpoint" || true)"
+            printf '%s %s\n' "$status" "$endpoint" >> results/http-status.txt
+            if [[ "$status" == "200" ]] && \
+               python3 - "results/response-${label}.bin" <<'PY'
+          import sys
+          from pathlib import Path
+          data=Path(sys.argv[1]).read_bytes().strip()
+          if data.startswith(b'>>graph6<<'):
+              data=data[len(b'>>graph6<<'):].strip()
+          if not data or any(byte < 63 or byte > 126 for byte in data):
+              raise SystemExit(1)
+          first=data[0]-63
+          if first != 59:
+              raise SystemExit(1)
+          Path('results/graph-50547.g6').write_bytes(data+b'\n')
+          print(data.decode('ascii'))
+          PY
+            then
+              success=1
+              break
+            fi
+          done
+          test "$success" = 1
+          sha256sum results/graph-50547.g6 > results/graph-50547.g6.sha256
+
+      - name: Run exact terminal-cap cycle test
+        id: audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          python3 eg64-terminal/terminal_cap_census.py \
+            --order 59 \
+            --expected 1 \
+            --witness-out results/witness-50547.json \
+            < results/graph-50547.g6 \
+            > results/cycle-audit-50547.json
+          status=$?
+          set -e
+          if [[ "$status" == "10" ]]; then
+            python3 eg64-terminal/verify_terminal_cap.py \
+              results/witness-50547.json \
+              --output results/independent-verification-50547.json
+            echo 'counterexample=1' >> "$GITHUB_OUTPUT"
+          else
+            [[ "$status" == "0" ]]
+            echo 'counterexample=0' >> "$GITHUB_OUTPUT"
+          fi
+          cat results/cycle-audit-50547.json
+          sha256sum results/* > results/SHA256SUMS.tmp
+          grep -v 'SHA256SUMS' results/SHA256SUMS.tmp > results/SHA256SUMS
+          rm results/SHA256SUMS.tmp
+
+      - name: Upload candidate audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eg64-hog-50547-audit-${{ github.run_id }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Flag independently verified counterexample
+        if: steps.audit.outputs.counterexample == '1'
+        run: exit 10
