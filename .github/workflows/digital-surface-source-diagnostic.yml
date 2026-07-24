@@ -1,0 +1,90 @@
+name: Digital Surface Source Alignment Diagnostic
+on:
+  push:
+    branches: [digital-surface-ci-20260724]
+    paths: [.github/workflows/digital-surface-source-diagnostic.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Restore exact manifest
+        run: |
+          cat ci_payload/digital-surface-final-recovered/chunk-* > recovered.b64
+          base64 --decode recovered.b64 > recovered.tar.gz
+          echo 'ac3cf5f39d71facc9a1e4bc39a9ab05c64ae5ae5137889b74cab64bb540f9a15  recovered.tar.gz' | sha256sum -c -
+          mkdir recovered && tar -xzf recovered.tar.gz -C recovered
+          echo 'cd6941ea34f6f19477e99be1628f83d7a24a2922a645538ebfe5cae9d3e2c289  recovered/research/digital_surface/obadiaha_source_manifest.json' | sha256sum -c -
+      - name: Install stack
+        run: python -m pip install pandas==2.2.3 pyarrow==19.0.1 requests==2.32.3
+      - name: Diagnose canonical interval
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json,re,time
+          from pathlib import Path
+          import numpy as np, pandas as pd, requests
+          m=json.loads(Path('recovered/research/digital_surface/obadiaha_source_manifest.json').read_text())
+          items=[x for x in m['files'] if x['path'] in {'markets/all.parquet','resolutions/all.parquet'} or x['path'].startswith('crypto_prices/')]
+          root=Path('diag'); base=f"https://huggingface.co/datasets/{m['repo']}/resolve/{m['revision']}"
+          def get(x):
+              p=root/x['path']; p.parent.mkdir(parents=True,exist_ok=True); q=p.with_suffix(p.suffix+'.part'); n=int(x['size'])
+              for a in range(8):
+                  o=q.stat().st_size if q.exists() else 0; h={'Range':f'bytes={o}-'} if o else {}
+                  try:
+                      with requests.get(f"{base}/{x['path']}",headers=h,stream=True,timeout=300) as r:
+                          r.raise_for_status(); mode='ab' if o and r.status_code==206 else 'wb'
+                          with q.open(mode) as f:
+                              for b in r.iter_content(1<<20):
+                                  if b:f.write(b)
+                      if q.stat().st_size==n:q.replace(p);return p
+                  except requests.RequestException as e:print('retry',x['path'],a+1,type(e).__name__,flush=True)
+                  time.sleep(min(2**a,8))
+              raise RuntimeError((x['path'],q.stat().st_size if q.exists() else 0,n))
+          paths={x['path']:get(x) for x in items}
+          mk=pd.read_parquet(paths['markets/all.parquet']); rs=pd.read_parquet(paths['resolutions/all.parquet'])
+          sp=pd.concat([pd.read_parquet(paths[f'crypto_prices/{d:%Y-%m-%d}.parquet'],columns=['timestamp','asset','open','close']) for d in pd.date_range('2026-03-06','2026-03-19')],ignore_index=True)
+          print('MARKET_COLUMNS',mk.columns.tolist()); print('RESOLUTION_COLUMNS',rs.columns.tolist()); print('DTYPES',mk.dtypes.astype(str).to_dict())
+          w=mk.copy(); w['asset']=w.asset.astype(str).str.upper(); w=w[(w.asset=='BTC')&w.market_type.isin(['crypto_5m','crypto_15m'])].copy()
+          w['start_dt']=pd.to_datetime(w.start_time,utc=True); w['end_dt']=pd.to_datetime(w.end_time,utc=True)
+          w=w[w.start_dt.between(pd.Timestamp('2026-03-06',tz='UTC'),pd.Timestamp('2026-03-20',tz='UTC'),inclusive='left')]
+          rs=rs[['condition_id','outcome']].copy(); rs['condition_id']=rs.condition_id.astype(str); w['condition_id']=w.condition_id.astype(str); w=w.merge(rs,on='condition_id')
+          sp=sp[sp.asset.astype(str).str.upper().eq('BTC')].copy(); sp['dt']=pd.to_datetime(sp.timestamp,utc=True); sp=sp.sort_values('dt').drop_duplicates('dt',keep='last')
+          print('ROWS',len(w),'OUTCOMES',w.outcome.value_counts().to_dict()); print(w[['market_id','slug','market_type','start_time','end_time','outcome']].head(30).to_string(index=False))
+          def epoch(v):
+              z=re.search(r'(\d{10,13})(?:\D*)$',str(v));
+              if not z:return pd.NaT
+              n=int(z.group(1));return pd.to_datetime(n,unit='ms' if n>10**11 else 's',utc=True)
+          w['slug_dt']=w.slug.map(epoch); w['market_id_dt']=w.market_id.map(epoch); w['duration_s']=w.market_type.map({'crypto_5m':300,'crypto_15m':900})
+          for c in ['slug_dt','market_id_dt']:
+              d=(w[c]-w.start_dt).dt.total_seconds();print('DELTA',c,d.describe().to_dict(),'N',int(w[c].notna().sum()))
+          def values(times,col,minus_ms=0):
+              q=pd.DataFrame({'i':np.arange(len(w)),'q':pd.to_datetime(times,utc=True)-pd.Timedelta(milliseconds=minus_ms)}).dropna().sort_values('q')
+              r=pd.merge_asof(q,sp[['dt',col]].sort_values('dt'),left_on='q',right_on='dt',direction='backward',tolerance=pd.Timedelta('2min')).sort_values('i')
+              out=np.full(len(w),np.nan);out[r.i.astype(int)]=r[col].to_numpy();return out
+          starts={'field':w.start_dt,'slug':w.slug_dt,'market_id':w.market_id_dt}
+          ends={'field':w.end_dt,'start+dur':w.start_dt+pd.to_timedelta(w.duration_s,unit='s'),'slug+dur':w.slug_dt+pd.to_timedelta(w.duration_s,unit='s'),'market_id+dur':w.market_id_dt+pd.to_timedelta(w.duration_s,unit='s')}
+          y=w.outcome.eq('Up').to_numpy(); rows=[]
+          for sn,st in starts.items():
+              strike=values(st,'open')
+              for en,et in ends.items():
+                  for mode,ms in [('before',1),('at_timestamp',0)]:
+                      final=values(et,'close',ms); ok=np.isfinite(strike)&np.isfinite(final); pred=final>=strike
+                      rows.append({'start':sn,'end':en,'close':mode,'agreement':float((pred[ok]==y[ok]).mean()) if ok.any() else None,'valid':int(ok.sum())})
+          rows.sort(key=lambda x:-(x['agreement'] or -1)); print('TOP_RESULTS'); [print(x) for x in rows]
+          Path('diagnostic-results.json').write_text(json.dumps({'rows':len(w),'results':rows},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-source-alignment-diagnostic
+          path: diagnostic-results.json
+          if-no-files-found: warn
+          retention-days: 14
