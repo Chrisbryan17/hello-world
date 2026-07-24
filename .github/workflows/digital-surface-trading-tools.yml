@@ -6,11 +6,13 @@ on:
     paths:
       - .github/workflows/digital-surface-trading-tools.yml
       - ci_payload/digital-surface-hybrid-update-v2/**
+      - ci_payload/digital-surface-provenance-fix/**
   pull_request:
     branches: [main]
     paths:
       - .github/workflows/digital-surface-trading-tools.yml
       - ci_payload/digital-surface-hybrid-update-v2/**
+      - ci_payload/digital-surface-provenance-fix/**
   workflow_dispatch:
 
 permissions:
@@ -47,6 +49,15 @@ jobs:
           tar -xzf hybrid-branch-update.tar.gz -C trading-tools
           test -f trading-tools/research/digital_surface/obadiaha_source_manifest.json
 
+      - name: Overlay and verify LFS provenance correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat ci_payload/digital-surface-provenance-fix/chunk-* > hybrid-provenance-fix.tar.gz.b64
+          base64 --decode hybrid-provenance-fix.tar.gz.b64 > hybrid-provenance-fix.tar.gz
+          echo 'bf6fa8ca218ac41d1e0749d9c628563d0f1d3fafb9082de7317e05c5152b8d3e  hybrid-provenance-fix.tar.gz' | sha256sum -c -
+          tar -xzf hybrid-provenance-fix.tar.gz -C trading-tools
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -55,7 +66,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: trading-tools/.cache/digital-surface
-          key: digital-surface-hybrid-obadiaha-11793901-kinzik-eb4e9fc7-v1
+          key: digital-surface-hybrid-obadiaha-11793901-kinzik-eb4e9fc7-v2
 
       - name: Install pinned research stack
         run: |
@@ -125,5 +136,6 @@ jobs:
             trading-tools/digital-surface-arbitrage.log
             digital-surface-execution-snapshot.tar.gz
             hybrid-branch-update.tar.gz
+            hybrid-provenance-fix.tar.gz
           if-no-files-found: warn
           retention-days: 30
