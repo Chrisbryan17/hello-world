@@ -6,6 +6,7 @@ on:
     paths:
       - .github/workflows/digital-surface-chainlink-full-audit.yml
       - scripts/digital_surface_chainlink_audit.py
+      - scripts/digital_surface_chainlink_audit_v2.py
   workflow_dispatch:
 
 permissions:
@@ -40,7 +41,10 @@ jobs:
             'httpx[http2]==0.28.1'
 
       - name: Compile audit implementation
-        run: python -m compileall -q scripts/digital_surface_chainlink_audit.py
+        run: |
+          python -m compileall -q \
+            scripts/digital_surface_chainlink_audit.py \
+            scripts/digital_surface_chainlink_audit_v2.py
 
       - name: Reconstruct and audit every official Chainlink boundary
         id: audit
@@ -49,7 +53,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p chainlink-audit
-          python scripts/digital_surface_chainlink_audit.py \
+          python scripts/digital_surface_chainlink_audit_v2.py \
             --cache-dir .cache/digital-surface-chainlink-audit \
             --output-dir chainlink-audit \
             2>&1 | tee chainlink-audit/audit.log
