@@ -28,7 +28,9 @@ jobs:
       - name: Verify and extract engineering payload
         shell: bash
         run: |
-          python - <<'PY'
+          set +e
+          mkdir -p .collapsecad-phase2b/diagnostics
+          python - <<'PY' > .collapsecad-phase2b/diagnostics/extraction.log 2>&1
           from pathlib import Path
           import base64
           import hashlib
@@ -36,22 +38,33 @@ jobs:
           import tarfile
 
           source = Path('.collapsecad-phase2b/payload.tar.gz.b64')
-          canonical_b64 = ''.join(source.read_text().split())
+          text = source.read_text()
+          canonical_b64 = ''.join(text.split())
+          print(f'raw_text_chars={len(text)}')
+          print(f'canonical_base64_chars={len(canonical_b64)}')
           payload = base64.b64decode(canonical_b64, validate=True)
-          expected = '894596ca85abcf6962773fdf2ec2bdd8e9c86d54d75397978dd6e8d7ee1ae629'
           actual = hashlib.sha256(payload).hexdigest()
+          expected = '894596ca85abcf6962773fdf2ec2bdd8e9c86d54d75397978dd6e8d7ee1ae629'
+          print(f'decoded_bytes={len(payload)}')
+          print(f'decoded_sha256={actual}')
           if actual != expected:
               raise SystemExit(f'payload checksum mismatch: {actual} != {expected}')
 
           root = Path.cwd().resolve()
           with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as archive:
-              for member in archive.getmembers():
+              members = archive.getmembers()
+              print(f'archive_members={len(members)}')
+              for member in members:
+                  print(f'member={member.name}')
                   target = (root / member.name).resolve()
                   if root != target and root not in target.parents:
                       raise SystemExit(f'unsafe archive path: {member.name}')
               archive.extractall(root)
           print(f'payload verified: sha256={actual}')
           PY
+          STATUS=$?
+          cat .collapsecad-phase2b/diagnostics/extraction.log
+          exit "$STATUS"
 
       - name: Run regression tests and regenerate sixteen decks
         working-directory: collapsecad-phase2b-courier
@@ -94,6 +107,7 @@ jobs:
         with:
           name: collapsecad-phase2b-fem-evidence
           path: |
+            .collapsecad-phase2b/diagnostics
             collapsecad-phase2b-courier/build/decks
             collapsecad-phase2b-courier/build/solver
             collapsecad-phase2b-courier/build/joint-capacity-ledger.json
