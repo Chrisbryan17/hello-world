@@ -3,10 +3,14 @@ name: Digital Surface Trading Tools CI
 on:
   push:
     branches: [digital-surface-ci-20260724]
-    paths: [.github/workflows/digital-surface-trading-tools.yml]
+    paths:
+      - .github/workflows/digital-surface-trading-tools.yml
+      - ci_payload/digital-surface/**
   pull_request:
     branches: [main]
-    paths: [.github/workflows/digital-surface-trading-tools.yml]
+    paths:
+      - .github/workflows/digital-surface-trading-tools.yml
+      - ci_payload/digital-surface/**
   workflow_dispatch:
 
 permissions:
@@ -23,12 +27,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout authoritative implementation
-        uses: actions/checkout@v4
-        with:
-          repository: Chrisbryan17/trading-tools
-          ref: digital-surface-arbitrage-implementation-20260723
-          path: trading-tools
+      - name: Reconstruct and verify authoritative execution snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat ci_payload/digital-surface/chunk-* > digital-surface-execution-snapshot.tar.gz.b64
+          echo '05d9e149cbea4136e83d2d3899c200c5e0fae98bf5f0e3ef6ae1e1c41833f41a  digital-surface-execution-snapshot.tar.gz.b64' | sha256sum -c -
+          base64 --decode digital-surface-execution-snapshot.tar.gz.b64 > digital-surface-execution-snapshot.tar.gz
+          echo 'e2a181ac3966e7bb1f786c4fab854294ae96449dc19c7a51bb83814728ec1330  digital-surface-execution-snapshot.tar.gz' | sha256sum -c -
+          mkdir trading-tools
+          tar -xzf digital-surface-execution-snapshot.tar.gz -C trading-tools
+          test -f trading-tools/EXECUTION_SNAPSHOT.json
+          test -f trading-tools/research/digital_surface/run_research.py
+          test -f trading-tools/tests/digital_surface/test_integration.py
 
       - uses: actions/setup-python@v5
         with:
@@ -53,7 +64,7 @@ jobs:
             pytest==8.3.5 \
             tabulate==0.9.0
 
-      - name: Compile and test authoritative source
+      - name: Compile and test verified snapshot
         working-directory: trading-tools
         env:
           PYTHONPATH: '.'
@@ -101,6 +112,7 @@ jobs:
         with:
           name: digital-surface-arbitrage-trading-tools
           path: |
+            trading-tools/EXECUTION_SNAPSHOT.json
             trading-tools/artifacts/digital-surface-arbitrage/
             trading-tools/digital-surface-arbitrage.log
           if-no-files-found: warn
