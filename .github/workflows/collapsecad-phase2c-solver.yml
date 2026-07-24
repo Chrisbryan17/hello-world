@@ -27,37 +27,56 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Verify and extract immutable generator
+      - name: Verify and extract immutable engineering inputs
         shell: bash
         run: |
-          python - <<'PY'
+          mkdir -p .collapsecad-phase2c/diagnostics
+          python - <<'PY' > .collapsecad-phase2c/diagnostics/extraction.log 2>&1
           from pathlib import Path
           import base64, hashlib, io, tarfile
-          source = Path('.collapsecad-phase2c/generator.tar.xz.b64')
-          payload = base64.b64decode(''.join(source.read_text().split()), validate=True)
-          expected = '6b76fcc6df48e117fe061e97af498a3aacf3ee4021773db6ec7cdab02fc9d757'
-          actual = hashlib.sha256(payload).hexdigest()
-          if actual != expected:
-              raise SystemExit(f'generator checksum mismatch: {actual} != {expected}')
+
           root = Path.cwd().resolve()
-          with tarfile.open(fileobj=io.BytesIO(payload), mode='r:xz') as archive:
-              for member in archive.getmembers():
-                  target = (root / member.name).resolve()
-                  if root != target and root not in target.parents:
-                      raise SystemExit(f'unsafe archive member: {member.name}')
-              archive.extractall(root)
-          print(f'generator verified: sha256={actual}')
+
+          def extract(name: str, expected: str) -> None:
+              source = Path('.collapsecad-phase2c') / name
+              payload = base64.b64decode(''.join(source.read_text().split()), validate=True)
+              actual = hashlib.sha256(payload).hexdigest()
+              print(f'{name}: decoded_bytes={len(payload)} sha256={actual}')
+              if actual != expected:
+                  raise SystemExit(f'{name} checksum mismatch: {actual} != {expected}')
+              with tarfile.open(fileobj=io.BytesIO(payload), mode='r:xz') as archive:
+                  members = archive.getmembers()
+                  print(f'{name}: archive_members={len(members)}')
+                  for member in members:
+                      target = (root / member.name).resolve()
+                      if root != target and root not in target.parents:
+                          raise SystemExit(f'unsafe archive member: {member.name}')
+                  archive.extractall(root)
+              print(f'{name}: verified and extracted')
+
+          extract(
+              'generator.tar.xz.b64',
+              '6b76fcc6df48e117fe061e97af498a3aacf3ee4021773db6ec7cdab02fc9d757',
+          )
+          extract(
+              'base-decks.tar.xz.b64',
+              '29e79fb693277f848365903d2ebf1a9b8278597bdb8a52a59a6453f5ef3395b1',
+          )
           PY
+          cat .collapsecad-phase2c/diagnostics/extraction.log
 
       - name: Generate and checksum all twenty decks
         working-directory: phase2c-src
         shell: bash
         run: |
-          python -m compileall -q src scripts
-          PYTHONPATH=src python scripts/generate_global_phase2c_decks.py
-          PYTHONPATH=src python scripts/generate_submodels.py
-          test "$(find build/decks -type f -name '*.inp' | wc -l)" -eq 20
-          python - <<'PY'
+          mkdir -p build
+          set +e
+          {
+            python -m compileall -q src scripts
+            PYTHONPATH=src python scripts/generate_global_phase2c_decks.py
+            PYTHONPATH=src python scripts/generate_submodels.py
+            test "$(find build/decks -type f -name '*.inp' | wc -l)" -eq 20
+            python - <<'PY'
           import hashlib, json
           from pathlib import Path
           records = []
@@ -71,6 +90,10 @@ jobs:
               assert actual == row['sha256'], (path, actual, row['sha256'])
           print('20/20 deck hashes verified')
           PY
+          } > build/deck-generation.log 2>&1
+          STATUS=$?
+          cat build/deck-generation.log
+          exit "$STATUS"
 
       - name: Install checksum-pinned CalculiX 2.23 runtime
         working-directory: phase2c-src
@@ -166,6 +189,8 @@ jobs:
         with:
           name: collapsecad-phase2c-${{ matrix.group }}-solver
           path: |
+            .collapsecad-phase2c/diagnostics
+            phase2c-src/build/deck-generation.log
             phase2c-src/build/decks
             phase2c-src/build/solver/${{ matrix.group }}
             phase2c-src/build/solver_manifest-${{ matrix.group }}.json
