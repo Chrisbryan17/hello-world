@@ -1,0 +1,136 @@
+name: Digital Surface Cached Alignment V2
+
+on:
+  push:
+    branches: [digital-surface-ci-20260724]
+    paths: [.github/workflows/digital-surface-cache-alignment-v2.yml]
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/digital-surface-cache-alignment-v2.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Restore immutable source cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/digital-surface
+          key: digital-surface-hybrid-obadiaha-11793901-kinzik-eb4e9fc7-v3
+      - name: Install stack
+        run: python -m pip install pandas==2.2.3 pyarrow==19.0.1 requests==2.32.3
+      - name: Compute alignment matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, re
+          from pathlib import Path
+          import numpy as np, pandas as pd, requests
+
+          root=Path('.cache/digital-surface/obadiaha')
+          required=[root/'markets/all.parquet',root/'resolutions/all.parquet']
+          assert all(p.exists() for p in required), [str(p) for p in required if not p.exists()]
+          markets=pd.read_parquet(root/'markets/all.parquet')
+          resolutions=pd.read_parquet(root/'resolutions/all.parquet')
+          prices=pd.concat([pd.read_parquet(root/f'crypto_prices/{d:%Y-%m-%d}.parquet',columns=['timestamp','asset','open','close']) for d in pd.date_range('2026-03-06','2026-03-19')],ignore_index=True)
+
+          work=markets.copy(); work['asset']=work['asset'].astype(str).str.upper()
+          work=work[(work['asset']=='BTC') & work['market_type'].isin(['crypto_5m','crypto_15m'])].copy()
+          work['start_dt']=pd.to_datetime(work['start_time'],utc=True).astype('datetime64[ns, UTC]')
+          work['end_dt']=pd.to_datetime(work['end_time'],utc=True).astype('datetime64[ns, UTC]')
+          work=work[work['start_dt'].between(pd.Timestamp('2026-03-06',tz='UTC'),pd.Timestamp('2026-03-20',tz='UTC'),inclusive='left')]
+          resolved=resolutions[['condition_id','outcome']].copy(); resolved['condition_id']=resolved['condition_id'].astype(str); work['condition_id']=work['condition_id'].astype(str)
+          work=work.merge(resolved,on='condition_id',how='inner')
+
+          gamma_path=root/'gamma_token_map.json'
+          if gamma_path.exists():
+              gamma=pd.DataFrame(json.loads(gamma_path.read_text()))
+          else:
+              rows=[]; ids=sorted(work['condition_id'].unique())
+              for offset in range(0,len(ids),100):
+                  batch=ids[offset:offset+100]
+                  response=requests.get('https://gamma-api.polymarket.com/markets',params={'condition_ids':batch,'closed':'true','limit':len(batch),'offset':0},headers={'User-Agent':'digital-surface-alignment-v2/1.0'},timeout=90)
+                  response.raise_for_status()
+                  for row in response.json():
+                      cid=str(row.get('conditionId') or '')
+                      if cid in set(batch): rows.append({'condition_id':cid,'gamma_slug':str(row.get('slug') or '')})
+              gamma=pd.DataFrame(rows)
+          if 'gamma_slug' not in gamma and 'slug' in gamma: gamma=gamma.rename(columns={'slug':'gamma_slug'})
+          if 'gamma_slug' not in gamma: gamma['gamma_slug']=''
+          gamma['condition_id']=gamma['condition_id'].astype(str)
+          work=work.merge(gamma[['condition_id','gamma_slug']].drop_duplicates('condition_id',keep='last'),on='condition_id',how='left')
+
+          def epoch(value):
+              match=re.search(r'(\d{10,13})(?:\D*)$',str(value))
+              if not match:return pd.NaT
+              number=int(match.group(1)); return pd.to_datetime(number,unit='ms' if number>10**11 else 's',utc=True).as_unit('ns')
+          for source in ['slug','market_id','gamma_slug']:
+              if source in work.columns: work[source+'_dt']=work[source].map(epoch).astype('datetime64[ns, UTC]')
+          work['duration_s']=work['market_type'].map({'crypto_5m':300,'crypto_15m':900})
+
+          spot=prices[prices['asset'].astype(str).str.upper().eq('BTC')].copy()
+          numeric=pd.api.types.is_numeric_dtype(spot['timestamp'])
+          if numeric:
+              magnitude=float(pd.to_numeric(spot['timestamp'],errors='coerce').dropna().abs().median())
+              unit='ms' if magnitude>1e11 else 's'
+              spot['dt']=pd.to_datetime(spot['timestamp'],unit=unit,utc=True).astype('datetime64[ns, UTC]')
+          else:
+              spot['dt']=pd.to_datetime(spot['timestamp'],utc=True).astype('datetime64[ns, UTC]')
+          spot=spot.sort_values('dt').drop_duplicates('dt',keep='last')
+
+          def values(times,column,offset_ms=0):
+              converted=pd.to_datetime(times,utc=True).astype('datetime64[ns, UTC]')+pd.Timedelta(milliseconds=offset_ms)
+              query=pd.DataFrame({'row':np.arange(len(work)),'q':converted.to_numpy()}).dropna().sort_values('q')
+              query['q']=pd.to_datetime(query['q'],utc=True).astype('datetime64[ns, UTC]')
+              source=spot[['dt',column]].copy(); source['dt']=source['dt'].astype('datetime64[ns, UTC]')
+              merged=pd.merge_asof(query,source.sort_values('dt'),left_on='q',right_on='dt',direction='backward',tolerance=pd.Timedelta('5min')).sort_values('row')
+              result=np.full(len(work),np.nan); result[merged['row'].astype(int).to_numpy()]=merged[column].to_numpy(); return result
+
+          starts={'field_start':work['start_dt'],'field_end_minus_duration':work['end_dt']-pd.to_timedelta(work['duration_s'],unit='s')}
+          for source in ['slug','market_id','gamma_slug']:
+              column=source+'_dt'
+              if column in work.columns: starts[source+'_epoch']=work[column]
+          ends={'field_end':work['end_dt']}
+          for name,start in starts.items(): ends[name+'_plus_duration']=start+pd.to_timedelta(work['duration_s'],unit='s')
+          recorded=work['outcome'].eq('Up').to_numpy(); results=[]
+          for start_name,start in starts.items():
+              strike=values(start,'open')
+              for end_name,end in ends.items():
+                  finals={'close_before_end':values(end,'close',-1),'open_at_end':values(end,'open',0),'close_at_end':values(end,'close',0),'close_previous_minute':values(end,'close',-60000)}
+                  for price_mode,final in finals.items():
+                      valid=np.isfinite(strike)&np.isfinite(final); predicted=final>=strike
+                      results.append({'start':start_name,'end':end_name,'price_mode':price_mode,'agreement':float((predicted[valid]==recorded[valid]).mean()) if valid.any() else None,'inverse_agreement':float((~predicted[valid]==recorded[valid]).mean()) if valid.any() else None,'valid':int(valid.sum())})
+          results.sort(key=lambda row:-(row['agreement'] if row['agreement'] is not None else -1))
+          payload={
+              'market_columns':markets.columns.tolist(),
+              'resolution_columns':resolutions.columns.tolist(),
+              'rows':int(len(work)),
+              'outcomes':{str(k):int(v) for k,v in work['outcome'].value_counts(dropna=False).items()},
+              'gamma_rows':int(len(gamma)),
+              'timestamp_deltas_seconds':{c:(work[c]-work['start_dt']).dt.total_seconds().describe().to_dict() for c in ['slug_dt','market_id_dt','gamma_slug_dt'] if c in work},
+              'results':results,
+              'sample':work[[c for c in ['market_id','slug','gamma_slug','market_type','start_time','end_time','outcome'] if c in work]].head(30).astype(str).to_dict('records'),
+          }
+          Path('alignment-v2.json').write_text(json.dumps(payload,indent=2,default=str))
+          print(json.dumps(payload,indent=2,default=str))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-alignment-v2
+          path: alignment-v2.json
+          if-no-files-found: error
+          retention-days: 14
