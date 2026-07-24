@@ -1,0 +1,120 @@
+name: Digital Surface Chainlink Gap Recovery
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/digital-surface-chainlink-gap-recovery.yml
+      - scripts/digital_surface_chainlink_gap_recovery.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BASELINE_ARTIFACT_ID: '8608755070'
+      BASELINE_SHA256: e049437fcdeafa433dc46cfc61ffdddfdbad64ec13534d8bf07879637f55bcba
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pinned recovery stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            pandas==2.2.3 \
+            pyarrow==19.0.1 \
+            'httpx[http2]==0.28.1'
+
+      - name: Compile recovery implementation
+        run: python -m compileall -q scripts/digital_surface_chainlink_gap_recovery.py
+
+      - name: Download and verify frozen baseline artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 --retry-all-errors \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${BASELINE_ARTIFACT_ID}/zip" \
+            --output baseline.zip
+          echo "${BASELINE_SHA256}  baseline.zip" | sha256sum -c -
+          mkdir baseline
+          unzip -q baseline.zip -d baseline
+
+      - name: Recover missing official boundaries and recompute every contract
+        id: recover
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p recovered-chainlink-audit
+          python scripts/digital_surface_chainlink_gap_recovery.py \
+            --baseline-dir baseline \
+            --baseline-zip baseline.zip \
+            --output-dir recovered-chainlink-audit \
+            2>&1 | tee recovered-chainlink-audit/recovery.log
+
+      - name: Stabilize and verify internal checksums
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          root = Path('recovered-chainlink-audit')
+          sums = root / 'SHA256SUMS.json'
+          if not sums.exists():
+              print('checksums absent; preserving failure evidence')
+              raise SystemExit(0)
+          expected = json.loads(sums.read_text())
+          for name, want in expected.items():
+              got = hashlib.sha256((root / name).read_bytes()).hexdigest()
+              assert got == want, (name, got, want)
+          print(f'verified {len(expected)} recovered audit files')
+          PY
+
+      - name: Show recovery decision
+        if: always()
+        run: |
+          cat recovered-chainlink-audit/chainlink_source_decision.json || true
+          tail -200 recovered-chainlink-audit/recovery.log || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-chainlink-gap-recovered
+          path: recovered-chainlink-audit/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Enforce recovered source gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          decision = json.loads(Path('recovered-chainlink-audit/chainlink_source_decision.json').read_text())
+          assert decision['coverage'] == 1.0, decision
+          assert decision['direction_agreement'] >= decision['required_agreement'], decision
+          assert decision['shared_boundary_agreement_to_cent'] == 1.0, decision
+          assert decision['contracts_filtered'] is False, decision
+          assert decision['signals_changed'] is False, decision
+          assert decision['thresholds_changed'] is False, decision
+          assert decision['execution_assumptions_changed'] is False, decision
+          assert decision['validation_chronology_changed'] is False, decision
+          assert decision['gate_passed'] is True, decision
+          print('recovered official Chainlink source gate passed')
+          PY
