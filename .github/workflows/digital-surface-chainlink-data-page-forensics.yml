@@ -1,0 +1,104 @@
+name: Digital Surface Chainlink Data Page Forensics
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/digital-surface-chainlink-data-page-forensics.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install browser stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install playwright==1.52.0
+          python -m playwright install --with-deps chromium
+      - name: Capture Chainlink delayed-data requests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import asyncio, hashlib, json
+          from pathlib import Path
+          from playwright.async_api import async_playwright
+
+          OUT = Path('chainlink-data-page-forensics')
+          OUT.mkdir(exist_ok=True)
+          TARGETS = [
+              'https://data.chain.link/streams/btc-usd',
+              'https://data.chain.link/streams/btc-usd-cexprice-streams',
+          ]
+
+          async def main():
+              captures=[]
+              async with async_playwright() as p:
+                  browser=await p.chromium.launch(headless=True)
+                  context=await browser.new_context(
+                      user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36',
+                      viewport={'width':1440,'height':1200},
+                  )
+                  page=await context.new_page()
+                  requests=[]; responses=[]
+                  page.on('request', lambda r: requests.append({
+                      'url':r.url,'method':r.method,'resource_type':r.resource_type,
+                      'post_data':r.post_data,'headers':dict(r.headers),
+                  }))
+                  async def save_response(r):
+                      url=r.url
+                      if any(token in url.lower() for token in ('api','graphql','stream','feed','price','chart','history','timeseries','data.chain')):
+                          row={'url':url,'status':r.status,'headers':dict(r.headers)}
+                          try:
+                              body=await r.body()
+                              row['bytes']=len(body)
+                              row['sha256']=hashlib.sha256(body).hexdigest()
+                              if len(body) <= 5_000_000:
+                                  row['body_utf8']=body.decode('utf-8','replace')
+                          except Exception as exc:
+                              row['body_error']=repr(exc)
+                          responses.append(row)
+                  page.on('response', lambda r: asyncio.create_task(save_response(r)))
+                  for target in TARGETS:
+                      requests.clear(); responses.clear()
+                      nav=await page.goto(target,wait_until='domcontentloaded',timeout=120_000)
+                      await page.wait_for_timeout(15_000)
+                      await page.screenshot(path=str(OUT/(target.rstrip('/').split('/')[-1]+'.png')),full_page=True)
+                      captures.append({
+                          'target':target,
+                          'navigation_status':nav.status if nav else None,
+                          'final_url':page.url,
+                          'title':await page.title(),
+                          'body_excerpt':(await page.locator('body').inner_text())[:50_000],
+                          'requests':list(requests),
+                          'responses':list(responses),
+                      })
+                  await browser.close()
+              (OUT/'capture.json').write_text(json.dumps(captures,indent=2),encoding='utf-8')
+              summary=[]
+              for item in captures:
+                  summary.append({
+                      'target':item['target'],'status':item['navigation_status'],'title':item['title'],
+                      'request_urls':[x['url'] for x in item['requests'] if any(t in x['url'].lower() for t in ('api','graphql','stream','feed','price','chart','history','timeseries'))],
+                      'response_urls':[x['url'] for x in item['responses']],
+                  })
+              (OUT/'summary.json').write_text(json.dumps(summary,indent=2),encoding='utf-8')
+              print(json.dumps(summary,indent=2))
+          asyncio.run(main())
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-chainlink-data-page-forensics
+          path: chainlink-data-page-forensics/
+          if-no-files-found: error
+          retention-days: 14
