@@ -36,7 +36,8 @@ jobs:
           import tarfile
 
           source = Path('.collapsecad-phase2b/payload.tar.gz.b64')
-          payload = base64.b64decode(source.read_text(), validate=True)
+          canonical_b64 = ''.join(source.read_text().split())
+          payload = base64.b64decode(canonical_b64, validate=True)
           expected = '894596ca85abcf6962773fdf2ec2bdd8e9c86d54d75397978dd6e8d7ee1ae629'
           actual = hashlib.sha256(payload).hexdigest()
           if actual != expected:
