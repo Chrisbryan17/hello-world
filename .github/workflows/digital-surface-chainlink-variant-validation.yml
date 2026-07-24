@@ -1,0 +1,73 @@
+name: Digital Surface Chainlink Variant Validation
+
+on:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/digital-surface-chainlink-variant-validation.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Query exact historical Chainlink windows
+        run: |
+          python - <<'PY'
+          import json, time
+          from pathlib import Path
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          endpoint='https://polymarket.com/api/crypto/crypto-price'
+          cases=[
+            {'slug':'btc-updown-5m-1772755200','start':'2026-03-06T00:00:00Z','end':'2026-03-06T00:05:00Z','outcome':'Up','variant':'fiveminute'},
+            {'slug':'btc-updown-5m-1772756100','start':'2026-03-06T00:15:00Z','end':'2026-03-06T00:20:00Z','outcome':'Down','variant':'fiveminute'},
+            {'slug':'btc-updown-15m-1772755200','start':'2026-03-06T00:00:00Z','end':'2026-03-06T00:15:00Z','outcome':'Up','variant':'fifteen'},
+            {'slug':'btc-updown-15m-1772756100','start':'2026-03-06T00:15:00Z','end':'2026-03-06T00:30:00Z','outcome':'Down','variant':'fifteen'},
+          ]
+          rows=[]
+          for case in cases:
+            params={'symbol':'BTC','eventStartTime':case['start'],'variant':case['variant'],'endDate':case['end']}
+            url=endpoint+'?'+urlencode(params)
+            req=Request(url,headers={
+              'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36',
+              'Accept':'application/json',
+              'Referer':case['slug'].join(['https://polymarket.com/event/','']),
+              'Accept-Language':'en-US,en;q=0.9',
+            })
+            row={**case,'url':url}
+            try:
+              with urlopen(req,timeout=30) as response:
+                body=response.read().decode('utf-8','replace')
+                row['status']=response.status
+                row['body']=body
+                data=json.loads(body)
+                row['data']=data
+                op=float(data['openPrice']) if data.get('openPrice') is not None else None
+                cp=float(data['closePrice']) if data.get('closePrice') is not None else None
+                row['predicted']='Up' if op is not None and cp is not None and cp>=op else ('Down' if op is not None and cp is not None else None)
+                row['match']=row['predicted']==case['outcome'] if row['predicted'] else None
+            except Exception as exc:
+              row['error']=repr(exc)
+            rows.append(row)
+            time.sleep(0.5)
+          Path('chainlink-variant-validation.json').write_text(json.dumps(rows,indent=2),encoding='utf-8')
+          print(json.dumps(rows,indent=2))
+          assert all(row.get('status') == 200 for row in rows), rows
+          assert len({(row['data'].get('openPrice'),row['data'].get('closePrice')) for row in rows}) > 1, rows
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-chainlink-variant-validation
+          path: chainlink-variant-validation.json
+          if-no-files-found: warn
+          retention-days: 14
