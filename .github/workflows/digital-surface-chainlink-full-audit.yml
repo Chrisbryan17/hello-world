@@ -9,6 +9,7 @@ on:
       - scripts/digital_surface_chainlink_audit_v2.py
       - scripts/digital_surface_chainlink_audit_v3.py
       - scripts/digital_surface_chainlink_audit_v4.py
+      - scripts/digital_surface_chainlink_audit_v5.py
   workflow_dispatch:
 
 permissions:
@@ -17,7 +18,7 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       PYTHONUNBUFFERED: '1'
     steps:
@@ -31,7 +32,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache/digital-surface-chainlink-audit
-          key: digital-surface-chainlink-gamma-march-2026-v1
+          key: digital-surface-chainlink-gamma-html-march-2026-v1
 
       - name: Install pinned audit stack
         run: |
@@ -48,7 +49,8 @@ jobs:
             scripts/digital_surface_chainlink_audit.py \
             scripts/digital_surface_chainlink_audit_v2.py \
             scripts/digital_surface_chainlink_audit_v3.py \
-            scripts/digital_surface_chainlink_audit_v4.py
+            scripts/digital_surface_chainlink_audit_v4.py \
+            scripts/digital_surface_chainlink_audit_v5.py
 
       - name: Reconstruct and audit every official Chainlink boundary
         id: audit
@@ -57,12 +59,12 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p chainlink-audit
-          python scripts/digital_surface_chainlink_audit_v4.py \
+          python scripts/digital_surface_chainlink_audit_v5.py \
             --cache-dir .cache/digital-surface-chainlink-audit \
             --output-dir chainlink-audit \
             2>&1 | tee chainlink-audit/audit.log
 
-      - name: Verify internal artifact hashes
+      - name: Stabilize and verify internal artifact hashes
         if: always()
         shell: bash
         run: |
@@ -71,15 +73,21 @@ jobs:
           import hashlib, json
           from pathlib import Path
           root = Path('chainlink-audit')
-          sums = root / 'SHA256SUMS.json'
-          if not sums.exists():
-              print('SHA256SUMS.json absent; preserving failure evidence')
+          if not (root / 'chainlink_source_decision.json').exists():
+              print('decision absent; preserving failure evidence')
               raise SystemExit(0)
-          expected = json.loads(sums.read_text())
+          checksums = {}
+          for path in sorted(root.iterdir()):
+              if path.is_file() and path.name not in {'SHA256SUMS.json', 'audit.log'}:
+                  checksums[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+          (root / 'SHA256SUMS.json').write_text(
+              json.dumps(checksums, indent=2, sort_keys=True), encoding='utf-8'
+          )
+          expected = json.loads((root / 'SHA256SUMS.json').read_text())
           for name, want in expected.items():
               got = hashlib.sha256((root / name).read_bytes()).hexdigest()
               assert got == want, (name, got, want)
-          print(f'verified {len(expected)} internal files')
+          print(f'verified {len(expected)} stable internal files')
           PY
 
       - name: Show source decision
@@ -98,5 +106,21 @@ jobs:
           retention-days: 30
 
       - name: Enforce source audit gate
-        if: steps.audit.outcome == 'failure'
-        run: exit 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          decision = json.loads(Path('chainlink-audit/chainlink_source_decision.json').read_text())
+          assert decision['coverage'] == 1.0, decision
+          assert decision['direction_agreement'] >= decision['required_agreement'], decision
+          assert decision['shared_boundary_agreement_to_cent'] == 1.0, decision
+          assert decision['contracts_filtered'] is False, decision
+          assert decision['signals_changed'] is False, decision
+          assert decision['thresholds_changed'] is False, decision
+          assert decision['execution_assumptions_changed'] is False, decision
+          assert decision['validation_chronology_changed'] is False, decision
+          assert decision['gate_passed'] is True, decision
+          print('official Chainlink source gate passed')
+          PY
