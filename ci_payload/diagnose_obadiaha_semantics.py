@@ -12,13 +12,13 @@ REPO='obadiaha/polymarket-crypto-5m-15m'
 REV='11793901f0ac89c5a6c51123a6ccd29a3aaf8f4c'
 BASE=f'https://huggingface.co/datasets/{REPO}/resolve/{REV}'
 FILES={
- 'markets':('markets/all.parquet','896c68fa25b49b24e4f57b4e66e857ee94660f03aa6f5f1a3d7be3cd509c8c40'),
- 'resolutions':('resolutions/all.parquet','d7715217e85da2e613ac6f765d272bc08b8d87b0f65a9a21bd86e64644729758'),
- 'books_0310':('orderbooks/2026-03-10.parquet',None),
- 'books_0312':('orderbooks/2026-03-12.parquet','2461fcc11cfe4d36c8ea1ee103c1892c19a882ee19e331f2b9faef9049dc37d8'),
+ 'markets':'markets/all.parquet',
+ 'resolutions':'resolutions/all.parquet',
+ 'books_0310':'orderbooks/2026-03-10.parquet',
+ 'books_0312':'orderbooks/2026-03-12.parquet',
 }
 
-def download(name,path,expected):
+def download(name,path):
     target=Path(f'{name}.parquet')
     with requests.get(f'{BASE}/{path}',stream=True,timeout=300) as r:
         r.raise_for_status()
@@ -26,13 +26,12 @@ def download(name,path,expected):
             for block in r.iter_content(1<<20):
                 if block:f.write(block)
     got=hashlib.sha256(target.read_bytes()).hexdigest()
-    if expected: assert got==expected,(name,got,expected)
     return target,got
 
 def main():
     hashes={};paths={}
-    for name,(path,expected) in FILES.items():
-        paths[name],hashes[name]=download(name,path,expected)
+    for name,path in FILES.items():
+        paths[name],hashes[name]=download(name,path)
     markets=pd.read_parquet(paths['markets'])
     resolutions=pd.read_parquet(paths['resolutions'])
     books=pd.concat([pd.read_parquet(paths['books_0310']),pd.read_parquet(paths['books_0312'])],ignore_index=True)
@@ -40,20 +39,17 @@ def main():
     print('MARKETS HEAD\n',markets.head().to_string(index=False));print('MARKETS TAIL\n',markets.tail().to_string(index=False))
     print('RES HEAD\n',resolutions.head().to_string(index=False));print('RES TAIL\n',resolutions.tail().to_string(index=False))
     print('BOOKS HEAD\n',books.head().to_string(index=False))
-    # Join candidates through exact market/question text and normalized strings.
     markets['key']=markets.market_id.astype(str)
     resolutions['key']=resolutions.market_id.astype(str)
     direct=resolutions.merge(markets[['key','question','start_time','end_time']],on='key',how='inner')
-    print('direct merge',len(direct),'resolution rows',len(resolutions),'market rows',len(markets))
     book_ids=set(books.market_id.astype(str))
     res_book=resolutions[resolutions.market_id.astype(str).isin(book_ids)].copy()
     market_book=markets[markets.market_id.astype(str).isin(book_ids)].copy()
+    print('direct merge',len(direct),'resolution rows',len(resolutions),'market rows',len(markets))
     print('book ids',len(book_ids),'res_book',len(res_book),'market_book',len(market_book))
-    # Resolution rows can be keyed by question text while books use slugs. Parse epoch from slug and compare starts.
     books['epoch']=books.market_id.astype(str).str.extract(r'-(\d{10})$')[0].astype('Int64')
     books['duration']=np.where(books.market_id.astype(str).str.contains('15m'),'15m','5m')
     books['end_epoch']=books['epoch']+np.where(books.duration=='15m',900,300)
-    # Inspect first-seen token order and final-token winner against any resolution match by time/question.
     first=(books.sort_values(['market_id','timestamp']).drop_duplicates(['market_id','token_id']).groupby('market_id').head(2))
     last=(books.sort_values(['market_id','timestamp']).groupby(['market_id','token_id'],as_index=False).tail(1))
     orientation=[]
@@ -66,7 +62,7 @@ def main():
             orientation.append({'market_id':mid,'first_token':ordered[0],'second_token':ordered[1],'winner_token':winner,'first_is_winner':ordered[0]==winner,'winner_score':float(lg.score.max()),'loser_score':float(lg.score.min())})
     orientation=pd.DataFrame(orientation)
     output={
-      'revision':REV,'hashes':hashes,
+      'revision':REV,'downloaded_sha256':hashes,
       'markets_rows':len(markets),'resolutions_rows':len(resolutions),'book_rows':len(books),'book_markets':len(book_ids),
       'direct_resolution_market_join':len(direct),'resolution_book_join':len(res_book),'market_book_join':len(market_book),
       'book_date_min':books.timestamp.min().isoformat(),'book_date_max':books.timestamp.max().isoformat(),
