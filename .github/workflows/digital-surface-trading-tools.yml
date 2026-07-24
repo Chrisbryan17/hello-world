@@ -23,18 +23,31 @@ env:
 jobs:
   inventory-aliplayer:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
-      - name: Fetch pinned repository metadata
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --quiet pandas==2.2.3 pyarrow==19.0.1
+      - name: Fetch pinned metadata and compact market histories
         shell: bash
         run: |
           set -euo pipefail
+          REV='ba1ad37cbcdd720cced20f1cdc97c2cf347cad6c'
+          BASE="https://huggingface.co/datasets/aliplayer1/polymarket-crypto-updown/resolve/${REV}"
           curl --fail --silent --show-error --location \
             'https://huggingface.co/api/datasets/aliplayer1/polymarket-crypto-updown?blobs=true' \
             --output repo-metadata.json
+          curl --fail --silent --show-error --location "${BASE}/data/markets.parquet" --output markets.parquet
+          curl --fail --silent --show-error --location "${BASE}/data/prices/crypto=BTC/timeframe=5-minute/part-0.parquet" --output prices-5m.parquet
+          curl --fail --silent --show-error --location "${BASE}/data/prices/crypto=BTC/timeframe=15-minute/part-0.parquet" --output prices-15m.parquet
+          echo '2cf01fea1659cc96193f2437e8b95a05429ad6bede359fe5d0193974c154219f  markets.parquet' | sha256sum -c -
+          echo '5b53b28d6c335a7b3fbbfb9305e181ed91b016fb49880ee3572b91ff987dc048  prices-5m.parquet' | sha256sum -c -
+          echo '9716b667fef381650fd29c21a63d5db23782fec36a71816401e686bd3dda98cb  prices-15m.parquet' | sha256sum -c -
           python - <<'PY'
           import json
           from pathlib import Path
+          import pandas as pd
           revision='ba1ad37cbcdd720cced20f1cdc97c2cf347cad6c'
           info=json.loads(Path('repo-metadata.json').read_text())
           assert info.get('sha')==revision,(info.get('sha'),revision)
@@ -47,22 +60,50 @@ jobs:
           files=[]
           for path in wanted:
               row=siblings.get(path)
-              files.append({
-                  'path':path,
-                  'found':bool(row),
-                  'size':(row or {}).get('size'),
-                  'blob_id':(row or {}).get('blobId'),
-                  'lfs':(row or {}).get('lfs'),
-              })
-          output={'repo':'aliplayer1/polymarket-crypto-updown','revision':revision,'files':files,'sibling_count':len(siblings)}
+              files.append({'path':path,'found':bool(row),'size':(row or {}).get('size'),'blob_id':(row or {}).get('blobId'),'lfs':(row or {}).get('lfs')})
+          markets=pd.read_parquet('markets.parquet')
+          markets=markets[(markets.crypto=='BTC') & markets.timeframe.isin(['5-minute','15-minute']) & markets.resolution.isin([0,1])].copy()
+          markets['duration_s']=markets.timeframe.map({'5-minute':300,'15-minute':900})
+          markets['open_ts']=markets.end_ts-markets.duration_s
+          markets['close_dt']=pd.to_datetime(markets.end_ts,unit='s',utc=True)
+          markets['week']=markets.close_dt.dt.tz_localize(None).dt.to_period('W-MON').astype(str)
+          prices=[]
+          for timeframe,path in [('5-minute','prices-5m.parquet'),('15-minute','prices-15m.parquet')]:
+              frame=pd.read_parquet(path)
+              frame['timeframe']=timeframe
+              prices.append(frame)
+          prices=pd.concat(prices,ignore_index=True)
+          ids=set(markets.market_id.astype(str))
+          prices=prices[prices.market_id.astype(str).isin(ids)].copy()
+          prices['price_dt']=pd.to_datetime(prices.timestamp,unit='s',utc=True)
+          counts=markets.groupby(['week','timeframe']).market_id.nunique().unstack(fill_value=0)
+          expiry=markets.groupby(['end_ts','timeframe']).market_id.nunique().unstack(fill_value=0)
+          paired=expiry[(expiry.get('5-minute',0)>0)&(expiry.get('15-minute',0)>0)]
+          output={
+              'repo':'aliplayer1/polymarket-crypto-updown','revision':revision,'files':files,'sibling_count':len(siblings),
+              'resolved_markets':int(len(markets)),
+              'resolved_by_timeframe':markets.timeframe.value_counts().to_dict(),
+              'resolved_date_min':markets.close_dt.min().isoformat(),
+              'resolved_date_max':markets.close_dt.max().isoformat(),
+              'calendar_weeks':int(markets.week.nunique()),
+              'weekly_counts':counts.reset_index().to_dict('records'),
+              'same_expiry_pairs':int(len(paired)),
+              'price_rows':int(len(prices)),
+              'price_date_min':prices.price_dt.min().isoformat() if len(prices) else None,
+              'price_date_max':prices.price_dt.max().isoformat() if len(prices) else None,
+              'markets_with_prices':int(prices.market_id.astype(str).nunique()),
+          }
           Path('aliplayer-5m15m-inventory.json').write_text(json.dumps(output,indent=2))
+          markets[['market_id','condition_id','timeframe','open_ts','end_ts','resolution','up_token_id','down_token_id','week']].to_csv('aliplayer-resolved-market-inventory.csv',index=False)
           print(json.dumps(output,indent=2))
           assert all(row['found'] for row in files),[row for row in files if not row['found']]
           PY
       - uses: actions/upload-artifact@v4
         with:
           name: aliplayer-5m15m-inventory
-          path: aliplayer-5m15m-inventory.json
+          path: |
+            aliplayer-5m15m-inventory.json
+            aliplayer-resolved-market-inventory.csv
           retention-days: 30
 
   verify-and-research:
