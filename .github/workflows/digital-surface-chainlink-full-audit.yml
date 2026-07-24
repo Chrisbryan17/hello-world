@@ -32,7 +32,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache/digital-surface-chainlink-audit
-          key: digital-surface-chainlink-gamma-html-march-2026-v1
+          key: digital-surface-chainlink-gamma-html-march-2026-v2
+          restore-keys: |
+            digital-surface-chainlink-gamma-march-2026-v1
 
       - name: Install pinned audit stack
         run: |
