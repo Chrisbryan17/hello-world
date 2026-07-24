@@ -3,6 +3,9 @@ on:
   push:
     branches: [digital-surface-ci-20260724]
     paths: [.github/workflows/digital-surface-source-diagnostic.yml]
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/digital-surface-source-diagnostic.yml]
   workflow_dispatch:
 permissions:
   contents: read
@@ -59,7 +62,7 @@ jobs:
           sp=sp[sp.asset.astype(str).str.upper().eq('BTC')].copy(); sp['dt']=pd.to_datetime(sp.timestamp,utc=True); sp=sp.sort_values('dt').drop_duplicates('dt',keep='last')
           print('ROWS',len(w),'OUTCOMES',w.outcome.value_counts().to_dict()); print(w[['market_id','slug','market_type','start_time','end_time','outcome']].head(30).to_string(index=False))
           def epoch(v):
-              z=re.search(r'(\d{10,13})(?:\D*)$',str(v));
+              z=re.search(r'(\d{10,13})(?:\D*)$',str(v))
               if not z:return pd.NaT
               n=int(z.group(1));return pd.to_datetime(n,unit='ms' if n>10**11 else 's',utc=True)
           w['slug_dt']=w.slug.map(epoch); w['market_id_dt']=w.market_id.map(epoch); w['duration_s']=w.market_type.map({'crypto_5m':300,'crypto_15m':900})
