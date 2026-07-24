@@ -75,20 +75,33 @@ jobs:
           PYTHONPATH=src python scripts/generate_fem_decks.py
           test "$(find build/decks -type f -name '*.inp' | wc -l)" -eq 16
 
-      - name: Install official CalculiX 2.23 executable
+      - name: Install official CalculiX 2.23 executable and compatibility runtime
         working-directory: collapsecad-phase2b-courier
         shell: bash
         run: |
-          mkdir -p build build/ccx-runtime
+          mkdir -p build build/ccx-runtime build/compat-runtime
           curl --fail --location --retry 5 --retry-delay 3 \
             --output build/ccx_2.23.tar.bz2 https://dhondt.de/ccx_2.23.tar.bz2
           sha256sum build/ccx_2.23.tar.bz2 | tee build/ccx_2.23-download.sha256
           tar -xjf build/ccx_2.23.tar.bz2 -C build/ccx-runtime
           CCX_BIN="$(find "$PWD/build/ccx-runtime" -type f -name 'ccx_2.23*' -perm -111 | head -n 1)"
           test -n "$CCX_BIN"
+
+          curl --fail --location --retry 5 --retry-delay 3 \
+            --output build/libgfortran4_7.5.0-3ubuntu1~18.04_amd64.deb \
+            https://archive.ubuntu.com/ubuntu/pool/main/g/gcc-7/libgfortran4_7.5.0-3ubuntu1~18.04_amd64.deb
+          sha256sum build/libgfortran4_7.5.0-3ubuntu1~18.04_amd64.deb \
+            | tee build/libgfortran4-download.sha256
+          dpkg-deb -x build/libgfortran4_7.5.0-3ubuntu1~18.04_amd64.deb build/compat-runtime
+          COMPAT_LIB="$(find "$PWD/build/compat-runtime" -type f -name 'libgfortran.so.4*' -printf '%h\n' | head -n 1)"
+          test -n "$COMPAT_LIB"
+
           echo "CCX_BIN=$CCX_BIN" >> "$GITHUB_ENV"
-          "$CCX_BIN" -v || true
-          ldd "$CCX_BIN" || true
+          echo "LD_LIBRARY_PATH=$COMPAT_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          LD_LIBRARY_PATH="$COMPAT_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd "$CCX_BIN" \
+            | tee build/ccx-ldd.txt
+          ! grep -q 'not found' build/ccx-ldd.txt
+          LD_LIBRARY_PATH="$COMPAT_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$CCX_BIN" -v || true
 
       - name: Run nonlinear, buckling, floor, racking, and contact suite
         working-directory: collapsecad-phase2b-courier
@@ -113,5 +126,7 @@ jobs:
             collapsecad-phase2b-courier/build/joint-capacity-ledger.json
             collapsecad-phase2b-courier/build/phase2b-run.log
             collapsecad-phase2b-courier/build/ccx_2.23-download.sha256
+            collapsecad-phase2b-courier/build/libgfortran4-download.sha256
+            collapsecad-phase2b-courier/build/ccx-ldd.txt
           if-no-files-found: error
           retention-days: 30
