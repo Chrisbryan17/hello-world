@@ -5,12 +5,12 @@ on:
     branches: [digital-surface-ci-20260724]
     paths:
       - .github/workflows/digital-surface-trading-tools.yml
-      - ci_payload/digital-surface-hybrid-update/**
+      - ci_payload/digital-surface-hybrid-update-v2/**
   pull_request:
     branches: [main]
     paths:
       - .github/workflows/digital-surface-trading-tools.yml
-      - ci_payload/digital-surface-hybrid-update/**
+      - ci_payload/digital-surface-hybrid-update-v2/**
   workflow_dispatch:
 
 permissions:
@@ -41,7 +41,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat ci_payload/digital-surface-hybrid-update/chunk-* > hybrid-branch-update.tar.gz.b64
+          cat ci_payload/digital-surface-hybrid-update-v2/chunk-* > hybrid-branch-update.tar.gz.b64
           base64 --decode hybrid-branch-update.tar.gz.b64 > hybrid-branch-update.tar.gz
           echo '80579a870ad40bc8a8dc0c1062780d7402860af7ecc5003c1571dc708d239682  hybrid-branch-update.tar.gz' | sha256sum -c -
           tar -xzf hybrid-branch-update.tar.gz -C trading-tools
