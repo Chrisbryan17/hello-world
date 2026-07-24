@@ -1,0 +1,53 @@
+name: Aliplayer BTC 5m15m Inventory
+
+on:
+  push:
+    branches: [digital-surface-ci-20260724]
+    paths: [.github/workflows/aliplayer-5m15m-inventory.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --quiet requests pyarrow pandas
+      - name: Inventory pinned partitions and inspect remote parquet footers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' 2>&1 | tee aliplayer-5m15m-inventory.log
+          import json, os, requests
+          from pathlib import Path
+          repo='aliplayer1/polymarket-crypto-updown'
+          rev='ba1ad37cbcdd720cced20f1cdc97c2cf347cad6c'
+          r=requests.get(f'https://huggingface.co/api/datasets/{repo}',params={'blobs':'true'},timeout=180)
+          r.raise_for_status(); info=r.json()
+          assert info.get('sha')==rev,(info.get('sha'),rev)
+          exact=[]
+          wanted=[]
+          for tf in ('5-minute','15-minute'):
+              for family in ('prices','ticks','orderbook'):
+                  wanted.append(f'data/{family}/crypto=BTC/timeframe={tf}/part-0.parquet')
+          wanted += ['data/markets.parquet','data/spot_prices/part-0.parquet']
+          siblings={x.get('rfilename'):x for x in info.get('siblings',[])}
+          for path in wanted:
+              x=siblings.get(path)
+              exact.append({'path':path,'found':bool(x),'size':(x or {}).get('size'),'blob_id':(x or {}).get('blobId'),'lfs':(x or {}).get('lfs')})
+          out={'repo':repo,'revision':rev,'files':exact,'sibling_count':len(siblings)}
+          Path('aliplayer-5m15m-inventory.json').write_text(json.dumps(out,indent=2))
+          print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliplayer-5m15m-inventory
+          path: |
+            aliplayer-5m15m-inventory.json
+            aliplayer-5m15m-inventory.log
+          retention-days: 30
