@@ -112,15 +112,7 @@ jobs:
       - name: Install pinned research stack
         run: |
           python -m pip install --upgrade pip
-          python -m pip install \
-            numpy==2.2.6 \
-            pandas==2.2.3 \
-            scipy==1.15.3 \
-            scikit-learn==1.6.1 \
-            pyarrow==19.0.1 \
-            requests==2.32.3 \
-            pytest==8.3.5 \
-            tabulate==0.9.0
+          python -m pip install numpy==2.2.6 pandas==2.2.3 scipy==1.15.3 scikit-learn==1.6.1 pyarrow==19.0.1 requests==2.32.3 pytest==8.3.5 tabulate==0.9.0
 
       - name: Compile and run complete verified suite
         working-directory: trading-tools
@@ -131,18 +123,63 @@ jobs:
           pytest tests/digital_surface -q
 
       - name: Run six-block cross-source rolling-origin research
+        id: research
+        continue-on-error: true
         working-directory: trading-tools
         env:
           PYTHONPATH: '.'
         shell: bash
         run: |
           set -o pipefail
-          python -m research.digital_surface.run_research \
-            --cache-dir .cache/digital-surface \
-            --output-dir artifacts/digital-surface-arbitrage \
-            2>&1 | tee digital-surface-arbitrage.log
+          python -m research.digital_surface.run_research --cache-dir .cache/digital-surface --output-dir artifacts/digital-surface-arbitrage 2>&1 | tee digital-surface-arbitrage.log
+
+      - name: Diagnose immutable Obadiaha interval alignment after gate failure
+        if: steps.research.outcome == 'failure'
+        working-directory: trading-tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/digital-surface-arbitrage
+          python - <<'PY'
+          import json, re
+          from pathlib import Path
+          import numpy as np, pandas as pd
+          root=Path('.cache/digital-surface/obadiaha')
+          mk=pd.read_parquet(root/'markets/all.parquet')
+          rs=pd.read_parquet(root/'resolutions/all.parquet')
+          sp=pd.concat([pd.read_parquet(root/f'crypto_prices/{d:%Y-%m-%d}.parquet',columns=['timestamp','asset','open','close']) for d in pd.date_range('2026-03-06','2026-03-19')],ignore_index=True)
+          w=mk.copy(); w['asset']=w.asset.astype(str).str.upper(); w=w[(w.asset=='BTC')&w.market_type.isin(['crypto_5m','crypto_15m'])].copy()
+          w['start_dt']=pd.to_datetime(w.start_time,utc=True); w['end_dt']=pd.to_datetime(w.end_time,utc=True)
+          w=w[w.start_dt.between(pd.Timestamp('2026-03-06',tz='UTC'),pd.Timestamp('2026-03-20',tz='UTC'),inclusive='left')]
+          rs=rs[['condition_id','outcome']].copy(); rs['condition_id']=rs.condition_id.astype(str); w['condition_id']=w.condition_id.astype(str); w=w.merge(rs,on='condition_id')
+          sp=sp[sp.asset.astype(str).str.upper().eq('BTC')].copy(); sp['dt']=pd.to_datetime(sp.timestamp,utc=True); sp=sp.sort_values('dt').drop_duplicates('dt',keep='last')
+          def epoch(v):
+              z=re.search(r'(\d{10,13})(?:\D*)$',str(v))
+              if not z:return pd.NaT
+              n=int(z.group(1));return pd.to_datetime(n,unit='ms' if n>10**11 else 's',utc=True)
+          w['slug_dt']=w.slug.map(epoch); w['market_id_dt']=w.market_id.map(epoch); w['duration_s']=w.market_type.map({'crypto_5m':300,'crypto_15m':900})
+          def vals(times,col,minus_ms=0):
+              q=pd.DataFrame({'i':np.arange(len(w)),'q':pd.to_datetime(times,utc=True)-pd.Timedelta(milliseconds=minus_ms)}).dropna().sort_values('q')
+              r=pd.merge_asof(q,sp[['dt',col]].sort_values('dt'),left_on='q',right_on='dt',direction='backward',tolerance=pd.Timedelta('2min')).sort_values('i')
+              out=np.full(len(w),np.nan); out[r.i.astype(int)]=r[col].to_numpy(); return out
+          starts={'field':w.start_dt,'slug':w.slug_dt,'market_id':w.market_id_dt}
+          ends={'field':w.end_dt,'start_plus_duration':w.start_dt+pd.to_timedelta(w.duration_s,unit='s'),'slug_plus_duration':w.slug_dt+pd.to_timedelta(w.duration_s,unit='s'),'market_id_plus_duration':w.market_id_dt+pd.to_timedelta(w.duration_s,unit='s')}
+          recorded=w.outcome.eq('Up').to_numpy(); results=[]
+          for sn,st in starts.items():
+              strike=vals(st,'open')
+              for en,et in ends.items():
+                  for mode,minus in [('before',1),('at_timestamp',0)]:
+                      final=vals(et,'close',minus); ok=np.isfinite(strike)&np.isfinite(final); pred=final>=strike
+                      results.append({'start':sn,'end':en,'close':mode,'agreement':float((pred[ok]==recorded[ok]).mean()) if ok.any() else None,'valid':int(ok.sum())})
+          results.sort(key=lambda x:-(x['agreement'] or -1))
+          deltas={c:(w[c]-w.start_dt).dt.total_seconds().describe().to_dict() for c in ['slug_dt','market_id_dt']}
+          sample=w[['market_id','slug','market_type','start_time','end_time','outcome']].head(30).astype(str).to_dict('records')
+          payload={'market_columns':mk.columns.tolist(),'resolution_columns':rs.columns.tolist(),'rows':len(w),'outcomes':w.outcome.value_counts().to_dict(),'timestamp_deltas_seconds':deltas,'results':results,'sample':sample}
+          out=Path('artifacts/digital-surface-arbitrage/ALIGNMENT_DIAGNOSTIC.json'); out.write_text(json.dumps(payload,indent=2,default=str)); print(json.dumps(payload,indent=2,default=str))
+          PY
 
       - name: Verify every generated artifact checksum
+        if: steps.research.outcome == 'success'
         working-directory: trading-tools
         shell: bash
         run: |
@@ -155,17 +192,16 @@ jobs:
           for name,want in expected.items():
               got=hashlib.sha256((root/name).read_bytes()).hexdigest()
               assert got==want,(name,got,want)
-          assert (root/'REPORT.md').exists()
-          assert (root/'admission.json').exists()
-          assert (root/'SOURCE_AUDIT.json').exists()
+          assert (root/'REPORT.md').exists() and (root/'admission.json').exists() and (root/'SOURCE_AUDIT.json').exists()
           print(f'verified {len(expected)} internal checksums')
           PY
 
-      - name: Show final classification
+      - name: Show result or diagnostic
         if: always()
         working-directory: trading-tools
         run: |
           cat artifacts/digital-surface-arbitrage/admission.json || true
+          cat artifacts/digital-surface-arbitrage/ALIGNMENT_DIAGNOSTIC.json || true
           tail -300 digital-surface-arbitrage.log || true
 
       - uses: actions/upload-artifact@v4
@@ -182,3 +218,7 @@ jobs:
             final-recovered-source.tar.gz
           if-no-files-found: warn
           retention-days: 30
+
+      - name: Enforce untouched research success
+        if: steps.research.outcome == 'failure'
+        run: exit 1
