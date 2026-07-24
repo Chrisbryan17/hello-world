@@ -1,0 +1,142 @@
+name: CollapseCAD Phase 2C Local R1 Verification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".collapsecad-phase2c/weld-gusset-r1.tar.xz.b64"
+      - ".github/workflows/collapsecad-phase2c-local-r1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  local-r1:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify source, base decks, and R1 overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .collapsecad-phase2c/base-decks.part-*.b64 > .collapsecad-phase2c/base-decks.reassembled.b64
+          python - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, io, tarfile
+          root = Path.cwd().resolve()
+          archives = (
+              ('generator.tar.xz.b64', '6b76fcc6df48e117fe061e97af498a3aacf3ee4021773db6ec7cdab02fc9d757'),
+              ('base-decks.reassembled.b64', '29e79fb693277f848365903d2ebf1a9b8278597bdb8a52a59a6453f5ef3395b1'),
+              ('weld-gusset-r1.tar.xz.b64', '6d26195e4508edcff6ce97c2300d6051225793b78a59ff06877ebe6869ffc63d'),
+          )
+          for name, expected in archives:
+              payload = base64.b64decode(''.join((Path('.collapsecad-phase2c') / name).read_text().split()), validate=True)
+              actual = hashlib.sha256(payload).hexdigest()
+              if actual != expected:
+                  raise SystemExit(f'{name}: {actual} != {expected}')
+              with tarfile.open(fileobj=io.BytesIO(payload), mode='r:xz') as archive:
+                  for member in archive.getmembers():
+                      target = (root / member.name).resolve()
+                      if root != target and root not in target.parents:
+                          raise SystemExit(f'unsafe archive member: {member.name}')
+                  archive.extractall(root)
+              print(f'{name}: verified {actual}')
+          PY
+
+      - name: Generate and verify the corrected local decks
+        working-directory: phase2c-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python scripts/generate_global_phase2c_decks.py
+          PYTHONPATH=src python scripts/generate_submodels.py
+          test "$(find build/decks/local -name '*.inp' -type f | wc -l)" -eq 5
+          grep -q 'GUSSET_PLATES=2' build/decks/local/weld_toe_t_joint.inp
+          grep -q 'GUSSET_NOMINAL_T=15' build/decks/local/weld_toe_t_joint.inp
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          data = json.loads(Path('build/decks/submodel_manifest.json').read_text())
+          assert len(data['records']) == 5
+          for record in data['records']:
+              path = Path(record['path'])
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == record['sha256']
+          print('5/5 corrected local deck hashes verified')
+          PY
+
+      - name: Install checksum-pinned CalculiX 2.23
+        working-directory: phase2c-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/ccx-runtime build/compat-runtime
+          curl --fail --location --retry 5 --retry-delay 3 -o build/ccx.tar.bz2 https://dhondt.de/ccx_2.23.tar.bz2
+          echo '35d426fed5eb164fbbaaafa20819d13d22e30bc2b9bc9c6c4ed957e9468355dd  build/ccx.tar.bz2' | sha256sum --check --strict
+          tar -xjf build/ccx.tar.bz2 -C build/ccx-runtime
+          CCX_BIN="$(find "$PWD/build/ccx-runtime" -type f -name 'ccx_2.23*' -perm -111 | head -n 1)"
+          curl --fail --location --retry 5 --retry-delay 3 -o build/libgfortran4.deb https://archive.ubuntu.com/ubuntu/pool/main/g/gcc-7/libgfortran4_7.5.0-3ubuntu1~18.04_amd64.deb
+          echo 'f89b2473bc251ba0c8eb9479ad31d5f96019e2ea1f8be466beea3a68b11b19fc  build/libgfortran4.deb' | sha256sum --check --strict
+          dpkg-deb -x build/libgfortran4.deb build/compat-runtime
+          COMPAT_LIB="$(find "$PWD/build/compat-runtime" -type f -name 'libgfortran.so.4*' -printf '%h\n' | head -n 1)"
+          echo "CCX_BIN=$CCX_BIN" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$COMPAT_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          LD_LIBRARY_PATH="$COMPAT_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd "$CCX_BIN" | tee build/ccx-ldd.txt
+          ! grep -q 'not found' build/ccx-ldd.txt
+
+      - name: Run all five corrected local solid models
+        working-directory: phase2c-src
+        shell: bash
+        run: |
+          cat > scripts/run_local_r1.py <<'PY'
+          from __future__ import annotations
+          import hashlib, json, os, shutil, subprocess
+          from pathlib import Path
+          from run_phase2c_suite import ROOT, cases
+          from collapsecad_phase2c.results import classify_case, write_manifest
+
+          ccx = Path(os.environ['CCX_BIN']).resolve()
+          selected = [case for case in cases() if case['variant'] == 'local']
+          assert len(selected) == 5
+          records = []
+          for case in selected:
+              input_path = ROOT / case['input']
+              assert hashlib.sha256(input_path.read_bytes()).hexdigest() == case['input_sha256']
+              run_dir = ROOT / 'build/solver/local' / case['case']
+              run_dir.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(input_path, run_dir / 'job.inp')
+              with (run_dir / 'job.log').open('w') as log:
+                  result = subprocess.run([str(ccx), 'job'], cwd=run_dir, env=os.environ.copy(), stdout=log, stderr=subprocess.STDOUT, timeout=1200)
+              record = classify_case(case, run_dir, result.returncode)
+              records.append(record)
+              print(json.dumps(record, sort_keys=True), flush=True)
+          manifest = write_manifest(records, ROOT / 'build/solver_manifest-local-r1.json')
+          print(json.dumps({key: manifest[key] for key in ('record_count','passed_count','all_passed')}, indent=2))
+          raise SystemExit(0 if manifest['all_passed'] else 1)
+          PY
+          set +e
+          PYTHONPATH=src:scripts python scripts/run_local_r1.py > build/local-r1.log 2>&1
+          STATUS=$?
+          cat build/local-r1.log
+          exit "$STATUS"
+
+      - name: Upload local R1 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collapsecad-phase2c-local-r1-evidence
+          path: |
+            phase2c-src/build/decks/local
+            phase2c-src/build/decks/submodel_manifest.json
+            phase2c-src/build/solver/local
+            phase2c-src/build/solver_manifest-local-r1.json
+            phase2c-src/build/local-r1.log
+            phase2c-src/build/ccx-ldd.txt
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 30
