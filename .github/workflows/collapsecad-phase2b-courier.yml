@@ -48,7 +48,7 @@ jobs:
                   target = (root / member.name).resolve()
                   if root != target and root not in target.parents:
                       raise SystemExit(f'unsafe archive path: {member.name}')
-              archive.extractall(root, filter='data')
+              archive.extractall(root)
           print(f'payload verified: sha256={actual}')
           PY
 
