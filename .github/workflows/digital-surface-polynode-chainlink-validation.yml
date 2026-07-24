@@ -1,0 +1,104 @@
+name: Digital Surface PolyNode Chainlink Validation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/digital-surface-polynode-chainlink-validation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Generate ephemeral key and validate historical windows
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p polynode-chainlink-validation
+          python - <<'PY'
+          import hashlib, json, os, time
+          from pathlib import Path
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+          from urllib.error import HTTPError
+
+          OUT=Path('polynode-chainlink-validation')
+          BASE='https://api.polynode.dev'
+
+          def request(method,path,params=None,body=None,key=None):
+              url=BASE+path
+              if params: url+='?'+urlencode(params)
+              headers={'User-Agent':'trading-tools-digital-surface-research/1.0','Accept':'application/json'}
+              if body is not None: headers['Content-Type']='application/json'
+              if key: headers['x-api-key']=key
+              req=Request(url,data=(json.dumps(body).encode() if body is not None else None),headers=headers,method=method)
+              row={'url':url,'method':method}
+              try:
+                  with urlopen(req,timeout=60) as r:
+                      b=r.read(); row.update(status=r.status,bytes=len(b),sha256=hashlib.sha256(b).hexdigest(),body=b.decode('utf-8','replace'))
+              except HTTPError as e:
+                  b=e.read(); row.update(status=e.code,bytes=len(b),sha256=hashlib.sha256(b).hexdigest(),body=b.decode('utf-8','replace'))
+              except Exception as e: row['error']=repr(e)
+              return row
+
+          create=request('POST','/v1/keys',body={'name':'digital-surface-one-shot-audit'})
+          key=None
+          try: key=json.loads(create.get('body','')).get('api_key')
+          except Exception: pass
+          if key:
+              print(f'::add-mask::{key}')
+          public_create={k:v for k,v in create.items() if k!='body'}
+          if not key:
+              public_create['response_body']=create.get('body','')
+
+          cases=[
+              {'epoch':1772755200,'interval':'5m','known_open':71053.021084545,'known_close':71059.391394499,'label':'covered_control_5m'},
+              {'epoch':1773028500,'interval':'5m','known_open':None,'known_close':None,'label':'missing_start_5m'},
+              {'epoch':1773050000,'interval':'5m','known_open':None,'known_close':None,'label':'missing_middle_5m'},
+              {'epoch':1773070800,'interval':'5m','known_open':None,'known_close':None,'label':'missing_end_5m'},
+              {'epoch':1773028800,'interval':'15m','known_open':None,'known_close':None,'label':'missing_start_15m'},
+          ]
+          results=[]
+          if key:
+              for case in cases:
+                  price=request('GET','/v1/crypto/price',{'symbol':'BTC','window':case['epoch'],'interval':case['interval']},key=key)
+                  tick=request('GET','/v1/crypto/ticks',{
+                      'symbol':'BTC','from':case['epoch']*1000-5000,'to':case['epoch']*1000+5000,
+                      'limit':100,'source':'polymarket_chainlink',
+                  },key=key)
+                  results.append({**case,'price':price,'ticks':tick})
+                  time.sleep(0.25)
+
+          safe={'key_create':public_create,'key_created':bool(key),'results':results}
+          (OUT/'responses.json').write_text(json.dumps(safe,indent=2),encoding='utf-8')
+          summary=[]
+          for row in results:
+              def parsed(resp):
+                  try:return json.loads(resp.get('body',''))
+                  except Exception:return resp.get('body','')[:1000]
+              summary.append({
+                  'label':row['label'],'epoch':row['epoch'],'interval':row['interval'],
+                  'known_open':row['known_open'],'known_close':row['known_close'],
+                  'price_status':row['price'].get('status'),'price':parsed(row['price']),
+                  'ticks_status':row['ticks'].get('status'),'ticks':parsed(row['ticks']),
+              })
+          final={'key_create':public_create,'key_created':bool(key),'cases':summary}
+          (OUT/'summary.json').write_text(json.dumps(final,indent=2),encoding='utf-8')
+          print(json.dumps(final,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-polynode-chainlink-validation
+          path: polynode-chainlink-validation/
+          if-no-files-found: error
+          retention-days: 14
