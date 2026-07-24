@@ -64,6 +64,7 @@ jobs:
           extract('payload.tar.xz.b64', '1fee21128f75726df0b3e28cd865afeef2c256f9852f149d8304b7278a34f83e')
           extract('r2-fixes.tar.xz.b64', '285cd7077ee10bc5e326d86751568f8171600160cbc52dee8e2e91f1477b0111')
           extract('r3-beam-order.tar.xz.b64', '238a02e5b6b7b17f65124122be8a02c48bce03bcfe89babc33dc7a9c470606cd')
+          extract('r4-elastic-buckle.tar.xz.b64', 'bb7215d64731caf9b9a3a8f96b55aae9c0c93bd333a2dec6e332d6c5eb2d4fec')
           PY
           STATUS=$?
           cat .collapsecad-phase2b/diagnostics/extraction.log
