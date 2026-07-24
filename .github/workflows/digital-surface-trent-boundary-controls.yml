@@ -1,0 +1,137 @@
+name: Digital Surface Trent Boundary Controls
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/digital-surface-trent-boundary-controls.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install huggingface_hub==0.34.4 pandas==2.2.3 pyarrow==19.0.1 numpy==2.2.6
+      - name: Validate previous-episode close against official PTB
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p trent-boundary-controls/files
+          python - <<'PY'
+          from __future__ import annotations
+          import hashlib, json, re
+          from datetime import datetime, timezone, timedelta
+          from pathlib import Path
+          import numpy as np
+          import pandas as pd
+          from huggingface_hub import HfApi, hf_hub_download
+
+          OUT=Path('trent-boundary-controls')
+          REPO='trentmkelly/polymarket_crypto_derivatives'
+          official={
+              1772755200:70888.56020229173,
+              1772755800:70938.78987331357,
+              1772756400:71017.35732058427,
+              1772757000:70917.12393639315,
+              1772757600:70939.64770257795,
+              1772758200:70927.42075552029,
+              1772758800:70987.03812254872,
+              1772759400:70905.73111679299,
+              1772760000:70860.5774747142,
+              1772760600:70463.60742361813,
+              1772761200:71004.69651270959,
+              1772761800:71161.7874144923,
+          }
+          def token(epoch):
+              return datetime.fromtimestamp(epoch,tz=timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
+          previous_tokens={token(e-300):e for e in official}
+          api=HfApi(); selected={}; scanned=0
+          for item in api.list_repo_tree(REPO,repo_type='dataset',recursive=True,expand=False):
+              path=getattr(item,'path',''); scanned+=1
+              if not path.startswith('btc5m_') or not path.endswith('/steps.parquet'): continue
+              for t,e in previous_tokens.items():
+                  if t in path:
+                      selected[e]=path
+                      break
+          missing=sorted(set(official)-set(selected))
+          print(f'scanned={scanned} selected={len(selected)} missing={missing}',flush=True)
+          if missing: raise RuntimeError(f'missing prior episode files: {missing}')
+
+          def norm_ts(s):
+              x=pd.to_numeric(s,errors='coerce').to_numpy(float)
+              f=x[np.isfinite(x)]
+              if not len(f): return x
+              m=float(np.nanmedian(np.abs(f)))
+              if m>1e17:return x/1e9
+              if m>1e14:return x/1e6
+              if m>1e11:return x/1e3
+              return x
+
+          rows=[]
+          for epoch,path in sorted(selected.items()):
+              local=Path(hf_hub_download(REPO,path,repo_type='dataset',local_dir=OUT/'files'))
+              df=pd.read_parquet(local,columns=['ts','chainlink_price','binance_price'])
+              ts=norm_ts(df.ts); px=pd.to_numeric(df.chainlink_price,errors='coerce').to_numpy(float)
+              ok=np.isfinite(ts)&np.isfinite(px)&(px>0);ts=ts[ok];px=px[ok]
+              o=np.argsort(ts,kind='stable');ts=ts[o];px=px[o]
+              want=official[epoch]
+              before_idx=np.where(ts<=epoch)[0]
+              after_idx=np.where(ts>=epoch)[0]
+              before=None if not len(before_idx) else int(before_idx[-1])
+              after=None if not len(after_idx) else int(after_idx[0])
+              nearest=int(np.argmin(np.abs(ts-epoch))) if len(ts) else None
+              within=np.where(np.abs(ts-epoch)<=60)[0]
+              best=None
+              if len(within):
+                  j=int(within[np.argmin(np.abs(px[within]-want))])
+                  best={'ts':float(ts[j]),'delta_s':float(ts[j]-epoch),'price':float(px[j]),'abs_error':float(abs(px[j]-want))}
+              def point(i):
+                  if i is None:return None
+                  return {'ts':float(ts[i]),'delta_s':float(ts[i]-epoch),'price':float(px[i]),'abs_error':float(abs(px[i]-want))}
+              rows.append({
+                  'boundary_epoch':epoch,'boundary_utc':datetime.fromtimestamp(epoch,tz=timezone.utc).isoformat(),
+                  'official_ptb':want,'path':path,'file_sha256':hashlib.sha256(local.read_bytes()).hexdigest(),
+                  'file_rows':int(len(df)),'valid_rows':int(len(ts)),'ts_min':float(ts.min()),'ts_max':float(ts.max()),
+                  'last_before_or_at':point(before),'first_after_or_at':point(after),'nearest':point(nearest),
+                  'best_price_match_within_60s':best,
+              })
+          metrics={}
+          for method in ['last_before_or_at','first_after_or_at','nearest','best_price_match_within_60s']:
+              vals=[r[method] for r in rows if r[method] is not None]
+              metrics[method]={
+                  'count':len(vals),
+                  'max_abs_error':max((x['abs_error'] for x in vals),default=None),
+                  'median_abs_error':float(np.median([x['abs_error'] for x in vals])) if vals else None,
+                  'max_abs_time_delta_s':max((abs(x['delta_s']) for x in vals),default=None),
+                  'median_time_delta_s':float(np.median([x['delta_s'] for x in vals])) if vals else None,
+                  'within_cent':sum(x['abs_error']<=0.01 for x in vals),
+                  'within_dollar':sum(x['abs_error']<=1.0 for x in vals),
+              }
+          decision={
+              'repo':REPO,'controls':len(rows),'metrics':metrics,
+              'settlement_grade':bool(metrics['last_before_or_at']['count']==len(rows) and metrics['last_before_or_at']['max_abs_error']<=0.01),
+              'gap_values_admitted':False,
+              'admission_rule':'must reproduce every official PTB control to <= $0.01 using one fixed causal boundary convention',
+          }
+          (OUT/'controls.json').write_text(json.dumps(rows,indent=2),encoding='utf-8')
+          (OUT/'decision.json').write_text(json.dumps(decision,indent=2),encoding='utf-8')
+          print(json.dumps(decision,indent=2),flush=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-trent-boundary-controls
+          path: trent-boundary-controls/
+          if-no-files-found: error
+          retention-days: 30
