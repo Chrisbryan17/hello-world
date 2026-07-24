@@ -25,7 +25,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Verify and extract engineering payload
+      - name: Verify base payload and solver-fix overlay
         shell: bash
         run: |
           set +e
@@ -37,30 +37,32 @@ jobs:
           import io
           import tarfile
 
-          source = Path('.collapsecad-phase2b/payload.tar.xz.b64')
-          text = source.read_text()
-          canonical_b64 = ''.join(text.split())
-          print(f'raw_text_chars={len(text)}')
-          print(f'canonical_base64_chars={len(canonical_b64)}')
-          payload = base64.b64decode(canonical_b64, validate=True)
-          actual = hashlib.sha256(payload).hexdigest()
-          expected = '1fee21128f75726df0b3e28cd865afeef2c256f9852f149d8304b7278a34f83e'
-          print(f'decoded_bytes={len(payload)}')
-          print(f'decoded_sha256={actual}')
-          if actual != expected:
-              raise SystemExit(f'payload checksum mismatch: {actual} != {expected}')
-
           root = Path.cwd().resolve()
-          with tarfile.open(fileobj=io.BytesIO(payload), mode='r:xz') as archive:
-              members = archive.getmembers()
-              print(f'archive_members={len(members)}')
-              for member in members:
-                  print(f'member={member.name}')
-                  target = (root / member.name).resolve()
-                  if root != target and root not in target.parents:
-                      raise SystemExit(f'unsafe archive path: {member.name}')
-              archive.extractall(root)
-          print(f'payload verified: sha256={actual}')
+
+          def extract(name: str, expected: str) -> None:
+              source = Path('.collapsecad-phase2b') / name
+              text = source.read_text()
+              canonical_b64 = ''.join(text.split())
+              payload = base64.b64decode(canonical_b64, validate=True)
+              actual = hashlib.sha256(payload).hexdigest()
+              print(f'{name}: raw_text_chars={len(text)}')
+              print(f'{name}: canonical_base64_chars={len(canonical_b64)}')
+              print(f'{name}: decoded_bytes={len(payload)}')
+              print(f'{name}: decoded_sha256={actual}')
+              if actual != expected:
+                  raise SystemExit(f'{name} checksum mismatch: {actual} != {expected}')
+              with tarfile.open(fileobj=io.BytesIO(payload), mode='r:xz') as archive:
+                  members = archive.getmembers()
+                  print(f'{name}: archive_members={len(members)}')
+                  for member in members:
+                      target = (root / member.name).resolve()
+                      if root != target and root not in target.parents:
+                          raise SystemExit(f'unsafe archive path: {member.name}')
+                  archive.extractall(root)
+              print(f'{name}: verified and extracted')
+
+          extract('payload.tar.xz.b64', '1fee21128f75726df0b3e28cd865afeef2c256f9852f149d8304b7278a34f83e')
+          extract('r2-fixes.tar.xz.b64', '285cd7077ee10bc5e326d86751568f8171600160cbc52dee8e2e91f1477b0111')
           PY
           STATUS=$?
           cat .collapsecad-phase2b/diagnostics/extraction.log
@@ -75,13 +77,15 @@ jobs:
           PYTHONPATH=src python scripts/generate_fem_decks.py
           test "$(find build/decks -type f -name '*.inp' | wc -l)" -eq 16
 
-      - name: Install official CalculiX 2.23 executable and compatibility runtime
+      - name: Install checksum-pinned CalculiX and compatibility runtime
         working-directory: collapsecad-phase2b-courier
         shell: bash
         run: |
           mkdir -p build build/ccx-runtime build/compat-runtime
           curl --fail --location --retry 5 --retry-delay 3 \
             --output build/ccx_2.23.tar.bz2 https://dhondt.de/ccx_2.23.tar.bz2
+          echo '35d426fed5eb164fbbaaafa20819d13d22e30bc2b9bc9c6c4ed957e9468355dd  build/ccx_2.23.tar.bz2' \
+            | sha256sum --check --strict
           sha256sum build/ccx_2.23.tar.bz2 | tee build/ccx_2.23-download.sha256
           tar -xjf build/ccx_2.23.tar.bz2 -C build/ccx-runtime
           CCX_BIN="$(find "$PWD/build/ccx-runtime" -type f -name 'ccx_2.23*' -perm -111 | head -n 1)"
@@ -90,6 +94,8 @@ jobs:
           curl --fail --location --retry 5 --retry-delay 3 \
             --output build/libgfortran4_7.5.0-3ubuntu1~18.04_amd64.deb \
             https://archive.ubuntu.com/ubuntu/pool/main/g/gcc-7/libgfortran4_7.5.0-3ubuntu1~18.04_amd64.deb
+          echo 'f89b2473bc251ba0c8eb9479ad31d5f96019e2ea1f8be466beea3a68b11b19fc  build/libgfortran4_7.5.0-3ubuntu1~18.04_amd64.deb' \
+            | sha256sum --check --strict
           sha256sum build/libgfortran4_7.5.0-3ubuntu1~18.04_amd64.deb \
             | tee build/libgfortran4-download.sha256
           dpkg-deb -x build/libgfortran4_7.5.0-3ubuntu1~18.04_amd64.deb build/compat-runtime
@@ -101,7 +107,6 @@ jobs:
           LD_LIBRARY_PATH="$COMPAT_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd "$CCX_BIN" \
             | tee build/ccx-ldd.txt
           ! grep -q 'not found' build/ccx-ldd.txt
-          LD_LIBRARY_PATH="$COMPAT_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$CCX_BIN" -v || true
 
       - name: Run nonlinear, buckling, floor, racking, and contact suite
         working-directory: collapsecad-phase2b-courier
