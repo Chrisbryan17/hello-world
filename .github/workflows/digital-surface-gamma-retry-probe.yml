@@ -1,0 +1,75 @@
+name: Digital Surface Gamma Retry Probe
+
+on:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/digital-surface-gamma-retry-probe.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Retry missing Gamma events sequentially
+        run: |
+          python - <<'PY'
+          import json, time
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+          slugs = [
+            'btc-updown-5m-1773028500',
+            'btc-updown-5m-1773030000',
+            'btc-updown-5m-1773042000',
+            'btc-updown-15m-1773027900',
+            'btc-updown-15m-1773030600',
+            'btc-updown-15m-1773069900',
+          ]
+          rows=[]
+          for slug in slugs:
+            url=f'https://gamma-api.polymarket.com/events/slug/{slug}'
+            row={'slug':slug,'url':url,'attempts':[]}
+            for attempt in range(6):
+              try:
+                req=Request(url,headers={'User-Agent':'trading-tools-research/1.0','Accept':'application/json'})
+                with urlopen(req,timeout=30) as response:
+                  body=response.read().decode('utf-8','replace')
+                  data=json.loads(body)
+                  markets=data.get('markets') or []
+                  market=next((m for m in markets if str(m.get('slug'))==slug), markets[0] if markets else {})
+                  row.update({
+                    'status':response.status,
+                    'bytes':len(body.encode()),
+                    'event_id':data.get('id'),
+                    'event_metadata':data.get('eventMetadata'),
+                    'condition_id':market.get('conditionId'),
+                    'outcomes':market.get('outcomes'),
+                    'outcome_prices':market.get('outcomePrices'),
+                    'market_slug':market.get('slug'),
+                  })
+                  break
+              except Exception as exc:
+                row['attempts'].append(repr(exc))
+                time.sleep(min(2**attempt,10))
+            rows.append(row)
+            time.sleep(1.25)
+          Path('gamma-retry-probe.json').write_text(json.dumps(rows,indent=2))
+          print(json.dumps(rows,indent=2))
+          assert all(row.get('status')==200 for row in rows), rows
+          assert all((row.get('event_metadata') or {}).get('priceToBeat') is not None for row in rows), rows
+          assert all(row.get('condition_id') for row in rows), rows
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-gamma-retry-probe
+          path: gamma-retry-probe.json
+          if-no-files-found: warn
+          retention-days: 14
