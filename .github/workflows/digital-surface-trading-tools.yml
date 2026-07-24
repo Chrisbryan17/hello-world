@@ -32,7 +32,6 @@ jobs:
         run: |
           set -euo pipefail
           cat ci_payload/digital-surface/chunk-* > digital-surface-execution-snapshot.tar.gz.b64
-          echo '05d9e149cbea4136e83d2d3899c200c5e0fae98bf5f0e3ef6ae1e1c41833f41a  digital-surface-execution-snapshot.tar.gz.b64' | sha256sum -c -
           base64 --decode digital-surface-execution-snapshot.tar.gz.b64 > digital-surface-execution-snapshot.tar.gz
           echo 'e2a181ac3966e7bb1f786c4fab854294ae96449dc19c7a51bb83814728ec1330  digital-surface-execution-snapshot.tar.gz' | sha256sum -c -
           mkdir trading-tools
