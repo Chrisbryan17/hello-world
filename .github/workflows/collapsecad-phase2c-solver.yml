@@ -1,0 +1,229 @@
+name: CollapseCAD Phase 2C Solver Campaign
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".collapsecad-phase2c/**"
+      - ".github/workflows/collapsecad-phase2c-solver.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  solver:
+    name: solver-${{ matrix.group }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [20std, 40std, 40hc, local]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify and extract immutable generator
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, io, tarfile
+          source = Path('.collapsecad-phase2c/generator.tar.xz.b64')
+          payload = base64.b64decode(''.join(source.read_text().split()), validate=True)
+          expected = '6b76fcc6df48e117fe061e97af498a3aacf3ee4021773db6ec7cdab02fc9d757'
+          actual = hashlib.sha256(payload).hexdigest()
+          if actual != expected:
+              raise SystemExit(f'generator checksum mismatch: {actual} != {expected}')
+          root = Path.cwd().resolve()
+          with tarfile.open(fileobj=io.BytesIO(payload), mode='r:xz') as archive:
+              for member in archive.getmembers():
+                  target = (root / member.name).resolve()
+                  if root != target and root not in target.parents:
+                      raise SystemExit(f'unsafe archive member: {member.name}')
+              archive.extractall(root)
+          print(f'generator verified: sha256={actual}')
+          PY
+
+      - name: Generate and checksum all twenty decks
+        working-directory: phase2c-src
+        shell: bash
+        run: |
+          python -m compileall -q src scripts
+          PYTHONPATH=src python scripts/generate_global_phase2c_decks.py
+          PYTHONPATH=src python scripts/generate_submodels.py
+          test "$(find build/decks -type f -name '*.inp' | wc -l)" -eq 20
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          records = []
+          for name in ('global_manifest.json', 'submodel_manifest.json'):
+              data = json.loads((Path('build/decks') / name).read_text())
+              records.extend(data['records'])
+          assert len(records) == 20
+          for row in records:
+              path = Path(row['path'])
+              actual = hashlib.sha256(path.read_bytes()).hexdigest()
+              assert actual == row['sha256'], (path, actual, row['sha256'])
+          print('20/20 deck hashes verified')
+          PY
+
+      - name: Install checksum-pinned CalculiX 2.23 runtime
+        working-directory: phase2c-src
+        shell: bash
+        run: |
+          mkdir -p build/ccx-runtime build/compat-runtime
+          curl --fail --location --retry 5 --retry-delay 3 \
+            --output build/ccx_2.23.tar.bz2 https://dhondt.de/ccx_2.23.tar.bz2
+          echo '35d426fed5eb164fbbaaafa20819d13d22e30bc2b9bc9c6c4ed957e9468355dd  build/ccx_2.23.tar.bz2' | sha256sum --check --strict
+          tar -xjf build/ccx_2.23.tar.bz2 -C build/ccx-runtime
+          CCX_BIN="$(find "$PWD/build/ccx-runtime" -type f -name 'ccx_2.23*' -perm -111 | head -n 1)"
+          test -n "$CCX_BIN"
+          curl --fail --location --retry 5 --retry-delay 3 \
+            --output build/libgfortran4.deb \
+            https://archive.ubuntu.com/ubuntu/pool/main/g/gcc-7/libgfortran4_7.5.0-3ubuntu1~18.04_amd64.deb
+          echo 'f89b2473bc251ba0c8eb9479ad31d5f96019e2ea1f8be466beea3a68b11b19fc  build/libgfortran4.deb' | sha256sum --check --strict
+          dpkg-deb -x build/libgfortran4.deb build/compat-runtime
+          COMPAT_LIB="$(find "$PWD/build/compat-runtime" -type f -name 'libgfortran.so.4*' -printf '%h\n' | head -n 1)"
+          test -n "$COMPAT_LIB"
+          echo "CCX_BIN=$CCX_BIN" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$COMPAT_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          LD_LIBRARY_PATH="$COMPAT_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd "$CCX_BIN" | tee build/ccx-ldd.txt
+          ! grep -q 'not found' build/ccx-ldd.txt
+          sha256sum build/ccx_2.23.tar.bz2 build/libgfortran4.deb > build/runtime-SHA256SUMS.txt
+
+      - name: Build group runner
+        working-directory: phase2c-src
+        shell: bash
+        run: |
+          cat > scripts/run_group.py <<'PY'
+          from __future__ import annotations
+          import argparse, hashlib, json, os, shutil, subprocess
+          from pathlib import Path
+          from run_phase2c_suite import ROOT, cases
+          from collapsecad_phase2c.results import classify_case, write_manifest
+
+          ap = argparse.ArgumentParser()
+          ap.add_argument('--ccx', required=True)
+          ap.add_argument('--group', required=True)
+          ap.add_argument('--timeout', type=int, default=1500)
+          args = ap.parse_args()
+          selected = [c for c in cases() if c['variant'] == args.group]
+          if len(selected) != 5:
+              raise SystemExit(f'expected five cases for {args.group}, got {len(selected)}')
+          records = []
+          outroot = ROOT / 'build' / 'solver'
+          outroot.mkdir(parents=True, exist_ok=True)
+          for case in selected:
+              inp = ROOT / case['input']
+              actual = hashlib.sha256(inp.read_bytes()).hexdigest()
+              if actual != case['input_sha256']:
+                  raise SystemExit(f"input checksum mismatch: {case['name']}")
+              run_dir = outroot / case['variant'] / case['case']
+              run_dir.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(inp, run_dir / 'job.inp')
+              returncode = 124
+              with (run_dir / 'job.log').open('w') as log:
+                  try:
+                      proc = subprocess.run(
+                          [str(Path(args.ccx).resolve()), 'job'],
+                          cwd=run_dir,
+                          env=os.environ.copy(),
+                          stdout=log,
+                          stderr=subprocess.STDOUT,
+                          timeout=args.timeout,
+                      )
+                      returncode = proc.returncode
+                  except subprocess.TimeoutExpired:
+                      log.write(f'\nCASE TIMEOUT AFTER {args.timeout} SECONDS\n')
+              record = classify_case(case, run_dir, returncode)
+              records.append(record)
+              print(json.dumps(record, sort_keys=True), flush=True)
+          manifest = write_manifest(records, ROOT / 'build' / f'solver_manifest-{args.group}.json')
+          print(json.dumps({k: manifest[k] for k in ('record_count','passed_count','all_passed')}, indent=2))
+          raise SystemExit(0 if manifest['all_passed'] else 1)
+          PY
+
+      - name: Run five-case ${{ matrix.group }} campaign
+        working-directory: phase2c-src
+        shell: bash
+        run: |
+          set +e
+          PYTHONPATH=src:scripts python scripts/run_group.py \
+            --ccx "$CCX_BIN" --group "${{ matrix.group }}" --timeout 1500 \
+            > "build/phase2c-${{ matrix.group }}.log" 2>&1
+          STATUS=$?
+          cat "build/phase2c-${{ matrix.group }}.log"
+          exit "$STATUS"
+
+      - name: Upload ${{ matrix.group }} evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collapsecad-phase2c-${{ matrix.group }}-solver
+          path: |
+            phase2c-src/build/decks
+            phase2c-src/build/solver/${{ matrix.group }}
+            phase2c-src/build/solver_manifest-${{ matrix.group }}.json
+            phase2c-src/build/phase2c-${{ matrix.group }}.log
+            phase2c-src/build/runtime-SHA256SUMS.txt
+            phase2c-src/build/ccx-ldd.txt
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 30
+
+  aggregate:
+    name: aggregate-evidence
+    if: always()
+    needs: solver
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: collapsecad-phase2c-*-solver
+          path: combined
+          merge-multiple: true
+
+      - name: Build twenty-case manifest
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+          manifests = sorted(Path('combined').glob('solver_manifest-*.json'))
+          if len(manifests) != 4:
+              raise SystemExit(f'expected four group manifests, found {len(manifests)}')
+          records = []
+          for path in manifests:
+              data = json.loads(path.read_text())
+              records.extend(data['records'])
+          payload = {
+              'schema': 'collapsecad-phase2c-complete-solver-manifest-v1',
+              'record_count': len(records),
+              'passed_count': sum(bool(r['passed']) for r in records),
+              'all_passed': len(records) == 20 and all(bool(r['passed']) for r in records),
+              'records': records,
+          }
+          Path('combined/PHASE2C_SOLVER_MANIFEST.json').write_text(json.dumps(payload, indent=2) + '\n')
+          sums = []
+          for path in sorted(p for p in Path('combined').rglob('*') if p.is_file()):
+              sums.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to('combined')}")
+          Path('combined/SHA256SUMS.txt').write_text('\n'.join(sums) + '\n')
+          print(json.dumps({k: payload[k] for k in ('record_count','passed_count','all_passed')}, indent=2))
+          if not payload['all_passed']:
+              raise SystemExit(1)
+          PY
+
+      - name: Upload complete Phase 2C solver evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collapsecad-phase2c-complete-solver-evidence
+          path: combined
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 30
