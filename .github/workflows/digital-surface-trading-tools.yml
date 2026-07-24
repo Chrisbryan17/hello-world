@@ -5,199 +5,86 @@ on:
     branches: [digital-surface-ci-20260724]
     paths:
       - .github/workflows/digital-surface-trading-tools.yml
-      - ci_payload/digital-surface/**
-  pull_request:
-    branches: [main]
-    paths:
-      - .github/workflows/digital-surface-trading-tools.yml
-      - ci_payload/digital-surface/**
   workflow_dispatch:
 
 permissions:
   contents: read
 
 env:
-  PYTHONHASHSEED: '17'
   PYTHONUNBUFFERED: '1'
 
 jobs:
-  inventory-aliplayer:
+  inventory-obadiaha:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install --quiet pandas==2.2.3 pyarrow==19.0.1
-      - name: Fetch pinned metadata and compact market histories
+      - run: python -m pip install --quiet pandas==2.2.3 pyarrow==19.0.1 requests==2.32.3
+      - name: Pin repository and inspect exact file tree and schemas
         shell: bash
         run: |
           set -euo pipefail
-          REV='ba1ad37cbcdd720cced20f1cdc97c2cf347cad6c'
-          BASE="https://huggingface.co/datasets/aliplayer1/polymarket-crypto-updown/resolve/${REV}"
-          curl --fail --silent --show-error --location \
-            'https://huggingface.co/api/datasets/aliplayer1/polymarket-crypto-updown?blobs=true' \
-            --output repo-metadata.json
-          curl --fail --silent --show-error --location "${BASE}/data/markets.parquet" --output markets.parquet
-          curl --fail --silent --show-error --location "${BASE}/data/prices/crypto=BTC/timeframe=5-minute/part-0.parquet" --output prices-5m.parquet
-          curl --fail --silent --show-error --location "${BASE}/data/prices/crypto=BTC/timeframe=15-minute/part-0.parquet" --output prices-15m.parquet
-          echo '2cf01fea1659cc96193f2437e8b95a05429ad6bede359fe5d0193974c154219f  markets.parquet' | sha256sum -c -
-          echo '5b53b28d6c335a7b3fbbfb9305e181ed91b016fb49880ee3572b91ff987dc048  prices-5m.parquet' | sha256sum -c -
-          echo '9716b667fef381650fd29c21a63d5db23782fec36a71816401e686bd3dda98cb  prices-15m.parquet' | sha256sum -c -
-          python - <<'PY'
-          import json
+          python - <<'PY' 2>&1 | tee obadiaha-inventory.log
+          import hashlib, json, requests
           from pathlib import Path
           import pandas as pd
-          revision='ba1ad37cbcdd720cced20f1cdc97c2cf347cad6c'
-          info=json.loads(Path('repo-metadata.json').read_text())
-          assert info.get('sha')==revision,(info.get('sha'),revision)
-          wanted=[]
-          for timeframe in ('5-minute','15-minute'):
-              for family in ('prices','ticks','orderbook'):
-                  wanted.append(f'data/{family}/crypto=BTC/timeframe={timeframe}/part-0.parquet')
-          wanted += ['data/markets.parquet','data/spot_prices/part-0.parquet']
-          siblings={row.get('rfilename'):row for row in info.get('siblings',[])}
-          files=[]
-          for path in wanted:
-              row=siblings.get(path)
-              files.append({'path':path,'found':bool(row),'size':(row or {}).get('size'),'blob_id':(row or {}).get('blobId'),'lfs':(row or {}).get('lfs')})
-          markets=pd.read_parquet('markets.parquet')
-          markets=markets[(markets.crypto=='BTC') & markets.timeframe.isin(['5-minute','15-minute']) & markets.resolution.isin([0,1])].copy()
-          markets['duration_s']=markets.timeframe.map({'5-minute':300,'15-minute':900})
-          markets['open_ts']=markets.end_ts-markets.duration_s
-          markets['close_dt']=pd.to_datetime(markets.end_ts,unit='s',utc=True)
-          markets['week']=markets.close_dt.dt.tz_localize(None).dt.to_period('W-MON').astype(str)
-          prices=[]
-          for timeframe,path in [('5-minute','prices-5m.parquet'),('15-minute','prices-15m.parquet')]:
-              frame=pd.read_parquet(path)
-              frame['timeframe']=timeframe
-              prices.append(frame)
-          prices=pd.concat(prices,ignore_index=True)
-          ids=set(markets.market_id.astype(str))
-          prices=prices[prices.market_id.astype(str).isin(ids)].copy()
-          prices['price_dt']=pd.to_datetime(prices.timestamp,unit='s',utc=True)
-          counts=markets.groupby(['week','timeframe']).market_id.nunique().unstack(fill_value=0)
-          expiry=markets.groupby(['end_ts','timeframe']).market_id.nunique().unstack(fill_value=0)
-          paired=expiry[(expiry.get('5-minute',0)>0)&(expiry.get('15-minute',0)>0)]
-          output={
-              'repo':'aliplayer1/polymarket-crypto-updown','revision':revision,'files':files,'sibling_count':len(siblings),
-              'resolved_markets':int(len(markets)),
-              'resolved_by_timeframe':markets.timeframe.value_counts().to_dict(),
-              'resolved_date_min':markets.close_dt.min().isoformat(),
-              'resolved_date_max':markets.close_dt.max().isoformat(),
-              'calendar_weeks':int(markets.week.nunique()),
-              'weekly_counts':counts.reset_index().to_dict('records'),
-              'same_expiry_pairs':int(len(paired)),
-              'price_rows':int(len(prices)),
-              'price_date_min':prices.price_dt.min().isoformat() if len(prices) else None,
-              'price_date_max':prices.price_dt.max().isoformat() if len(prices) else None,
-              'markets_with_prices':int(prices.market_id.astype(str).nunique()),
-          }
-          Path('aliplayer-5m15m-inventory.json').write_text(json.dumps(output,indent=2))
-          markets[['market_id','condition_id','timeframe','open_ts','end_ts','resolution','up_token_id','down_token_id','week']].to_csv('aliplayer-resolved-market-inventory.csv',index=False)
-          print(json.dumps(output,indent=2))
-          assert all(row['found'] for row in files),[row for row in files if not row['found']]
+          import pyarrow.parquet as pq
+
+          repo='obadiaha/polymarket-crypto-5m-15m'
+          api=f'https://huggingface.co/api/datasets/{repo}'
+          response=requests.get(api,params={'blobs':'true'},timeout=180)
+          response.raise_for_status(); info=response.json()
+          revision=info['sha']
+          siblings=[]
+          for row in info.get('siblings',[]):
+              path=row.get('rfilename','')
+              if path.endswith('.parquet'):
+                  size=row.get('size') or (row.get('lfs') or {}).get('size') or 0
+                  oid=(row.get('lfs') or {}).get('oid')
+                  siblings.append({'path':path,'size':int(size),'oid':oid,'blob_id':row.get('blobId')})
+          by_family={}
+          for row in siblings:
+              family=row['path'].split('/',1)[0]
+              by_family.setdefault(family,[]).append(row)
+          summary={family:{'count':len(rows),'bytes':sum(r['size'] for r in rows),'first':min(r['path'] for r in rows),'last':max(r['path'] for r in rows)} for family,rows in sorted(by_family.items())}
+          selected=[]
+          for family in ('markets','resolutions','orderbooks','trades','crypto_prices','price_history'):
+              rows=sorted(by_family.get(family,[]),key=lambda r:r['path'])
+              if rows:
+                  selected.extend([rows[0],rows[-1]] if len(rows)>1 else rows)
+          base=f'https://huggingface.co/datasets/{repo}/resolve/{revision}'
+          schema_report=[]
+          sample_dir=Path('samples'); sample_dir.mkdir()
+          seen=set()
+          for row in selected:
+              if row['path'] in seen: continue
+              seen.add(row['path'])
+              local=sample_dir/(row['path'].replace('/','__'))
+              with requests.get(f"{base}/{row['path']}",stream=True,timeout=300) as r:
+                  r.raise_for_status()
+                  with open(local,'wb') as f:
+                      for block in r.iter_content(1<<20):
+                          if block: f.write(block)
+              got=hashlib.sha256(local.read_bytes()).hexdigest()
+              if row['oid'] and row['oid'].startswith('sha256:'):
+                  assert got==row['oid'].split(':',1)[1],(row['path'],got,row['oid'])
+              pf=pq.ParquetFile(local)
+              frame=pd.read_parquet(local).head(3)
+              schema_report.append({'path':row['path'],'bytes':local.stat().st_size,'sha256':got,'rows':pf.metadata.num_rows,'row_groups':pf.num_row_groups,'schema':str(pf.schema_arrow),'sample':json.loads(frame.to_json(orient='records',date_format='iso'))})
+              print('\nFILE',row['path'],'rows',pf.metadata.num_rows,'bytes',local.stat().st_size,'sha256',got)
+              print(pf.schema_arrow)
+              print(frame.to_string(index=False))
+          output={'repo':repo,'revision':revision,'files':siblings,'families':summary,'schema_report':schema_report}
+          Path('obadiaha-inventory.json').write_text(json.dumps(output,indent=2))
+          print('\nREVISION',revision)
+          print(json.dumps(summary,indent=2))
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: aliplayer-5m15m-inventory
+          name: obadiaha-source-inventory
           path: |
-            aliplayer-5m15m-inventory.json
-            aliplayer-resolved-market-inventory.csv
-          retention-days: 30
-
-  verify-and-research:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Reconstruct and verify authoritative execution snapshot
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat ci_payload/digital-surface/chunk-* > digital-surface-execution-snapshot.tar.gz.b64
-          base64 --decode digital-surface-execution-snapshot.tar.gz.b64 > digital-surface-execution-snapshot.tar.gz
-          echo 'e2a181ac3966e7bb1f786c4fab854294ae96449dc19c7a51bb83814728ec1330  digital-surface-execution-snapshot.tar.gz' | sha256sum -c -
-          mkdir trading-tools
-          tar -xzf digital-surface-execution-snapshot.tar.gz -C trading-tools
-          test -f trading-tools/EXECUTION_SNAPSHOT.json
-          test -f trading-tools/research/digital_surface/run_research.py
-          test -f trading-tools/tests/digital_surface/test_integration.py
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Cache immutable market source
-        uses: actions/cache@v4
-        with:
-          path: trading-tools/.cache/digital-surface
-          key: trading-tools-digital-surface-kinzik-eb4e9fc7-v1
-
-      - name: Install pinned stack
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install \
-            numpy==2.2.6 \
-            pandas==2.2.3 \
-            scipy==1.15.3 \
-            scikit-learn==1.6.1 \
-            pyarrow==19.0.1 \
-            requests==2.32.3 \
-            pytest==8.3.5 \
-            tabulate==0.9.0
-
-      - name: Compile and test verified snapshot
-        working-directory: trading-tools
-        env:
-          PYTHONPATH: '.'
-        run: |
-          python -m compileall -q research/digital_surface tests/digital_surface
-          pytest tests/digital_surface -q
-
-      - name: Run immutable rolling-origin research
-        working-directory: trading-tools
-        env:
-          PYTHONPATH: '.'
-        shell: bash
-        run: |
-          set -o pipefail
-          python -m research.digital_surface.run_research \
-            --cache-dir .cache/digital-surface \
-            --output-dir artifacts/digital-surface-arbitrage \
-            2>&1 | tee digital-surface-arbitrage.log
-
-      - name: Verify artifact checksums
-        working-directory: trading-tools
-        shell: bash
-        run: |
-          set -o pipefail
-          python - <<'PY'
-          import hashlib, json
-          from pathlib import Path
-          root=Path('artifacts/digital-surface-arbitrage')
-          expected=json.loads((root/'SHA256SUMS.json').read_text())
-          for name,want in expected.items():
-              got=hashlib.sha256((root/name).read_bytes()).hexdigest()
-              assert got==want,(name,got,want)
-          print(f'verified {len(expected)} internal checksums')
-          PY
-
-      - name: Show decision
-        if: always()
-        working-directory: trading-tools
-        run: |
-          cat artifacts/digital-surface-arbitrage/admission.json || true
-          tail -250 digital-surface-arbitrage.log || true
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: digital-surface-arbitrage-trading-tools
-          path: |
-            trading-tools/EXECUTION_SNAPSHOT.json
-            trading-tools/artifacts/digital-surface-arbitrage/
-            trading-tools/digital-surface-arbitrage.log
-          if-no-files-found: warn
+            obadiaha-inventory.json
+            obadiaha-inventory.log
           retention-days: 30
