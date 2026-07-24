@@ -1,0 +1,143 @@
+name: Digital Surface Final Clean-Room CI
+
+on:
+  push:
+    branches: [digital-surface-ci-20260724]
+    paths: [.github/workflows/digital-surface-trading-tools.yml]
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/digital-surface-trading-tools.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+  AUTHORITATIVE_COMMIT: aa63003bc6c8cb5532b5452536e2ab36761fac4c
+
+jobs:
+  verify-and-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Restore exact authoritative plaintext commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/Chrisbryan17/trading-tools.git trading-tools
+          git -C trading-tools fetch --depth=1 origin "${AUTHORITATIVE_COMMIT}"
+          git -C trading-tools checkout --detach "${AUTHORITATIVE_COMMIT}"
+          test "$(git -C trading-tools rev-parse HEAD)" = "${AUTHORITATIVE_COMMIT}"
+
+      - name: Verify every final plaintext SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          expected = {
+              '.github/workflows/digital-surface-arbitrage.yml': '79a5b17999aca8bf9c2a41dff88db418ee3ed06de0c817523f692b68e9e7ff60',
+              'research/digital_surface/data.py': 'c46eda26aef75dfa38cf440aa1e95093366c6cb280ad5302a0bd33bf51b3c13e',
+              'research/digital_surface/_data_errors.py': '57d72e165775d883144c2903923746ac16a39e62e2c746402d67157cc1faa52f',
+              'research/digital_surface/_data_provenance.py': '67ad4a0be6f8fc3b430f0a0244a3885df8f291052c57bafc67118ade629d7234',
+              'research/digital_surface/_data_gamma.py': 'c77263b040649b8f5ab6b6bd5c9d10c08c37ef0dc0b8ad1209ff54ec51a6eed1',
+              'research/digital_surface/_data_obadiaha.py': '3d1d59e9cb20126514bdbdd7e1290273ed77080b1a4057cf401d53f4c9f73b78',
+              'research/digital_surface/obadiaha_source_manifest.json': 'cd6941ea34f6f19477e99be1628f83d7a24a2922a645538ebfe5cae9d3e2c289',
+              'research/digital_surface/run_research.py': 'b1fc458843598258f09e1a1bdef6eb68cc45c963028dc8c80508c51cd0b4d9b0',
+              'research/digital_surface/_research_helpers.py': '7f66a19ac68ce1db1cd667e1ae971f7b606cb5fa16accd5d9dd5268756e352d2',
+              'research/digital_surface/_research_rejection.py': '0e27b749cb52785e845d4dd5dc43a87c368c8f31c23232ec475c0a02bba7ec96',
+              'research/digital_surface/validation.py': 'e9cada082c5e7c680ce3ac6f48dbac45367c492fe8e7a24cebeeaddc86fff39c',
+              'tests/digital_surface/test_data_adapter.py': 'dfd75076836551cb5f01c482e4ece114460aea676e920c3fab16b81fae19cd64',
+              'tests/digital_surface/test_integration.py': 'e57e3e86b8d911de1de1831bedb1f70117b847adef2c53c3e67eb776bcef3e0c',
+              'tests/digital_surface/test_validation.py': '7a4ef5a43e4b2999e3eabc53eb930088f0f514f2adefdba6a5a7207b952bea3b',
+          }
+          root = Path('trading-tools')
+          for name, want in expected.items():
+              got = hashlib.sha256((root / name).read_bytes()).hexdigest()
+              assert got == want, (name, got, want)
+          print(f'verified {len(expected)} authoritative plaintext hashes')
+          PY
+
+      - name: Cache immutable source payloads
+        uses: actions/cache@v4
+        with:
+          path: trading-tools/.cache/digital-surface
+          key: digital-surface-final-aa63003-obadiaha-11793901-kinzik-eb4e9fc7
+
+      - name: Install pinned research stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy==2.2.6 pandas==2.2.3 scipy==1.15.3 scikit-learn==1.6.1 pyarrow==19.0.1 requests==2.32.3 pytest==8.3.5 tabulate==0.9.0
+
+      - name: Compile and pass exactly 29 tests
+        working-directory: trading-tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q research/digital_surface tests/digital_surface
+          PYTHONPATH=. pytest --collect-only -q tests/digital_surface | tee /tmp/collect.txt
+          grep -Eq '^29 tests collected' /tmp/collect.txt
+          PYTHONPATH=. pytest tests/digital_surface -q
+
+      - name: Run immutable six-block research protocol
+        working-directory: trading-tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=. python -m research.digital_surface.run_research \
+            --cache-dir .cache/digital-surface \
+            --output-dir artifacts/digital-surface-arbitrage \
+            2>&1 | tee digital-surface-arbitrage.log
+
+      - name: Verify deterministic source-gate classification and checksums
+        working-directory: trading-tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          root = Path('artifacts/digital-surface-arbitrage')
+          admission = json.loads((root / 'admission.json').read_text())
+          source = json.loads((root / 'SOURCE_AUDIT.json').read_text())
+          assert admission['classification'] == 'Rejected', admission
+          assert admission['stage'] == 'source_validation', admission
+          assert admission['folds_started'] == 0, admission
+          assert source['folds_started'] == 0, source
+          expected = json.loads((root / 'SHA256SUMS.json').read_text())
+          for name, want in expected.items():
+              got = hashlib.sha256((root / name).read_bytes()).hexdigest()
+              assert got == want, (name, got, want)
+          print(json.dumps({'admission': admission, 'source_validation': source['validation']}, indent=2))
+          print(f'verified {len(expected)} internal artifact checksums')
+          PY
+
+      - name: Build deterministic archive and digest
+        working-directory: trading-tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf digital-surface-final-artifact.tar.gz -C artifacts digital-surface-arbitrage
+          sha256sum digital-surface-final-artifact.tar.gz > digital-surface-final-artifact.tar.gz.sha256
+          cat digital-surface-final-artifact.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digital-surface-final-source-gate-rejection
+          path: |
+            trading-tools/artifacts/digital-surface-arbitrage/
+            trading-tools/digital-surface-arbitrage.log
+            trading-tools/digital-surface-final-artifact.tar.gz
+            trading-tools/digital-surface-final-artifact.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,64 @@
+name: Stage Digital Surface Plaintext Snapshot
+
+on:
+  push:
+    branches: [digital-surface-ci-20260724]
+    paths:
+      - .github/workflows/stage-digital-surface-plaintext.yml
+      - ci_payload/digital-surface-final-recovered/**
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/stage-digital-surface-plaintext.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify archive and publish exact plaintext-only branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat ci_payload/digital-surface-final-recovered/chunk-* > recovered.b64
+          base64 --decode recovered.b64 > recovered.tar.gz
+          echo 'ac3cf5f39d71facc9a1e4bc39a9ab05c64ae5ae5137889b74cab64bb540f9a15  recovered.tar.gz' | sha256sum -c -
+          mkdir snapshot
+          tar -xzf recovered.tar.gz -C snapshot
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          expected = {
+              '.github/workflows/digital-surface-arbitrage.yml': '79a5b17999aca8bf9c2a41dff88db418ee3ed06de0c817523f692b68e9e7ff60',
+              'research/digital_surface/data.py': '439e56c236f95352c62a707b35b2747429d067711c3c6c9ff6955e6018f2f939',
+              'research/digital_surface/obadiaha_source_manifest.json': 'cd6941ea34f6f19477e99be1628f83d7a24a2922a645538ebfe5cae9d3e2c289',
+              'research/digital_surface/run_research.py': '83a36e1a90934e42ce5a7d3c5373e97ac47b902717c69526856ec8ae94e658aa',
+              'research/digital_surface/validation.py': 'e9cada082c5e7c680ce3ac6f48dbac45367c492fe8e7a24cebeeaddc86fff39c',
+              'tests/digital_surface/test_data_adapter.py': '7ec353b287ef61bb1a3d11dc0a31da40dff218ac3552afa8b772355335a82efc',
+              'tests/digital_surface/test_integration.py': 'cf2bfa0eca57810bb83569f9519ada694b541b5bafb3e609802787a3445dbc9d',
+              'tests/digital_surface/test_validation.py': '7a4ef5a43e4b2999e3eabc53eb930088f0f514f2adefdba6a5a7207b952bea3b',
+          }
+          root=Path('snapshot')
+          for name,want in expected.items():
+              got=hashlib.sha256((root/name).read_bytes()).hexdigest()
+              assert got==want,(name,got,want)
+          print(f'verified {len(expected)} exact plaintext files')
+          PY
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git -C snapshot init
+          git -C snapshot config user.name 'github-actions[bot]'
+          git -C snapshot config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C snapshot checkout -b digital-surface-plaintext-stage-20260724
+          git -C snapshot add -A
+          git -C snapshot commit -m 'snapshot: exact recovered digital surface plaintext'
+          git -C snapshot remote add origin "$remote"
+          git -C snapshot push --force origin digital-surface-plaintext-stage-20260724

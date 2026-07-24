@@ -1,0 +1,99 @@
+name: Digital Surface Alignment V3
+
+on:
+  push:
+    branches: [digital-surface-ci-20260724]
+    paths: [.github/workflows/digital-surface-alignment-v3.yml]
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/digital-surface-alignment-v3.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/cache@v4
+        with:
+          path: .cache/digital-surface
+          key: digital-surface-hybrid-obadiaha-11793901-kinzik-eb4e9fc7-v3
+      - run: python -m pip install pandas==2.2.3 pyarrow==19.0.1 requests==2.32.3
+      - name: Exhaust boundary conventions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json,re
+          from pathlib import Path
+          import numpy as np,pandas as pd,requests
+          root=Path('.cache/digital-surface/obadiaha')
+          mk=pd.read_parquet(root/'markets/all.parquet'); rs=pd.read_parquet(root/'resolutions/all.parquet')
+          px=pd.concat([pd.read_parquet(root/f'crypto_prices/{d:%Y-%m-%d}.parquet') for d in pd.date_range('2026-03-06','2026-03-19')],ignore_index=True)
+          w=mk.copy();w['asset']=w.asset.astype(str).str.upper();w=w[(w.asset=='BTC')&w.market_type.isin(['crypto_5m','crypto_15m'])].copy()
+          w['condition_id']=w.condition_id.astype(str);w['start_dt']=pd.to_datetime(w.start_time,utc=True).astype('datetime64[ns, UTC]');w['end_dt']=pd.to_datetime(w.end_time,utc=True).astype('datetime64[ns, UTC]')
+          w=w[w.start_dt.between(pd.Timestamp('2026-03-06',tz='UTC'),pd.Timestamp('2026-03-20',tz='UTC'),inclusive='left')]
+          rs=rs[['condition_id','outcome']].copy();rs['condition_id']=rs.condition_id.astype(str);w=w.merge(rs,on='condition_id',how='inner')
+          def epoch(v):
+              m=re.search(r'(\d{10,13})(?:\D*)$',str(v));
+              if not m:return pd.NaT
+              n=int(m.group(1));return pd.to_datetime(n,unit='ms' if n>10**11 else 's',utc=True).as_unit('ns')
+          w['canonical_start']=w.slug.map(epoch).astype('datetime64[ns, UTC]');w['duration_s']=w.market_type.map({'crypto_5m':300,'crypto_15m':900});w['canonical_end']=w.canonical_start+pd.to_timedelta(w.duration_s,unit='s')
+          px=px[px.asset.astype(str).str.upper().eq('BTC')].copy()
+          raw=px.timestamp
+          if pd.api.types.is_numeric_dtype(raw):
+              med=float(pd.to_numeric(raw,errors='coerce').dropna().abs().median());unit='ms' if med>1e11 else 's';px['dt']=pd.to_datetime(raw,unit=unit,utc=True).astype('datetime64[ns, UTC]')
+          else:px['dt']=pd.to_datetime(raw,utc=True).astype('datetime64[ns, UTC]')
+          px=px.sort_values('dt').drop_duplicates('dt',keep='last')
+          numeric_cols=[c for c in ['open','high','low','close'] if c in px.columns]
+          def sample(times,col,offset_ms=0,direction='backward'):
+              q=pd.DataFrame({'row':np.arange(len(w)),'q':(pd.to_datetime(times,utc=True).astype('datetime64[ns, UTC]')+pd.Timedelta(milliseconds=offset_ms)).to_numpy()}).dropna().sort_values('q')
+              q['q']=pd.to_datetime(q.q,utc=True).astype('datetime64[ns, UTC]');src=px[['dt',col]].copy();src['dt']=src.dt.astype('datetime64[ns, UTC]')
+              m=pd.merge_asof(q,src.sort_values('dt'),left_on='q',right_on='dt',direction=direction,tolerance=pd.Timedelta('2min')).sort_values('row')
+              out=np.full(len(w),np.nan);out[m.row.astype(int).to_numpy()]=m[col].to_numpy();return out
+          starts={}
+          ends={}
+          for col in numeric_cols:
+              starts[f'{col}_at_start']=sample(w.canonical_start,col,0)
+              starts[f'{col}_before_start']=sample(w.canonical_start,col,-1)
+              starts[f'{col}_prev_minute']=sample(w.canonical_start,col,-60000)
+              starts[f'{col}_next_minute']=sample(w.canonical_start,col,60000)
+              ends[f'{col}_at_end']=sample(w.canonical_end,col,0)
+              ends[f'{col}_before_end']=sample(w.canonical_end,col,-1)
+              ends[f'{col}_prev_minute']=sample(w.canonical_end,col,-60000)
+              ends[f'{col}_next_minute']=sample(w.canonical_end,col,60000)
+          y=w.outcome.eq('Up').to_numpy();results=[]
+          for sn,s in starts.items():
+              for en,e in ends.items():
+                  ok=np.isfinite(s)&np.isfinite(e);pred=e>=s
+                  row={'start_price':sn,'end_price':en,'valid':int(ok.sum()),'agreement':float((pred[ok]==y[ok]).mean()) if ok.any() else None,'inverse_agreement':float((~pred[ok]==y[ok]).mean()) if ok.any() else None}
+                  for duration in ['crypto_5m','crypto_15m']:
+                      mask=ok&w.market_type.eq(duration).to_numpy();row[duration+'_n']=int(mask.sum());row[duration+'_agreement']=float((pred[mask]==y[mask]).mean()) if mask.any() else None
+                  results.append(row)
+          results.sort(key=lambda r:-(r['agreement'] if r['agreement'] is not None else -1))
+          best=results[0];s=starts[best['start_price']];e=ends[best['end_price']];ok=np.isfinite(s)&np.isfinite(e);pred=e>=s;move=np.abs(e/s-1)
+          thresholds=[]
+          for threshold in [0,1e-6,2e-6,5e-6,1e-5,2e-5,5e-5,1e-4,2e-4,5e-4,1e-3]:
+              mask=ok&(move>=threshold);thresholds.append({'absolute_return_threshold':threshold,'n':int(mask.sum()),'agreement':float((pred[mask]==y[mask]).mean()) if mask.any() else None})
+          disagreements=w.loc[ok&(pred!=y),['condition_id','slug','market_type','outcome']].copy();disagreements['start_price']=s[ok&(pred!=y)];disagreements['end_price']=e[ok&(pred!=y)];disagreements['return']=disagreements.end_price/disagreements.start_price-1
+          readme=requests.get('https://huggingface.co/datasets/obadiaha/polymarket-crypto-5m-15m/raw/11793901f0ac89c5a6c51123a6ccd29a3aaf8f4c/README.md',timeout=90);readme.raise_for_status()
+          payload={'price_columns':numeric_cols,'price_timestamp_dtype':str(raw.dtype),'price_timestamp_sample':[str(x) for x in raw.head(5)],'rows':len(w),'results':results,'best':best,'agreement_by_move_threshold':thresholds,'disagreements':disagreements.sort_values('return',key=lambda s:s.abs()).head(100).astype(str).to_dict('records'),'readme':readme.text}
+          Path('alignment-v3.json').write_text(json.dumps(payload,indent=2,default=str));print(json.dumps({k:v for k,v in payload.items() if k not in {'results','disagreements','readme'}},indent=2,default=str));print('TOP10');[print(r) for r in results[:10]]
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-alignment-v3
+          path: alignment-v3.json
+          if-no-files-found: error
+          retention-days: 14

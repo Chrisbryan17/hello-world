@@ -1,0 +1,189 @@
+name: Digital Surface Chainlink Source Diagnostic
+
+on:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/digital-surface-chainlink-source-diagnostic.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install browser diagnostic stack
+        run: |
+          python -m pip install playwright==1.52.0
+          python -m playwright install --with-deps chromium
+      - name: Capture Polymarket historical Chainlink requests
+        run: |
+          python - <<'PY'
+          import asyncio
+          import json
+          from pathlib import Path
+          from urllib.parse import urlparse
+          from playwright.async_api import async_playwright
+
+          pages = [
+              {
+                  'slug': 'btc-updown-5m-1772755200',
+                  'url': 'https://polymarket.com/event/btc-updown-5m-1772755200',
+                  'expected_outcome': 'Up',
+              },
+              {
+                  'slug': 'btc-updown-5m-1772756100',
+                  'url': 'https://polymarket.com/event/btc-updown-5m-1772756100',
+                  'expected_outcome': 'Down',
+              },
+              {
+                  'slug': 'btc-updown-15m-1772755200',
+                  'url': 'https://polymarket.com/event/btc-updown-15m-1772755200',
+                  'expected_outcome': 'Up',
+              },
+              {
+                  'slug': 'btc-updown-15m-1772756100',
+                  'url': 'https://polymarket.com/event/btc-updown-15m-1772756100',
+                  'expected_outcome': 'Down',
+              },
+          ]
+
+          def interesting(url: str) -> bool:
+              value = url.lower()
+              return any(token in value for token in (
+                  '/api/crypto/', 'crypto-price', 'chainlink', 'rtds',
+                  'live-data', 'price-to-beat', 'prices-history',
+              ))
+
+          async def inspect_page(context, case):
+              page = await context.new_page()
+              record = {
+                  **case,
+                  'requests': [],
+                  'responses': [],
+                  'websockets': [],
+                  'console': [],
+                  'page_errors': [],
+              }
+
+              async def on_response(response):
+                  if not interesting(response.url):
+                      return
+                  row = {
+                      'url': response.url,
+                      'status': response.status,
+                      'headers': await response.all_headers(),
+                  }
+                  try:
+                      body = await response.body()
+                      row['body_utf8'] = body.decode('utf-8', 'replace')[:100000]
+                  except Exception as exc:
+                      row['body_error'] = repr(exc)
+                  record['responses'].append(row)
+
+              def on_request(request):
+                  if interesting(request.url):
+                      record['requests'].append({
+                          'url': request.url,
+                          'method': request.method,
+                          'resource_type': request.resource_type,
+                          'post_data': request.post_data,
+                          'headers': request.headers,
+                      })
+
+              def on_websocket(ws):
+                  row = {'url': ws.url, 'sent': [], 'received': [], 'errors': []}
+                  record['websockets'].append(row)
+                  ws.on('framesent', lambda payload: row['sent'].append(str(payload)[:10000]))
+                  ws.on('framereceived', lambda payload: row['received'].append(str(payload)[:10000]))
+                  ws.on('socketerror', lambda error: row['errors'].append(str(error)))
+
+              page.on('request', on_request)
+              page.on('response', on_response)
+              page.on('websocket', on_websocket)
+              page.on('console', lambda msg: record['console'].append({'type': msg.type, 'text': msg.text[:10000]}))
+              page.on('pageerror', lambda exc: record['page_errors'].append(str(exc)))
+
+              try:
+                  response = await page.goto(case['url'], wait_until='domcontentloaded', timeout=90000)
+                  record['navigation_status'] = response.status if response else None
+                  await page.wait_for_timeout(25000)
+                  record['final_url'] = page.url
+                  record['title'] = await page.title()
+                  record['body_text'] = (await page.locator('body').inner_text())[:200000]
+                  record['html'] = (await page.content())[:500000]
+                  await page.screenshot(path=f"{case['slug']}.png", full_page=True)
+              except Exception as exc:
+                  record['navigation_error'] = repr(exc)
+                  try:
+                      record['body_text'] = (await page.locator('body').inner_text())[:200000]
+                      record['html'] = (await page.content())[:500000]
+                  except Exception as inner:
+                      record['capture_error'] = repr(inner)
+              finally:
+                  await page.close()
+              return record
+
+          async def main():
+              async with async_playwright() as pw:
+                  browser = await pw.chromium.launch(
+                      headless=True,
+                      args=['--disable-blink-features=AutomationControlled'],
+                  )
+                  context = await browser.new_context(
+                      viewport={'width': 1440, 'height': 1200},
+                      locale='en-US',
+                      timezone_id='UTC',
+                      user_agent=(
+                          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                          'AppleWebKit/537.36 (KHTML, like Gecko) '
+                          'Chrome/136.0.0.0 Safari/537.36'
+                      ),
+                      extra_http_headers={
+                          'Accept-Language': 'en-US,en;q=0.9',
+                          'DNT': '1',
+                      },
+                  )
+                  results = []
+                  for case in pages:
+                      results.append(await inspect_page(context, case))
+                  await context.close()
+                  await browser.close()
+                  Path('chainlink-frontend-capture.json').write_text(
+                      json.dumps(results, indent=2), encoding='utf-8'
+                  )
+                  summary = []
+                  for result in results:
+                      summary.append({
+                          'slug': result['slug'],
+                          'navigation_status': result.get('navigation_status'),
+                          'final_url': result.get('final_url'),
+                          'title': result.get('title'),
+                          'request_urls': [row['url'] for row in result['requests']],
+                          'response_urls': [row['url'] for row in result['responses']],
+                          'websocket_urls': [row['url'] for row in result['websockets']],
+                          'body_excerpt': result.get('body_text', '')[:5000],
+                      })
+                  Path('chainlink-frontend-summary.json').write_text(
+                      json.dumps(summary, indent=2), encoding='utf-8'
+                  )
+                  print(json.dumps(summary, indent=2))
+
+          asyncio.run(main())
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-chainlink-frontend-capture
+          path: |
+            chainlink-frontend-capture.json
+            chainlink-frontend-summary.json
+            btc-updown-*.png
+          if-no-files-found: warn
+          retention-days: 14
