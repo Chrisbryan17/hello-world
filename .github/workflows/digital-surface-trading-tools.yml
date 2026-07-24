@@ -5,6 +5,7 @@ on:
     branches: [digital-surface-ci-20260724]
     paths:
       - .github/workflows/digital-surface-trading-tools.yml
+      - ci_payload/inventory_obadiaha.py
   workflow_dispatch:
 
 permissions:
@@ -18,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -25,66 +27,14 @@ jobs:
       - name: Pin repository and inspect exact file tree and schemas
         shell: bash
         run: |
-          set -euo pipefail
-          python - <<'PY' 2>&1 | tee obadiaha-inventory.log
-          import hashlib, json, requests
-          from pathlib import Path
-          import pandas as pd
-          import pyarrow.parquet as pq
-
-          repo='obadiaha/polymarket-crypto-5m-15m'
-          api=f'https://huggingface.co/api/datasets/{repo}'
-          response=requests.get(api,params={'blobs':'true'},timeout=180)
-          response.raise_for_status(); info=response.json()
-          revision=info['sha']
-          siblings=[]
-          for row in info.get('siblings',[]):
-              path=row.get('rfilename','')
-              if path.endswith('.parquet'):
-                  size=row.get('size') or (row.get('lfs') or {}).get('size') or 0
-                  oid=(row.get('lfs') or {}).get('oid')
-                  siblings.append({'path':path,'size':int(size),'oid':oid,'blob_id':row.get('blobId')})
-          by_family={}
-          for row in siblings:
-              family=row['path'].split('/',1)[0]
-              by_family.setdefault(family,[]).append(row)
-          summary={family:{'count':len(rows),'bytes':sum(r['size'] for r in rows),'first':min(r['path'] for r in rows),'last':max(r['path'] for r in rows)} for family,rows in sorted(by_family.items())}
-          selected=[]
-          for family in ('markets','resolutions','orderbooks','trades','crypto_prices','price_history'):
-              rows=sorted(by_family.get(family,[]),key=lambda r:r['path'])
-              if rows:
-                  selected.extend([rows[0],rows[-1]] if len(rows)>1 else rows)
-          base=f'https://huggingface.co/datasets/{repo}/resolve/{revision}'
-          schema_report=[]
-          sample_dir=Path('samples'); sample_dir.mkdir()
-          seen=set()
-          for row in selected:
-              if row['path'] in seen: continue
-              seen.add(row['path'])
-              local=sample_dir/(row['path'].replace('/','__'))
-              with requests.get(f"{base}/{row['path']}",stream=True,timeout=300) as r:
-                  r.raise_for_status()
-                  with open(local,'wb') as f:
-                      for block in r.iter_content(1<<20):
-                          if block: f.write(block)
-              got=hashlib.sha256(local.read_bytes()).hexdigest()
-              if row['oid'] and row['oid'].startswith('sha256:'):
-                  assert got==row['oid'].split(':',1)[1],(row['path'],got,row['oid'])
-              pf=pq.ParquetFile(local)
-              frame=pd.read_parquet(local).head(3)
-              schema_report.append({'path':row['path'],'bytes':local.stat().st_size,'sha256':got,'rows':pf.metadata.num_rows,'row_groups':pf.num_row_groups,'schema':str(pf.schema_arrow),'sample':json.loads(frame.to_json(orient='records',date_format='iso'))})
-              print('\nFILE',row['path'],'rows',pf.metadata.num_rows,'bytes',local.stat().st_size,'sha256',got)
-              print(pf.schema_arrow)
-              print(frame.to_string(index=False))
-          output={'repo':repo,'revision':revision,'files':siblings,'families':summary,'schema_report':schema_report}
-          Path('obadiaha-inventory.json').write_text(json.dumps(output,indent=2))
-          print('\nREVISION',revision)
-          print(json.dumps(summary,indent=2))
-          PY
+          set -o pipefail
+          python ci_payload/inventory_obadiaha.py 2>&1 | tee obadiaha-inventory.log
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: obadiaha-source-inventory
           path: |
             obadiaha-inventory.json
             obadiaha-inventory.log
+          if-no-files-found: warn
           retention-days: 30
