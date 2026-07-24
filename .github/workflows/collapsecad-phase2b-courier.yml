@@ -37,21 +37,21 @@ jobs:
           import io
           import tarfile
 
-          source = Path('.collapsecad-phase2b/payload.tar.gz.b64')
+          source = Path('.collapsecad-phase2b/payload.tar.xz.b64')
           text = source.read_text()
           canonical_b64 = ''.join(text.split())
           print(f'raw_text_chars={len(text)}')
           print(f'canonical_base64_chars={len(canonical_b64)}')
           payload = base64.b64decode(canonical_b64, validate=True)
           actual = hashlib.sha256(payload).hexdigest()
-          expected = '894596ca85abcf6962773fdf2ec2bdd8e9c86d54d75397978dd6e8d7ee1ae629'
+          expected = '1fee21128f75726df0b3e28cd865afeef2c256f9852f149d8304b7278a34f83e'
           print(f'decoded_bytes={len(payload)}')
           print(f'decoded_sha256={actual}')
           if actual != expected:
               raise SystemExit(f'payload checksum mismatch: {actual} != {expected}')
 
           root = Path.cwd().resolve()
-          with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as archive:
+          with tarfile.open(fileobj=io.BytesIO(payload), mode='r:xz') as archive:
               members = archive.getmembers()
               print(f'archive_members={len(members)}')
               for member in members:
