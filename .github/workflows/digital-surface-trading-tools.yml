@@ -5,12 +5,12 @@ on:
     branches: [digital-surface-ci-20260724]
     paths:
       - .github/workflows/digital-surface-trading-tools.yml
-      - ci_payload/inventory_kinzik_current.py
+      - ci_payload/inventory_arena.py
   pull_request:
     branches: [main]
     paths:
       - .github/workflows/digital-surface-trading-tools.yml
-      - ci_payload/inventory_kinzik_current.py
+      - ci_payload/inventory_arena.py
   workflow_dispatch:
 
 permissions:
@@ -20,7 +20,7 @@ env:
   PYTHONUNBUFFERED: '1'
 
 jobs:
-  inventory-kinzik-current:
+  inventory-arena:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -29,17 +29,17 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install --quiet pandas==2.2.3 pyarrow==19.0.1 requests==2.32.3
-      - name: Pin current raw repository and inspect files
+      - name: Pin Arena and inspect exact files and schemas
         shell: bash
         run: |
           set -o pipefail
-          python ci_payload/inventory_kinzik_current.py 2>&1 | tee kinzik-current-inventory.log
+          python ci_payload/inventory_arena.py 2>&1 | tee arena-inventory.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: kinzik-current-source-inventory
+          name: arena-source-inventory
           path: |
-            kinzik-current-inventory.json
-            kinzik-current-inventory.log
+            arena-inventory.json
+            arena-inventory.log
           if-no-files-found: warn
           retention-days: 30
