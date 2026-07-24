@@ -1,0 +1,81 @@
+name: Digital Surface Gamma PTB Diagnostic
+
+on:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/digital-surface-gamma-ptb-diagnostic.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Inspect official Gamma historical event and market payloads
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+
+          slugs = [
+              'btc-updown-5m-1772755200',
+              'btc-updown-5m-1772755500',
+              'btc-updown-15m-1772755200',
+              'btc-updown-15m-1772756100',
+          ]
+          rows=[]
+          for slug in slugs:
+              for kind, url in [
+                  ('event', f'https://gamma-api.polymarket.com/events/slug/{slug}'),
+                  ('market', f'https://gamma-api.polymarket.com/markets/slug/{slug}'),
+              ]:
+                  row={'slug':slug,'kind':kind,'url':url}
+                  try:
+                      req=Request(url,headers={'User-Agent':'trading-tools-research/1.0','Accept':'application/json'})
+                      with urlopen(req,timeout=30) as response:
+                          body=response.read().decode('utf-8','replace')
+                          row['status']=response.status
+                          row['bytes']=len(body.encode())
+                          row['data']=json.loads(body)
+                  except Exception as exc:
+                      row['error']=repr(exc)
+                  rows.append(row)
+          def interesting(value,path=''):
+              found=[]
+              if isinstance(value,dict):
+                  for key,item in value.items():
+                      child=f'{path}.{key}' if path else key
+                      if any(token in key.lower() for token in ('beat','chainlink','openprice','closeprice','price')):
+                          found.append({'path':child,'value':item})
+                      found.extend(interesting(item,child))
+              elif isinstance(value,list):
+                  for index,item in enumerate(value):
+                      found.extend(interesting(item,f'{path}[{index}]'))
+              return found
+          summary=[]
+          for row in rows:
+              summary.append({
+                  'slug':row['slug'],'kind':row['kind'],'status':row.get('status'),
+                  'bytes':row.get('bytes'),'error':row.get('error'),
+                  'interesting':interesting(row.get('data'))[:200],
+                  'top_level_keys':list(row.get('data',{}).keys()) if isinstance(row.get('data'),dict) else None,
+              })
+          Path('gamma-ptb-full.json').write_text(json.dumps(rows,indent=2))
+          Path('gamma-ptb-summary.json').write_text(json.dumps(summary,indent=2))
+          print(json.dumps(summary,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digital-surface-gamma-ptb-diagnostic
+          path: |
+            gamma-ptb-full.json
+            gamma-ptb-summary.json
+          retention-days: 14
