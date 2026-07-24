@@ -7,12 +7,14 @@ on:
       - .github/workflows/digital-surface-trading-tools.yml
       - ci_payload/digital-surface-hybrid-update-v2/**
       - ci_payload/digital-surface-provenance-fix/**
+      - ci_payload/digital-surface-gamma-closed-fix/**
   pull_request:
     branches: [main]
     paths:
       - .github/workflows/digital-surface-trading-tools.yml
       - ci_payload/digital-surface-hybrid-update-v2/**
       - ci_payload/digital-surface-provenance-fix/**
+      - ci_payload/digital-surface-gamma-closed-fix/**
   workflow_dispatch:
 
 permissions:
@@ -57,6 +59,15 @@ jobs:
           base64 --decode hybrid-provenance-fix.tar.gz.b64 > hybrid-provenance-fix.tar.gz
           echo 'bf6fa8ca218ac41d1e0749d9c628563d0f1d3fafb9082de7317e05c5152b8d3e  hybrid-provenance-fix.tar.gz' | sha256sum -c -
           tar -xzf hybrid-provenance-fix.tar.gz -C trading-tools
+
+      - name: Overlay and verify historical Gamma lookup correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat ci_payload/digital-surface-gamma-closed-fix/chunk-* > gamma-closed-fix.tar.gz.b64
+          base64 --decode gamma-closed-fix.tar.gz.b64 > gamma-closed-fix.tar.gz
+          echo 'e6ee3e8d4fdb101cf599593a4a1abf855935f90e68257d9293a7167ae48c8fb9  gamma-closed-fix.tar.gz' | sha256sum -c -
+          tar -xzf gamma-closed-fix.tar.gz -C trading-tools
 
       - uses: actions/setup-python@v5
         with:
@@ -137,5 +148,6 @@ jobs:
             digital-surface-execution-snapshot.tar.gz
             hybrid-branch-update.tar.gz
             hybrid-provenance-fix.tar.gz
+            gamma-closed-fix.tar.gz
           if-no-files-found: warn
           retention-days: 30
