@@ -1,0 +1,68 @@
+name: Digital Surface Chainlink Source Diagnostic
+
+on:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/digital-surface-chainlink-source-diagnostic.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Query official Polymarket crypto price source
+        run: |
+          python - <<'PY'
+          import json, time
+          from pathlib import Path
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          endpoint='https://polymarket.com/api/crypto/crypto-price'
+          cases=[
+            {'slug':'btc-updown-5m-1772755200','start':'2026-03-06T00:00:00Z','end':'2026-03-06T00:05:00Z','outcome':'Up','variants':['five','5m','fifteen']},
+            {'slug':'btc-updown-15m-1772755200','start':'2026-03-06T00:00:00Z','end':'2026-03-06T00:15:00Z','outcome':'Up','variants':['fifteen','15m','five']},
+            {'slug':'btc-updown-5m-1772756100','start':'2026-03-06T00:15:00Z','end':'2026-03-06T00:20:00Z','outcome':'Down','variants':['five','5m','fifteen']},
+            {'slug':'btc-updown-15m-1772756100','start':'2026-03-06T00:15:00Z','end':'2026-03-06T00:30:00Z','outcome':'Down','variants':['fifteen','15m','five']},
+          ]
+          rows=[]
+          for case in cases:
+            for variant in case['variants']:
+              params={'symbol':'BTC','eventStartTime':case['start'],'variant':variant,'endDate':case['end']}
+              url=endpoint+'?'+urlencode(params)
+              req=Request(url,headers={'User-Agent':'Mozilla/5.0','Accept':'application/json','Referer':'https://polymarket.com/'})
+              row={**case,'variant':variant,'url':url}
+              try:
+                with urlopen(req,timeout=30) as r:
+                  body=r.read().decode('utf-8','replace')
+                  row['status']=r.status
+                  row['body']=body
+                  try:
+                    data=json.loads(body)
+                    row['data']=data
+                    op=float(data['openPrice']) if data.get('openPrice') is not None else None
+                    cp=float(data['closePrice']) if data.get('closePrice') is not None else None
+                    row['predicted']='Up' if op is not None and cp is not None and cp>=op else ('Down' if op is not None and cp is not None else None)
+                    row['match']=row['predicted']==case['outcome'] if row['predicted'] else None
+                  except Exception as e:
+                    row['parse_error']=repr(e)
+              except Exception as e:
+                row['error']=repr(e)
+              rows.append(row)
+              time.sleep(0.4)
+          Path('chainlink-source-diagnostic.json').write_text(json.dumps(rows,indent=2))
+          print(json.dumps(rows,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digital-surface-chainlink-source-diagnostic
+          path: chainlink-source-diagnostic.json
+          retention-days: 14
