@@ -56,9 +56,9 @@ jobs:
           set -euo pipefail
           PYTHONPATH=src python scripts/generate_global_phase2c_decks.py
           PYTHONPATH=src python scripts/generate_submodels.py
-          test "$(find build/decks/local -name '*.inp' -type f | wc -l)" -eq 5
-          grep -q 'GUSSET_PLATES=2' build/decks/local/weld_toe_t_joint.inp
-          grep -q 'GUSSET_NOMINAL_T=15' build/decks/local/weld_toe_t_joint.inp
+          test "$(find build/decks/submodels -name '*.inp' -type f | wc -l)" -eq 5
+          grep -q 'GUSSET_PLATES=2' build/decks/submodels/weld_toe_t_joint.inp
+          grep -q 'GUSSET_NOMINAL_T=15' build/decks/submodels/weld_toe_t_joint.inp
           python - <<'PY'
           import hashlib, json
           from pathlib import Path
@@ -131,7 +131,7 @@ jobs:
         with:
           name: collapsecad-phase2c-local-r1-evidence
           path: |
-            phase2c-src/build/decks/local
+            phase2c-src/build/decks/submodels
             phase2c-src/build/decks/submodel_manifest.json
             phase2c-src/build/solver/local
             phase2c-src/build/solver_manifest-local-r1.json
