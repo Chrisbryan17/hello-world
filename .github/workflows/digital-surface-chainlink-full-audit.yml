@@ -8,6 +8,7 @@ on:
       - scripts/digital_surface_chainlink_audit.py
       - scripts/digital_surface_chainlink_audit_v2.py
       - scripts/digital_surface_chainlink_audit_v3.py
+      - scripts/digital_surface_chainlink_audit_v4.py
   workflow_dispatch:
 
 permissions:
@@ -16,7 +17,7 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 60
     env:
       PYTHONUNBUFFERED: '1'
     steps:
@@ -26,11 +27,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Cache resumable Chainlink page snapshot
+      - name: Cache resumable Chainlink boundary snapshot
         uses: actions/cache@v4
         with:
           path: .cache/digital-surface-chainlink-audit
-          key: digital-surface-chainlink-pages-march-2026-v2
+          key: digital-surface-chainlink-gamma-march-2026-v1
 
       - name: Install pinned audit stack
         run: |
@@ -46,7 +47,8 @@ jobs:
           python -m compileall -q \
             scripts/digital_surface_chainlink_audit.py \
             scripts/digital_surface_chainlink_audit_v2.py \
-            scripts/digital_surface_chainlink_audit_v3.py
+            scripts/digital_surface_chainlink_audit_v3.py \
+            scripts/digital_surface_chainlink_audit_v4.py
 
       - name: Reconstruct and audit every official Chainlink boundary
         id: audit
@@ -55,7 +57,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p chainlink-audit
-          python scripts/digital_surface_chainlink_audit_v3.py \
+          python scripts/digital_surface_chainlink_audit_v4.py \
             --cache-dir .cache/digital-surface-chainlink-audit \
             --output-dir chainlink-audit \
             2>&1 | tee chainlink-audit/audit.log
