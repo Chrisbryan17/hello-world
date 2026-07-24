@@ -1,0 +1,150 @@
+name: Digital Surface Trent Chainlink Validation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/digital-surface-trent-chainlink-validation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned archive stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install huggingface_hub==0.34.4 pandas==2.2.3 pyarrow==19.0.1
+      - name: Locate and validate high-frequency Chainlink episodes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p trent-chainlink-validation/files
+          python - <<'PY'
+          from __future__ import annotations
+          import hashlib, json, re
+          from pathlib import Path
+          import numpy as np
+          import pandas as pd
+          from huggingface_hub import HfApi, hf_hub_download
+
+          OUT=Path('trent-chainlink-validation')
+          REPO='trentmkelly/polymarket_crypto_derivatives'
+          wanted_starts={
+              '2026-03-06_00-00-00': {'epoch':1772755200,'known_open':71053.021084545,'known_close_5m':71059.391394499,'kind':'control'},
+              '2026-03-06_00-05-00': {'epoch':1772755500,'known_open':71059.391394499,'known_close_5m':None,'kind':'control_next'},
+              '2026-03-09_03-55-00': {'epoch':1773028500,'known_open':None,'known_close_5m':None,'kind':'missing_start'},
+              '2026-03-09_04-00-00': {'epoch':1773028800,'known_open':None,'known_close_5m':None,'kind':'missing_0400'},
+              '2026-03-09_09-53-20': {'epoch':1773050000,'known_open':None,'known_close_5m':None,'kind':'missing_nonboundary_probe'},
+              '2026-03-09_09-55-00': {'epoch':1773050100,'known_open':None,'known_close_5m':None,'kind':'missing_middle'},
+              '2026-03-09_15-40-00': {'epoch':1773070800,'known_open':None,'known_close_5m':None,'kind':'missing_end'},
+          }
+          # Exact official PTB controls from the independently captured Gamma metadata.
+          control_prices={1772755200:71053.021084545,1772755500:71059.391394499}
+
+          api=HfApi()
+          selected=[]
+          scanned=0
+          for item in api.list_repo_tree(REPO,repo_type='dataset',recursive=True,expand=False):
+              path=getattr(item,'path','')
+              scanned+=1
+              if not path.endswith('/steps.parquet'):
+                  continue
+              if not path.startswith(('btc5m_','btc15m_')):
+                  continue
+              if any(token in path for token in wanted_starts):
+                  selected.append(path)
+          print(f'scanned_repo_entries={scanned} selected={len(selected)}',flush=True)
+          if not selected:
+              raise RuntimeError('no matching BTC episode files found')
+
+          def normalize_ts(series: pd.Series) -> np.ndarray:
+              values=pd.to_numeric(series,errors='coerce').to_numpy(float)
+              finite=values[np.isfinite(values)]
+              if not len(finite): return values
+              med=float(np.nanmedian(np.abs(finite)))
+              if med > 1e17: return values/1e9
+              if med > 1e14: return values/1e6
+              if med > 1e11: return values/1e3
+              return values
+
+          rows=[]
+          for path in sorted(selected):
+              local=Path(hf_hub_download(REPO,path,repo_type='dataset',local_dir=OUT/'files'))
+              frame=pd.read_parquet(local)
+              columns=frame.columns.tolist()
+              if 'ts' not in frame or 'chainlink_price' not in frame:
+                  raise ValueError((path,columns))
+              ts=normalize_ts(frame['ts'])
+              px=pd.to_numeric(frame['chainlink_price'],errors='coerce').to_numpy(float)
+              valid=np.isfinite(ts)&np.isfinite(px)&(px>0)
+              ts=ts[valid];px=px[valid]
+              order=np.argsort(ts,kind='stable');ts=ts[order];px=px[order]
+              date_match=re.search(r'(2026-03-\d\d_\d\d-\d\d-\d\d)',path)
+              token=date_match.group(1) if date_match else None
+              meta=wanted_starts.get(token,{})
+              epoch=float(meta.get('epoch',np.nan))
+              def nearest(target):
+                  if not len(ts): return None
+                  i=int(np.argmin(np.abs(ts-target)))
+                  return {'ts':float(ts[i]),'delta_s':float(ts[i]-target),'price':float(px[i]),'row':i}
+              before=None;after=None
+              if len(ts) and np.isfinite(epoch):
+                  bi=np.where(ts<=epoch)[0]
+                  ai=np.where(ts>=epoch)[0]
+                  if len(bi):
+                      i=int(bi[-1]);before={'ts':float(ts[i]),'delta_s':float(ts[i]-epoch),'price':float(px[i]),'row':i}
+                  if len(ai):
+                      i=int(ai[0]);after={'ts':float(ts[i]),'delta_s':float(ts[i]-epoch),'price':float(px[i]),'row':i}
+              row={
+                  'path':path,'sha256':hashlib.sha256(local.read_bytes()).hexdigest(),'bytes':local.stat().st_size,
+                  'columns':columns,'rows':int(len(frame)),'valid_chainlink_rows':int(len(ts)),
+                  'ts_min':float(ts.min()) if len(ts) else None,'ts_max':float(ts.max()) if len(ts) else None,
+                  'chainlink_min':float(px.min()) if len(px) else None,'chainlink_max':float(px.max()) if len(px) else None,
+                  'token':token,'meta':meta,'nearest_open':nearest(epoch) if np.isfinite(epoch) else None,
+                  'before_open':before,'after_open':after,
+                  'nearest_close_5m':nearest(epoch+300) if np.isfinite(epoch) else None,
+                  'nearest_close_15m':nearest(epoch+900) if np.isfinite(epoch) else None,
+                  'head':frame[['ts','chainlink_price','binance_price']].head(10).to_dict('records') if 'binance_price' in frame else frame[['ts','chainlink_price']].head(10).to_dict('records'),
+                  'tail':frame[['ts','chainlink_price','binance_price']].tail(10).to_dict('records') if 'binance_price' in frame else frame[['ts','chainlink_price']].tail(10).to_dict('records'),
+              }
+              rows.append(row)
+
+          comparisons=[]
+          for row in rows:
+              epoch=row['meta'].get('epoch') if row.get('meta') else None
+              known=control_prices.get(epoch)
+              if known is not None and row['nearest_open'] is not None:
+                  comparisons.append({
+                      'path':row['path'],'epoch':epoch,'known_ptb':known,
+                      'observed':row['nearest_open']['price'],'delta_s':row['nearest_open']['delta_s'],
+                      'abs_price_error':abs(row['nearest_open']['price']-known),
+                      'bps_error':abs(row['nearest_open']['price']-known)/known*1e4,
+                  })
+          decision={
+              'repo':REPO,'selected_files':len(rows),'control_comparisons':comparisons,
+              'control_exact_to_cent':bool(comparisons and all(x['abs_price_error']<=0.01 for x in comparisons)),
+              'control_max_abs_error':max((x['abs_price_error'] for x in comparisons),default=None),
+              'control_max_abs_time_delta_s':max((abs(x['delta_s']) for x in comparisons),default=None),
+              'archive_used_for_gap':False,
+              'reason':'validation only; no gap values admitted until official PTB controls reproduce',
+          }
+          (OUT/'episodes.json').write_text(json.dumps(rows,indent=2,default=str),encoding='utf-8')
+          (OUT/'decision.json').write_text(json.dumps(decision,indent=2),encoding='utf-8')
+          print(json.dumps(decision,indent=2),flush=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-trent-chainlink-validation
+          path: trent-chainlink-validation/
+          if-no-files-found: error
+          retention-days: 30
