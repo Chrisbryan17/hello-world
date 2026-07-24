@@ -1,0 +1,216 @@
+name: Digital Surface Chainlink Gap Full Audit
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/digital-surface-chainlink-gap-full-audit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PYTHONUNBUFFERED: '1'
+      BASELINE_ARTIFACT_ID: '8609766432'
+      BASELINE_ARTIFACT_SHA256: '3b86cebd50910e76e1e3d222e4ded9cfe5fd8df9dcd4c929fcb5a34c53a44723'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install huggingface_hub==0.34.4 pandas==2.2.3 pyarrow==19.0.1 numpy==2.2.6
+      - name: Restore checksum-pinned official PTB baseline
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p baseline gap-audit/files
+          curl --fail --location --retry 5 --retry-all-errors \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${BASELINE_ARTIFACT_ID}/zip" \
+            -o baseline.zip
+          echo "${BASELINE_ARTIFACT_SHA256}  baseline.zip" | sha256sum -c -
+          unzip -q baseline.zip -d baseline
+          test -f baseline/chainlink_resolution_audit.csv
+          test -f baseline/chainlink_ptb_snapshot.csv
+          python - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          root=Path('baseline')
+          expected=json.loads((root/'SHA256SUMS.json').read_text())
+          for name,want in expected.items():
+              path=root/name
+              got=hashlib.sha256(path.read_bytes()).hexdigest()
+              assert got==want,(name,got,want)
+          print(f'verified {len(expected)} baseline artifact entries')
+          PY
+      - name: Recover every missing Chainlink boundary from high-frequency stream
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+          import hashlib,json,re
+          from datetime import datetime,timezone
+          from pathlib import Path
+          import numpy as np,pandas as pd
+          from huggingface_hub import HfApi,hf_hub_download
+
+          OUT=Path('gap-audit'); BASE=Path('baseline')
+          REPO='trentmkelly/polymarket_crypto_derivatives'
+          MAX_SETTLEMENT_DELAY_S=2.5
+          audit=pd.read_csv(BASE/'chainlink_resolution_audit.csv')
+          ptb=pd.read_csv(BASE/'chainlink_ptb_snapshot.csv')
+          affected=audit[audit['chainlink_open'].isna()|audit['chainlink_close'].isna()].copy()
+          boundaries=sorted(set(affected['start_epoch'].astype(int))|set(affected['end_epoch'].astype(int)))
+          official={}
+          for e,g in ptb[ptb['boundary_epoch'].isin(boundaries)].groupby('boundary_epoch'):
+              vals=pd.to_numeric(g['price_to_beat'],errors='coerce').dropna().unique()
+              official[int(e)]=float(vals[0]) if len(vals) else None
+          missing_epochs=[e for e in boundaries if official.get(e) is None]
+          print(f'affected_contracts={len(affected)} boundaries={len(boundaries)} missing_boundaries={len(missing_epochs)}')
+
+          def token(e:int)->str:
+              return datetime.fromtimestamp(e,tz=timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
+          wanted_tokens={token(e-300) for e in missing_epochs}|{token(e) for e in missing_epochs}
+          paths_by_token={}
+          scanned=0
+          for item in HfApi().list_repo_tree(REPO,repo_type='dataset',recursive=True,expand=False):
+              path=getattr(item,'path',''); scanned+=1
+              if not path.startswith('btc5m_') or not path.endswith('/steps.parquet'):continue
+              m=re.search(r'(2026-03-\d\d_\d\d-\d\d-\d\d)',path)
+              if m and m.group(1) in wanted_tokens:
+                  paths_by_token[m.group(1)]=path
+          missing_files=sorted(wanted_tokens-set(paths_by_token))
+          print(f'scanned={scanned} selected_episode_files={len(paths_by_token)} missing_episode_files={len(missing_files)}')
+
+          def norm_ts(series:pd.Series)->np.ndarray:
+              x=pd.to_numeric(series,errors='coerce').to_numpy(float)
+              f=x[np.isfinite(x)];m=float(np.nanmedian(np.abs(f))) if len(f) else 0.0
+              return x/1e9 if m>1e17 else x/1e6 if m>1e14 else x/1e3 if m>1e11 else x
+
+          episode_streams={};file_manifest=[]
+          for t,path in sorted(paths_by_token.items()):
+              local=Path(hf_hub_download(REPO,path,repo_type='dataset',local_dir=OUT/'files'))
+              df=pd.read_parquet(local,columns=['ts','chainlink_price'])
+              ts=norm_ts(df['ts']);px=pd.to_numeric(df['chainlink_price'],errors='coerce').to_numpy(float)
+              ok=np.isfinite(ts)&np.isfinite(px)&(px>0)
+              stream=sorted(set((float(a),float(b)) for a,b in zip(ts[ok],px[ok])))
+              episode_streams[t]=stream
+              file_manifest.append({'token':t,'path':path,'sha256':hashlib.sha256(local.read_bytes()).hexdigest(),'bytes':local.stat().st_size,'rows':int(len(df)),'valid_rows':int(ok.sum())})
+
+          recovered={};boundary_rows=[]
+          for e in boundaries:
+              known=official.get(e)
+              if known is not None:
+                  recovered[e]=known
+                  boundary_rows.append({'epoch':e,'utc':datetime.fromtimestamp(e,tz=timezone.utc).isoformat(),'price':known,'source':'official_gamma_price_to_beat','status':'known','delay_s':None,'episode_paths':[]})
+                  continue
+              streams=[];used=[]
+              for t in (token(e-300),token(e)):
+                  if t in episode_streams:
+                      streams.extend(episode_streams[t]);used.append(paths_by_token[t])
+              streams=sorted(set(streams))
+              ts=np.array([x[0] for x in streams],dtype=float);px=np.array([x[1] for x in streams],dtype=float)
+              anchor_time=e+1.0
+              prior=np.where(ts<anchor_time)[0]
+              result=None;reason=None
+              if not len(prior):reason='no_pre_anchor_value'
+              else:
+                  anchor=float(px[prior[-1]])
+                  cand=np.where((ts>=anchor_time)&(~np.isclose(px,anchor,rtol=0,atol=1e-9)))[0]
+                  if not len(cand):reason='no_post_anchor_change'
+                  else:
+                      i=int(cand[0]);delay=float(ts[i]-e)
+                      if delay>MAX_SETTLEMENT_DELAY_S:reason=f'settlement_update_too_late:{delay:.6f}'
+                      else:result={'price':float(px[i]),'ts':float(ts[i]),'delay_s':delay,'anchor_price':anchor}
+              if result:
+                  recovered[e]=result['price']
+                  boundary_rows.append({'epoch':e,'utc':datetime.fromtimestamp(e,tz=timezone.utc).isoformat(),'price':result['price'],'source':'trent_hf_first_change_after_plus_1s','status':'recovered','delay_s':result['delay_s'],'anchor_price':result['anchor_price'],'episode_paths':used})
+              else:
+                  boundary_rows.append({'epoch':e,'utc':datetime.fromtimestamp(e,tz=timezone.utc).isoformat(),'price':None,'source':'trent_hf_first_change_after_plus_1s','status':'missing','reason':reason,'delay_s':None,'episode_paths':used})
+
+          contract_rows=[]
+          for r in affected.itertuples(index=False):
+              op=recovered.get(int(r.start_epoch));cl=recovered.get(int(r.end_epoch))
+              pred=None if op is None or cl is None else ('Up' if cl>=op else 'Down')
+              recorded=str(r.recorded_outcome)
+              contract_rows.append({'condition_id':str(r.condition_id),'slug':str(r.slug),'market_type':str(r.market_type),'open_epoch':int(r.start_epoch),'close_epoch':int(r.end_epoch),'open_price':op,'close_price':cl,'predicted_outcome':pred,'recorded_outcome':recorded,'match':None if pred is None else pred==recorded})
+          contracts=pd.DataFrame(contract_rows)
+          boundaries_df=pd.DataFrame(boundary_rows)
+          known=audit[~(audit['chainlink_open'].isna()|audit['chainlink_close'].isna())].copy()
+          known_match=known['direction_match'].astype(str).str.lower().eq('true')
+          recovered_covered=contracts['match'].notna()
+          recovered_matches=contracts.loc[recovered_covered,'match'].astype(bool)
+          full_matches=int(known_match.sum())+int(recovered_matches.sum())
+          full_covered=int(len(known))+int(recovered_covered.sum())
+          decision={
+              'source_repo':REPO,'baseline_artifact_id':int(Path('/dev/null').exists() and 8609766432),
+              'total_contracts':int(len(audit)),'known_official_contracts':int(len(known)),'affected_contracts':int(len(contracts)),
+              'total_boundaries':int(len(boundaries)),'initial_missing_boundaries':int(len(missing_epochs)),
+              'recovered_missing_boundaries':int(((boundaries_df.status=='recovered')).sum()),
+              'unrecovered_boundaries':int(((boundaries_df.status=='missing')).sum()),
+              'boundary_coverage':float(boundaries_df.price.notna().mean()),
+              'affected_contract_coverage':float(recovered_covered.mean()),
+              'affected_direction_agreement':float(recovered_matches.mean()) if len(recovered_matches) else 0.0,
+              'full_contract_coverage':float(full_covered/len(audit)),
+              'full_direction_agreement':float(full_matches/full_covered) if full_covered else 0.0,
+              'max_settlement_delay_s':MAX_SETTLEMENT_DELAY_S,
+              'settlement_rule':'first Chainlink price change at or after boundary + 1.0 seconds relative to the last value before that anchor; reject if observed later than 2.5 seconds',
+              'gate_threshold':0.99,
+              'source_gate_passed':bool(boundaries_df.price.notna().all() and recovered_covered.all() and recovered_matches.mean()>=0.99 and full_covered==len(audit) and full_matches/full_covered>=0.99),
+              'folds_started':0,
+              'strategy_changed':False,
+          }
+          boundaries_df.to_csv(OUT/'recovered_boundaries.csv',index=False)
+          contracts.to_csv(OUT/'affected_contract_audit.csv',index=False)
+          (OUT/'source_files.json').write_text(json.dumps(file_manifest,indent=2),encoding='utf-8')
+          (OUT/'decision.json').write_text(json.dumps(decision,indent=2),encoding='utf-8')
+          print(json.dumps(decision,indent=2))
+          PY
+      - name: Write and verify immutable audit checksums
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          root=Path('gap-audit')
+          names=['decision.json','recovered_boundaries.csv','affected_contract_audit.csv','source_files.json']
+          sums={n:hashlib.sha256((root/n).read_bytes()).hexdigest() for n in names if (root/n).exists()}
+          (root/'SHA256SUMS.json').write_text(json.dumps(sums,indent=2,sort_keys=True),encoding='utf-8')
+          for n,w in sums.items():assert hashlib.sha256((root/n).read_bytes()).hexdigest()==w
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-chainlink-gap-full-audit
+          path: |
+            gap-audit/
+            baseline.zip
+          if-no-files-found: error
+          retention-days: 30
+      - name: Enforce unchanged source gate
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          d=json.loads(Path('gap-audit/decision.json').read_text())
+          assert d['source_gate_passed'],d
+          assert d['folds_started']==0
+          assert d['strategy_changed'] is False
+          PY
