@@ -21,6 +21,50 @@ env:
   PYTHONUNBUFFERED: '1'
 
 jobs:
+  inventory-aliplayer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Fetch pinned repository metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location \
+            'https://huggingface.co/api/datasets/aliplayer1/polymarket-crypto-updown?blobs=true' \
+            --output repo-metadata.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          revision='ba1ad37cbcdd720cced20f1cdc97c2cf347cad6c'
+          info=json.loads(Path('repo-metadata.json').read_text())
+          assert info.get('sha')==revision,(info.get('sha'),revision)
+          wanted=[]
+          for timeframe in ('5-minute','15-minute'):
+              for family in ('prices','ticks','orderbook'):
+                  wanted.append(f'data/{family}/crypto=BTC/timeframe={timeframe}/part-0.parquet')
+          wanted += ['data/markets.parquet','data/spot_prices/part-0.parquet']
+          siblings={row.get('rfilename'):row for row in info.get('siblings',[])}
+          files=[]
+          for path in wanted:
+              row=siblings.get(path)
+              files.append({
+                  'path':path,
+                  'found':bool(row),
+                  'size':(row or {}).get('size'),
+                  'blob_id':(row or {}).get('blobId'),
+                  'lfs':(row or {}).get('lfs'),
+              })
+          output={'repo':'aliplayer1/polymarket-crypto-updown','revision':revision,'files':files,'sibling_count':len(siblings)}
+          Path('aliplayer-5m15m-inventory.json').write_text(json.dumps(output,indent=2))
+          print(json.dumps(output,indent=2))
+          assert all(row['found'] for row in files),[row for row in files if not row['found']]
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliplayer-5m15m-inventory
+          path: aliplayer-5m15m-inventory.json
+          retention-days: 30
+
   verify-and-research:
     runs-on: ubuntu-latest
     timeout-minutes: 360
