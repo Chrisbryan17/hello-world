@@ -79,6 +79,7 @@ def test_lfs_download_records_pointer_identity_separately_from_payload_hash(tmp_
     assert row["bytes"] == len(payload)
 
 
+
 def test_gamma_historical_lookup_batches_exact_condition_ids_and_includes_closed(tmp_path, monkeypatch):
     from research.digital_surface.data import fetch_gamma_token_map
 
@@ -156,7 +157,6 @@ def test_resumable_download_retries_from_exact_partial_offset(tmp_path, monkeypa
     _download_resumable("https://example.invalid/file", target, len(payload), attempts=2)
     assert target.read_bytes() == payload
     assert calls == [{}, {"Range": "bytes=4-"}]
-
 
 def test_normalize_obadiaha_uses_official_token_order_and_causal_open_strike():
     markets = pd.DataFrame([
