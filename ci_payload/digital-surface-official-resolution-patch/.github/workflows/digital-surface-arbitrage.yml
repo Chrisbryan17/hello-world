@@ -1,0 +1,108 @@
+name: Digital Surface Arbitrage
+
+on:
+  push:
+    branches:
+      - digital-surface-arbitrage-implementation-20260723
+    paths:
+      - research/digital_surface/**
+      - tests/digital_surface/**
+      - .github/workflows/digital-surface-arbitrage.yml
+      - docs/superpowers/plans/2026-07-23-digital-surface-arbitrage-implementation.md
+  pull_request:
+    branches:
+      - main
+    paths:
+      - research/digital_surface/**
+      - tests/digital_surface/**
+      - .github/workflows/digital-surface-arbitrage.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONPATH: '.'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  test-and-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache immutable source data
+        uses: actions/cache@v4
+        with:
+          path: .cache/digital-surface
+          key: digital-surface-hybrid-obadiaha-11793901-kinzik-eb4e9fc7-v1
+
+      - name: Install pinned research stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            numpy==2.2.6 \
+            pandas==2.2.3 \
+            scipy==1.15.3 \
+            scikit-learn==1.6.1 \
+            pyarrow==19.0.1 \
+            requests==2.32.3 \
+            pytest==8.3.5 \
+            tabulate==0.9.0
+
+      - name: Compile package
+        run: |
+          python -m compileall -q research/digital_surface tests/digital_surface
+
+      - name: Run unit, property, regression, and integration tests
+        run: |
+          pytest tests/digital_surface -q
+
+      - name: Run immutable rolling-origin research
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m research.digital_surface.run_research \
+            --cache-dir .cache/digital-surface \
+            --output-dir artifacts/digital-surface-arbitrage \
+            2>&1 | tee digital-surface-arbitrage.log
+
+      - name: Verify internal checksums
+        shell: bash
+        run: |
+          set -o pipefail
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          root=Path('artifacts/digital-surface-arbitrage')
+          expected=json.loads((root/'SHA256SUMS.json').read_text())
+          for name,want in expected.items():
+              path=root/name
+              h=hashlib.sha256(path.read_bytes()).hexdigest()
+              assert h==want,(name,h,want)
+          assert (root/'REPORT.md').exists()
+          assert (root/'admission.json').exists()
+          print(f'verified {len(expected)} artifact checksums')
+          PY
+
+      - name: Show decision
+        if: always()
+        run: |
+          cat artifacts/digital-surface-arbitrage/admission.json || true
+          tail -200 digital-surface-arbitrage.log || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-arbitrage-results
+          path: |
+            artifacts/digital-surface-arbitrage/
+            digital-surface-arbitrage.log
+          if-no-files-found: warn
+          retention-days: 30

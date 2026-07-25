@@ -1,0 +1,186 @@
+name: Digital Surface Official Resolution CI v5
+
+on:
+  push:
+    branches: [digital-surface-official-resolution-ci-20260724]
+    paths:
+      - .github/workflows/digital-surface-official-resolution-ci-v5.yml
+      - ci_payload/digital-surface-official-resolution-patch/**
+  pull_request:
+    branches: [digital-surface-ci-20260724]
+    paths:
+      - .github/workflows/digital-surface-official-resolution-ci-v5.yml
+      - ci_payload/digital-surface-official-resolution-patch/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  verify-and-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Reconstruct checksum-pinned source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat ci_payload/digital-surface/chunk-* > base.b64
+          base64 --decode base.b64 > base.tar.gz
+          echo 'e2a181ac3966e7bb1f786c4fab854294ae96449dc19c7a51bb83814728ec1330  base.tar.gz' | sha256sum -c -
+          mkdir source
+          tar -xzf base.tar.gz -C source
+
+          cat ci_payload/digital-surface-final-recovered/chunk-* > recovered.b64
+          base64 --decode recovered.b64 > recovered.tar.gz
+          echo 'ac3cf5f39d71facc9a1e4bc39a9ab05c64ae5ae5137889b74cab64bb540f9a15  recovered.tar.gz' | sha256sum -c -
+          tar -xzf recovered.tar.gz -C source
+          cp -a ci_payload/digital-surface-official-resolution-patch/. source/
+          patch -d source -p1 < ci_payload/digital-surface-official-resolution-patch/timestamp-unit-fix.patch
+          patch -d source -p1 < ci_payload/digital-surface-official-resolution-patch/full-universe-gate-fix.patch
+          patch -d source -p1 < ci_payload/digital-surface-official-resolution-patch/resolved-universe-fix.patch
+          patch -d source -p1 < ci_payload/digital-surface-official-resolution-patch/asset-merge-fix.patch
+
+          cat > /tmp/patch.sha256 <<'EOF'
+          896bef750c9f1510252b695ef10517fa6502419cfce0d66dd9403d8a2696e903  source/research/digital_surface/__init__.py
+          36f34ff7ee5c2f82e89b4d8674ce4371aea27ad1a63287ba537a6939d997d728  source/research/digital_surface/obadiaha_official_resolution_snapshot.json
+          bb80dece443b4629f90502bf7bb9f881e8e85cd363f806a5de3192b55243d2da  source/research/digital_surface/official_resolution.py
+          6a074f39f601762458fb59610e226a9dcade4b91956afae4e10cdcc4a1d7f752  source/tests/digital_surface/test_data_adapter.py
+          4aae126313ff8ece97b8c9611be95a6528dae8c6934c5f29036b24f341dc8c40  source/research/digital_surface/causal.py
+          bcf5c32614bae2a7e3249ebd626cab5d9d2c2fc5999e3d90b4e8430e55d8a915  source/tests/digital_surface/test_causal.py
+          EOF
+          sed -i 's/^          //' /tmp/patch.sha256
+          sha256sum -c /tmp/patch.sha256
+          cp /tmp/patch.sha256 source/OFFICIAL_RESOLUTION_PATCH_SHA256.txt
+
+      - name: Cache immutable source payloads
+        uses: actions/cache@v4
+        with:
+          path: source/.cache/digital-surface
+          key: digital-surface-official-resolution-obadiaha-11793901-kinzik-eb4e9fc7-v5
+
+      - name: Install pinned research stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy==2.2.6 pandas==2.2.3 scipy==1.15.3 scikit-learn==1.6.1 pyarrow==19.0.1 requests==2.32.3 pytest==8.3.5 tabulate==0.9.0
+
+      - name: Compile and pass exactly 29 tests
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q research/digital_surface tests/digital_surface
+          PYTHONPATH=. pytest --collect-only -q tests/digital_surface | tee /tmp/collect.txt
+          grep -Eq '^29 tests collected' /tmp/collect.txt
+          PYTHONPATH=. pytest tests/digital_surface -q
+
+      - name: Run immutable two-validation four-transfer protocol
+        id: research
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=. python -m research.digital_surface.run_research \
+            --cache-dir .cache/digital-surface \
+            --output-dir artifacts/digital-surface-arbitrage \
+            2>&1 | tee digital-surface-arbitrage.log
+
+      - name: Verify source gate, four folds, and checksums
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          import pandas as pd
+
+          root=Path('artifacts/digital-surface-arbitrage')
+          audit=json.loads((root/'SOURCE_AUDIT.json').read_text())
+          validation=audit['validation']
+          assert validation['official_resolution_coverage'] == 1.0, validation
+          assert validation['official_resolution_agreement'] >= 0.99, validation
+          assert validation['official_resolution_rows'] == 5228, validation
+          assert validation['official_resolution_market_contracts'] == 5233, validation
+          assert validation['official_resolution_source_contracts'] == 5228, validation
+          assert validation['official_resolution_unresolved_market_contracts'] == 5, validation
+          assert validation['official_resolution_panel_contracts'] == 5169, validation
+          assert 0.0 <= validation['binance_direction_agreement_diagnostic'] <= 1.0, validation
+
+          folds=pd.read_csv(root/'fold_results.csv')
+          assert len(folds) == 4, folds
+          assert folds['fold_id'].nunique() == 4, folds
+          assert folds['test_week'].nunique() == 4, folds
+          assert folds['test_week'].astype(str).str.startswith(('02-','03-','04-','05-')).all(), folds
+
+          admission=json.loads((root/'admission.json').read_text())
+          assert admission['classification'] in {'Rejected','Exploratory','Admissible'}, admission
+          expected=json.loads((root/'SHA256SUMS.json').read_text())
+          for name,want in expected.items():
+              got=hashlib.sha256((root/name).read_bytes()).hexdigest()
+              assert got == want, (name,got,want)
+
+          verification={
+              'classification': admission['classification'],
+              'source_coverage': validation['official_resolution_coverage'],
+              'source_agreement': validation['official_resolution_agreement'],
+              'raw_market_contracts': validation['official_resolution_market_contracts'],
+              'resolved_source_contracts': validation['official_resolution_source_contracts'],
+              'unresolved_market_contracts': validation['official_resolution_unresolved_market_contracts'],
+              'causal_panel_contracts': validation['official_resolution_panel_contracts'],
+              'required_agreement': 0.99,
+              'binance_direction_agreement_diagnostic': validation['binance_direction_agreement_diagnostic'],
+              'folds_completed': len(folds),
+              'test_weeks': folds['test_week'].astype(str).tolist(),
+              'checksums_verified': len(expected),
+          }
+          (root/'CI_VERIFICATION.json').write_text(json.dumps(verification,indent=2,sort_keys=True))
+          print(json.dumps(verification,indent=2))
+          PY
+
+      - name: Build deterministic source and result archives
+        if: always()
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf digital-surface-official-resolution-source-v5.tar.gz \
+            .github research tests OFFICIAL_RESOLUTION_PATCH_SHA256.txt
+          sha256sum digital-surface-official-resolution-source-v5.tar.gz > digital-surface-official-resolution-source-v5.tar.gz.sha256
+          if test -d artifacts/digital-surface-arbitrage; then
+            tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+              -czf digital-surface-official-resolution-results-v5.tar.gz -C artifacts digital-surface-arbitrage
+            sha256sum digital-surface-official-resolution-results-v5.tar.gz > digital-surface-official-resolution-results-v5.tar.gz.sha256
+          fi
+
+      - name: Show final decision
+        if: always()
+        working-directory: source
+        run: |
+          cat artifacts/digital-surface-arbitrage/CI_VERIFICATION.json || true
+          cat artifacts/digital-surface-arbitrage/admission.json || true
+          tail -200 digital-surface-arbitrage.log || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-official-resolution-four-fold-v5
+          path: |
+            source/artifacts/digital-surface-arbitrage/
+            source/digital-surface-arbitrage.log
+            source/digital-surface-official-resolution-source-v5.tar.gz
+            source/digital-surface-official-resolution-source-v5.tar.gz.sha256
+            source/digital-surface-official-resolution-results-v5.tar.gz
+            source/digital-surface-official-resolution-results-v5.tar.gz.sha256
+          if-no-files-found: warn
+          retention-days: 30
