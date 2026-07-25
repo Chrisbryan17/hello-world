@@ -1,0 +1,107 @@
+name: Digital Surface Struct Settlement Validation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/digital-surface-struct-settlement-validation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Query Struct market and oracle records
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p struct-settlement-validation
+          python - <<'PY'
+          import hashlib, json, re, time
+          from pathlib import Path
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+          from urllib.error import HTTPError
+
+          OUT=Path('struct-settlement-validation')
+          BASE='https://api.struct.to/v1'
+          slugs=[
+              'btc-updown-5m-1772755200',
+              'btc-updown-5m-1773028500',
+              'btc-updown-5m-1773028800',
+              'btc-updown-15m-1773028800',
+              'btc-updown-5m-1773050000',
+              'btc-updown-5m-1773070800',
+          ]
+
+          def fetch(url):
+              req=Request(url,headers={'User-Agent':'trading-tools-digital-surface-research/1.0','Accept':'application/json,text/html,*/*'})
+              row={'url':url}
+              try:
+                  with urlopen(req,timeout=60) as r:
+                      b=r.read(); row.update(status=r.status,bytes=len(b),sha256=hashlib.sha256(b).hexdigest(),body=b.decode('utf-8','replace'))
+              except HTTPError as e:
+                  b=e.read(); row.update(status=e.code,bytes=len(b),sha256=hashlib.sha256(b).hexdigest(),body=b.decode('utf-8','replace'))
+              except Exception as e: row['error']=repr(e)
+              return row
+
+          result={'markets':[],'oracle_events':[],'pages':[]}
+          condition_ids=[]
+          for slug in slugs:
+              row=fetch(f'{BASE}/polymarket/market/slug/{slug}')
+              parsed=None
+              try: parsed=json.loads(row.get('body',''))
+              except Exception: pass
+              result['markets'].append({'slug':slug,'response':row,'parsed':parsed})
+              if isinstance(parsed,list):
+                  for m in parsed:
+                      cid=m.get('condition_id')
+                      if cid: condition_ids.append(cid)
+              elif isinstance(parsed,dict):
+                  cid=parsed.get('condition_id')
+                  if cid: condition_ids.append(cid)
+              page=fetch(f'https://explorer.struct.to/markets/{slug}')
+              result['pages'].append({'slug':slug,'response':page})
+              time.sleep(0.25)
+
+          condition_ids=list(dict.fromkeys(condition_ids))
+          for offset in range(0,len(condition_ids),20):
+              batch=condition_ids[offset:offset+20]
+              url=BASE+'/polymarket/market/oracle-events?'+urlencode({'condition_ids':','.join(batch),'limit':250,'sort_desc':'false'})
+              row=fetch(url)
+              parsed=None
+              try:parsed=json.loads(row.get('body',''))
+              except Exception:pass
+              result['oracle_events'].append({'condition_ids':batch,'response':row,'parsed':parsed})
+
+          (OUT/'responses.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
+          summary={'markets':[],'oracle_events':[],'pages':[]}
+          keywords=re.compile(r'(price.?to.?beat|final.?price|open.?price|close.?price|chainlink|oracle)',re.I)
+          for x in result['markets']:
+              body=x['response'].get('body','')
+              summary['markets'].append({'slug':x['slug'],'status':x['response'].get('status'),'parsed':x['parsed'],'keyword_hits':keywords.findall(body)[:50]})
+          for x in result['oracle_events']:
+              summary['oracle_events'].append({'condition_ids':x['condition_ids'],'status':x['response'].get('status'),'parsed':x['parsed']})
+          for x in result['pages']:
+              body=x['response'].get('body','')
+              snippets=[]
+              for m in keywords.finditer(body): snippets.append(body[max(0,m.start()-300):m.end()+700])
+              summary['pages'].append({'slug':x['slug'],'status':x['response'].get('status'),'snippets':snippets[:20]})
+          (OUT/'summary.json').write_text(json.dumps(summary,indent=2),encoding='utf-8')
+          print(json.dumps(summary,indent=2)[:100000])
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-struct-settlement-validation
+          path: struct-settlement-validation/
+          if-no-files-found: error
+          retention-days: 14

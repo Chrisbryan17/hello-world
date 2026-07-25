@@ -1,0 +1,100 @@
+name: Digital Surface Archive PTB Recovery
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/digital-surface-archive-ptb-recovery.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Probe Wayback and Common Crawl indexes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p archive-ptb-recovery
+          python - <<'PY'
+          import hashlib, json, time
+          from pathlib import Path
+          from urllib.parse import quote, urlencode
+          from urllib.request import Request, urlopen
+          from urllib.error import HTTPError
+
+          OUT=Path('archive-ptb-recovery')
+          targets=[]
+          for slug in [
+              'btc-updown-5m-1772755200', # known covered control
+              'btc-updown-5m-1773028500', # missing start
+              'btc-updown-5m-1773050000', # missing middle
+              'btc-updown-5m-1773070800', # missing end
+              'btc-updown-15m-1773028800',
+          ]:
+              targets += [
+                  f'https://polymarket.com/event/{slug}',
+                  f'https://gamma-api.polymarket.com/events/slug/{slug}',
+                  f'https://gamma-api.polymarket.com/markets/slug/{slug}',
+              ]
+
+          def get(url, timeout=90):
+              req=Request(url,headers={'User-Agent':'trading-tools-digital-surface-research/1.0','Accept':'application/json,text/plain,*/*'})
+              row={'url':url}
+              try:
+                  with urlopen(req,timeout=timeout) as r:
+                      b=r.read(); row.update(status=r.status,bytes=len(b),sha256=hashlib.sha256(b).hexdigest(),body=b.decode('utf-8','replace'))
+              except HTTPError as e:
+                  b=e.read(); row.update(status=e.code,bytes=len(b),sha256=hashlib.sha256(b).hexdigest(),body=b.decode('utf-8','replace'))
+              except Exception as e: row['error']=repr(e)
+              return row
+
+          coll=get('https://index.commoncrawl.org/collinfo.json')
+          indexes=[]
+          try: indexes=[x['cdx-api'] for x in json.loads(coll['body'])[:8]]
+          except Exception: pass
+          result={'collinfo':coll,'targets':[]}
+          for target in targets:
+              item={'target':target}
+              wb='https://web.archive.org/cdx/search/cdx?'+urlencode({
+                  'url':target,'output':'json','fl':'timestamp,original,statuscode,mimetype,digest,length',
+                  'filter':'statuscode:200','collapse':'digest','from':'20260301','to':'20260724',
+              })
+              item['wayback']=get(wb)
+              item['commoncrawl']=[]
+              for api in indexes[:5]:
+                  q=api+'?'+urlencode({'url':target,'output':'json','filter':'status:200','from':'2026-03-01','to':'2026-07-24'})
+                  item['commoncrawl'].append(get(q))
+                  time.sleep(0.15)
+              result['targets'].append(item)
+              time.sleep(0.25)
+          (OUT/'index_probe.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
+
+          summary=[]
+          for item in result['targets']:
+              wb=item['wayback']; cc=item['commoncrawl']
+              summary.append({
+                  'target':item['target'],'wayback_status':wb.get('status'),'wayback_body':wb.get('body','')[:1000],
+                  'commoncrawl':[
+                      {'status':r.get('status'),'body':r.get('body','')[:1000],'error':r.get('error')}
+                      for r in cc
+                  ],
+              })
+          (OUT/'summary.json').write_text(json.dumps(summary,indent=2),encoding='utf-8')
+          print(json.dumps(summary,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-archive-ptb-recovery
+          path: archive-ptb-recovery/
+          if-no-files-found: error
+          retention-days: 14

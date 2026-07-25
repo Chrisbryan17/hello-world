@@ -1,0 +1,112 @@
+name: Digital Surface Dome Chainlink Validation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/digital-surface-dome-chainlink-validation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Query Dome Chainlink and market archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dome-chainlink-validation
+          python - <<'PY'
+          import hashlib, json, time
+          from pathlib import Path
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+          from urllib.error import HTTPError
+
+          OUT=Path('dome-chainlink-validation')
+          BASE='https://api.domeapi.io/v1'
+          cases=[
+              # covered sample with known Gamma PTB from prior audit
+              {'epoch':1772755200,'known_ptb':71053.021084545,'label':'covered_2026_03_06_0000'},
+              {'epoch':1772755500,'known_ptb':71059.391394499,'label':'covered_2026_03_06_0005'},
+              # missing contiguous block boundaries
+              {'epoch':1773028500,'known_ptb':None,'label':'missing_start'},
+              {'epoch':1773030000,'known_ptb':None,'label':'missing_mid_1'},
+              {'epoch':1773050000,'known_ptb':None,'label':'missing_mid_2'},
+              {'epoch':1773070800,'known_ptb':None,'label':'missing_end'},
+          ]
+
+          def fetch(path, params):
+              url=BASE+path+'?'+urlencode(params, doseq=True)
+              req=Request(url,headers={'User-Agent':'trading-tools-digital-surface-research/1.0','Accept':'application/json'})
+              row={'url':url}
+              try:
+                  with urlopen(req,timeout=60) as r:
+                      body=r.read(); row.update(status=r.status, bytes=len(body), sha256=hashlib.sha256(body).hexdigest(), body=body.decode('utf-8','replace'))
+              except HTTPError as e:
+                  body=e.read(); row.update(status=e.code,bytes=len(body),sha256=hashlib.sha256(body).hexdigest(),body=body.decode('utf-8','replace'))
+              except Exception as e:
+                  row['error']=repr(e)
+              return row
+
+          results={'price_cases':[],'market_cases':[]}
+          for case in cases:
+              ts=case['epoch']*1000
+              # wide enough to reveal cadence and exact boundary ordering
+              row=fetch('/crypto-prices/chainlink',{'currency':'btc/usd','start_time':ts-10_000,'end_time':ts+10_000,'limit':100})
+              entry={**case,'response':row}
+              try:
+                  data=json.loads(row['body']); prices=data.get('prices') or []
+                  entry['prices']=prices
+                  if prices:
+                      entry['nearest']=min(prices,key=lambda x:abs(int(x['timestamp'])-ts))
+                      exact=[x for x in prices if int(x['timestamp'])==ts]
+                      entry['exact']=exact
+              except Exception as exc:
+                  entry['parse_error']=repr(exc)
+              results['price_cases'].append(entry)
+              time.sleep(0.3)
+
+          for slug in [
+              'btc-updown-5m-1772755200',
+              'btc-updown-5m-1773028500',
+              'btc-updown-5m-1773028800',
+              'btc-updown-15m-1773028800',
+          ]:
+              row=fetch('/polymarket/markets',{'market_slug':slug,'limit':10})
+              results['market_cases'].append({'slug':slug,'response':row})
+              time.sleep(0.3)
+
+          (OUT/'responses.json').write_text(json.dumps(results,indent=2),encoding='utf-8')
+          summary=[]
+          for x in results['price_cases']:
+              summary.append({
+                  'label':x['label'],'epoch':x['epoch'],'known_ptb':x['known_ptb'],
+                  'status':x['response'].get('status'),'nearest':x.get('nearest'),'exact':x.get('exact'),
+                  'price_count':len(x.get('prices') or []),
+              })
+          market_summary=[]
+          for x in results['market_cases']:
+              r=x['response']; parsed=None
+              try: parsed=json.loads(r.get('body',''))
+              except Exception: pass
+              market_summary.append({'slug':x['slug'],'status':r.get('status'),'parsed':parsed})
+          final={'prices':summary,'markets':market_summary}
+          (OUT/'summary.json').write_text(json.dumps(final,indent=2),encoding='utf-8')
+          print(json.dumps(final,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-dome-chainlink-validation
+          path: dome-chainlink-validation/
+          if-no-files-found: error
+          retention-days: 14

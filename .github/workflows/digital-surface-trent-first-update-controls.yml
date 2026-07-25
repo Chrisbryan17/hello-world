@@ -1,0 +1,108 @@
+name: Digital Surface Trent First Update Controls
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/digital-surface-trent-first-update-controls.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install huggingface_hub==0.34.4 pandas==2.2.3 pyarrow==19.0.1 numpy==2.2.6
+      - name: Test first distinct oracle update
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p trent-first-update-controls/files
+          python - <<'PY'
+          from __future__ import annotations
+          import hashlib, json
+          from datetime import datetime, timezone
+          from pathlib import Path
+          import numpy as np
+          import pandas as pd
+          from huggingface_hub import HfApi, hf_hub_download
+
+          OUT=Path('trent-first-update-controls'); REPO='trentmkelly/polymarket_crypto_derivatives'
+          official={
+              1772755200:70888.56020229173,1772755800:70938.78987331357,
+              1772756400:71017.35732058427,1772757000:70917.12393639315,
+              1772757600:70939.64770257795,1772758200:70927.42075552029,
+              1772758800:70987.03812254872,1772759400:70905.73111679299,
+              1772760000:70860.5774747142,1772760600:70463.60742361813,
+              1772761200:71004.69651270959,1772761800:71161.7874144923,
+          }
+          def token(e):return datetime.fromtimestamp(e,tz=timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
+          wanted={}
+          for e in official:
+              wanted[token(e-300)]=('previous',e)
+              wanted[token(e)]=('current',e)
+          selected={e:{} for e in official}
+          for item in HfApi().list_repo_tree(REPO,repo_type='dataset',recursive=True,expand=False):
+              path=getattr(item,'path','')
+              if not path.startswith('btc5m_') or not path.endswith('/steps.parquet'):continue
+              for t,(side,e) in wanted.items():
+                  if t in path:selected[e][side]=path;break
+          def norm(s):
+              x=pd.to_numeric(s,errors='coerce').to_numpy(float);f=x[np.isfinite(x)]
+              if not len(f):return x
+              m=float(np.nanmedian(np.abs(f)))
+              return x/1e9 if m>1e17 else x/1e6 if m>1e14 else x/1e3 if m>1e11 else x
+          rows=[]
+          for e,want in sorted(official.items()):
+              streams=[]; files=[]
+              for side,path in selected[e].items():
+                  local=Path(hf_hub_download(REPO,path,repo_type='dataset',local_dir=OUT/'files'))
+                  df=pd.read_parquet(local,columns=['ts','chainlink_price'])
+                  ts=norm(df.ts);px=pd.to_numeric(df.chainlink_price,errors='coerce').to_numpy(float)
+                  ok=np.isfinite(ts)&np.isfinite(px)&(px>0)
+                  streams.extend(zip(ts[ok].tolist(),px[ok].tolist()))
+                  files.append({'side':side,'path':path,'sha256':hashlib.sha256(local.read_bytes()).hexdigest(),'rows':int(len(df))})
+              streams=sorted(set((float(t),float(p)) for t,p in streams))
+              ts=np.array([x[0] for x in streams]);px=np.array([x[1] for x in streams])
+              before=np.where(ts<e)[0]
+              baseline=float(px[before[-1]]) if len(before) else None
+              first=None
+              if baseline is not None:
+                  candidates=np.where((ts>=e)&(~np.isclose(px,baseline,rtol=0,atol=1e-9)))[0]
+                  if len(candidates):
+                      i=int(candidates[0]);first={'ts':float(ts[i]),'delta_s':float(ts[i]-e),'price':float(px[i]),'abs_error':float(abs(px[i]-want))}
+              rows.append({'boundary_epoch':e,'official_ptb':want,'baseline_before':baseline,'first_distinct_after':first,'files':files,'ts_min':float(ts.min()) if len(ts) else None,'ts_max':float(ts.max()) if len(ts) else None})
+          covered=[r for r in rows if r['first_distinct_after'] is not None]
+          exact=[r for r in covered if r['first_distinct_after']['abs_error']<=0.01]
+          mismatches=[r for r in covered if r['first_distinct_after']['abs_error']>0.01]
+          missing=[r for r in rows if r['first_distinct_after'] is None]
+          decision={
+              'controls':len(rows),'covered':len(covered),'exact_to_cent':len(exact),'mismatches':len(mismatches),'missing':len(missing),
+              'coverage':len(covered)/len(rows),'agreement':len(exact)/len(covered) if covered else 0.0,
+              'max_exact_delay_s':max((r['first_distinct_after']['delta_s'] for r in exact),default=None),
+              'mismatch_rows':mismatches,'missing_rows':missing,
+              'rule':'first Chainlink price distinct from the final pre-boundary value, observed at or after the boundary',
+              'settlement_grade':bool(len(covered)==len(rows) and len(exact)==len(rows)),
+              'gap_values_admitted':False,
+          }
+          (OUT/'controls.json').write_text(json.dumps(rows,indent=2),encoding='utf-8')
+          (OUT/'decision.json').write_text(json.dumps(decision,indent=2),encoding='utf-8')
+          print(json.dumps(decision,indent=2),flush=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-trent-first-update-controls
+          path: trent-first-update-controls/
+          if-no-files-found: error
+          retention-days: 30
