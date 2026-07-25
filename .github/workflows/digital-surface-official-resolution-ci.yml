@@ -1,0 +1,229 @@
+name: Digital Surface Official Resolution CI
+
+on:
+  push:
+    branches: [digital-surface-official-resolution-ci-20260724]
+    paths:
+      - .github/workflows/digital-surface-official-resolution-ci.yml
+      - ci_payload/digital-surface-official-resolution-patch/**
+  pull_request:
+    branches: [digital-surface-ci-20260724]
+    paths:
+      - .github/workflows/digital-surface-official-resolution-ci.yml
+      - ci_payload/digital-surface-official-resolution-patch/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  verify-and-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Reconstruct exact verified source checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat ci_payload/digital-surface/chunk-* > base.b64
+          base64 --decode base.b64 > base.tar.gz
+          echo 'e2a181ac3966e7bb1f786c4fab854294ae96449dc19c7a51bb83814728ec1330  base.tar.gz' | sha256sum -c -
+          mkdir source
+          tar -xzf base.tar.gz -C source
+
+          cat ci_payload/digital-surface-final-recovered/chunk-* > recovered.b64
+          base64 --decode recovered.b64 > recovered.tar.gz
+          echo 'ac3cf5f39d71facc9a1e4bc39a9ab05c64ae5ae5137889b74cab64bb540f9a15  recovered.tar.gz' | sha256sum -c -
+          tar -xzf recovered.tar.gz -C source
+
+          cp -a ci_payload/digital-surface-official-resolution-patch/. source/
+
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          expected = {
+              '.github/workflows/digital-surface-arbitrage.yml': '79a5b17999aca8bf9c2a41dff88db418ee3ed06de0c817523f692b68e9e7ff60',
+              'research/digital_surface/__init__.py': '896bef750c9f1510252b695ef10517fa6502419cfce0d66dd9403d8a2696e903',
+              'research/digital_surface/candidates.py': 'a3deb48ed87d826c0f28e1e03b38796e372246aa0140c70dcafb41f2fe067a74',
+              'research/digital_surface/causal.py': 'e631e36fa2f8b516cdd7efd1fde1528c1e2a5d33b1e580495a9f5f88c6a6b14e',
+              'research/digital_surface/data.py': '439e56c236f95352c62a707b35b2747429d067711c3c6c9ff6955e6018f2f939',
+              'research/digital_surface/execution.py': 'cef6cbe145e9ced229e6216b880ab58503207032fb415c3ec217224d288a64ca',
+              'research/digital_surface/fees.py': '9ba2b5bac6518f04fe88a2f96e54a9e7d4f6f708e28426cf095e860736d5e694',
+              'research/digital_surface/obadiaha_official_resolution_snapshot.json': '36f34ff7ee5c2f82e89b4d8674ce4371aea27ad1a63287ba537a6939d997d728',
+              'research/digital_surface/obadiaha_source_manifest.json': 'cd6941ea34f6f19477e99be1628f83d7a24a2922a645538ebfe5cae9d3e2c289',
+              'research/digital_surface/official_resolution.py': 'e6b0fcb92027b4c16abd8ea73be487c7572bad8e98054d5dc0060ab9c51763c6',
+              'research/digital_surface/portfolio.py': '10187c74eb8f23a4e88ba6e9ab26d5dc91e5588f2f5098999bc3a759ec2fa71c',
+              'research/digital_surface/registry.py': '55f3e13db599fc2ffffed8a3bdbc776e75b4978ab7011e25dc99b8bd15fe51e3',
+              'research/digital_surface/run_research.py': '83a36e1a90934e42ce5a7d3c5373e97ac47b902717c69526856ec8ae94e658aa',
+              'research/digital_surface/surface.py': '6226c7f19b33e97e6d1f20790ec4c3c723bddda2f0aa7e93035ab55607b95920',
+              'research/digital_surface/types.py': 'a72db216c81fbec009342b1ee703f51dbba3b5abeab8865be2632191bf835910',
+              'research/digital_surface/validation.py': 'e9cada082c5e7c680ce3ac6f48dbac45367c492fe8e7a24cebeeaddc86fff39c',
+              'tests/digital_surface/test_candidates.py': '41e35dabe0919db4ae20b3a6d029710f9eac1c8ca3cb06d23e3cc503082751eb',
+              'tests/digital_surface/test_causal.py': '5abbf228f78bb03d0382da18f1a218b9d642a3de9bfac174fdffe2c12659870f',
+              'tests/digital_surface/test_data_adapter.py': 'da246d7bd26065f26231da7c842881866f807cf31efe9e36e577709ea49e2c7c',
+              'tests/digital_surface/test_execution.py': '34d366b80fee5f0844c7118a3ac1eff56b2e7ce5c00018d965d8c46947644715',
+              'tests/digital_surface/test_fees_and_types.py': 'a5107698a54d0d14e28a767b2add438f5c70521f0429e49e3fc7beb9163ef19f',
+              'tests/digital_surface/test_integration.py': 'cf2bfa0eca57810bb83569f9519ada694b541b5bafb3e609802787a3445dbc9d',
+              'tests/digital_surface/test_portfolio.py': '3b22a7064c1ad96dfdc728349d64e6cbde9ee2524c233fe3a69b670ba9fd5020',
+              'tests/digital_surface/test_registry.py': 'e99114ab5986be6870605526407d15dc80ca835c150af446bc84554be42781bd',
+              'tests/digital_surface/test_surface.py': 'c06b2160572f171bf294bffefd2707a5f8a8bade3099df16973824c41cde6aa4',
+              'tests/digital_surface/test_validation.py': '7a4ef5a43e4b2999e3eabc53eb930088f0f514f2adefdba6a5a7207b952bea3b',
+          }
+          root = Path('source')
+          for name, want in expected.items():
+              got = hashlib.sha256((root / name).read_bytes()).hexdigest()
+              assert got == want, (name, got, want)
+          (root / 'SOURCE_CHECKPOINT_SHA256.json').write_text(
+              json.dumps(expected, indent=2, sort_keys=True), encoding='utf-8'
+          )
+          print(f'verified {len(expected)} exact source files')
+          PY
+
+      - name: Cache immutable source payloads
+        uses: actions/cache@v4
+        with:
+          path: source/.cache/digital-surface
+          key: digital-surface-official-resolution-obadiaha-11793901-kinzik-eb4e9fc7-v1
+
+      - name: Install pinned research stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            numpy==2.2.6 \
+            pandas==2.2.3 \
+            scipy==1.15.3 \
+            scikit-learn==1.6.1 \
+            pyarrow==19.0.1 \
+            requests==2.32.3 \
+            pytest==8.3.5 \
+            tabulate==0.9.0
+
+      - name: Compile and pass exactly 29 tests
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q research/digital_surface tests/digital_surface
+          PYTHONPATH=. pytest --collect-only -q tests/digital_surface | tee /tmp/collect.txt
+          grep -Eq '^29 tests collected' /tmp/collect.txt
+          PYTHONPATH=. pytest tests/digital_surface -q
+
+      - name: Run immutable two-validation four-transfer protocol
+        id: research
+        working-directory: source
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          PYTHONPATH=. python -m research.digital_surface.run_research \
+            --cache-dir .cache/digital-surface \
+            --output-dir artifacts/digital-surface-arbitrage \
+            2>&1 | tee digital-surface-arbitrage.log
+
+      - name: Verify source admission, four untouched folds, and result checksums
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import pandas as pd
+
+          root = Path('artifacts/digital-surface-arbitrage')
+          source = json.loads((root / 'SOURCE_AUDIT.json').read_text())
+          validation = source['validation']
+          assert validation['official_resolution_coverage'] == 1.0, validation
+          assert validation['official_resolution_agreement'] >= 0.99, validation
+          assert 0.0 <= validation['binance_direction_agreement_diagnostic'] <= 1.0, validation
+          assert validation['official_resolution_rows'] == 5228, validation
+
+          folds = pd.read_csv(root / 'fold_results.csv')
+          assert len(folds) == 4, folds
+          assert folds['fold_id'].nunique() == 4, folds
+          assert folds['test_week'].nunique() == 4, folds
+          assert all(str(value).startswith(('02-', '03-', '04-', '05-')) for value in folds['test_week']), folds
+
+          admission = json.loads((root / 'admission.json').read_text())
+          assert admission['classification'] in {'Rejected', 'Exploratory', 'Admissible'}, admission
+          expected = json.loads((root / 'SHA256SUMS.json').read_text())
+          for name, want in expected.items():
+              got = hashlib.sha256((root / name).read_bytes()).hexdigest()
+              assert got == want, (name, got, want)
+
+          verification = {
+              'source_gate': {
+                  'coverage': validation['official_resolution_coverage'],
+                  'agreement': validation['official_resolution_agreement'],
+                  'required_agreement': 0.99,
+                  'binance_direction_agreement_diagnostic': validation['binance_direction_agreement_diagnostic'],
+              },
+              'folds_completed': int(len(folds)),
+              'test_weeks': folds['test_week'].astype(str).tolist(),
+              'classification': admission['classification'],
+              'result_checksums_verified': len(expected),
+          }
+          (root / 'CI_VERIFICATION.json').write_text(
+              json.dumps(verification, indent=2, sort_keys=True), encoding='utf-8'
+          )
+          print(json.dumps(verification, indent=2))
+          PY
+
+      - name: Build deterministic source and result archives
+        if: always()
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf digital-surface-official-resolution-source.tar.gz \
+            .github research tests SOURCE_CHECKPOINT_SHA256.json
+          sha256sum digital-surface-official-resolution-source.tar.gz > digital-surface-official-resolution-source.tar.gz.sha256
+          if test -d artifacts/digital-surface-arbitrage; then
+            tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+              -czf digital-surface-official-resolution-results.tar.gz \
+              -C artifacts digital-surface-arbitrage
+            sha256sum digital-surface-official-resolution-results.tar.gz > digital-surface-official-resolution-results.tar.gz.sha256
+          fi
+
+      - name: Show final decision
+        if: always()
+        working-directory: source
+        run: |
+          cat artifacts/digital-surface-arbitrage/CI_VERIFICATION.json || true
+          cat artifacts/digital-surface-arbitrage/admission.json || true
+          tail -200 digital-surface-arbitrage.log || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-official-resolution-four-fold
+          path: |
+            source/artifacts/digital-surface-arbitrage/
+            source/digital-surface-arbitrage.log
+            source/digital-surface-official-resolution-source.tar.gz
+            source/digital-surface-official-resolution-source.tar.gz.sha256
+            source/digital-surface-official-resolution-results.tar.gz
+            source/digital-surface-official-resolution-results.tar.gz.sha256
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Enforce completed research process
+        if: always()
+        shell: bash
+        run: |
+          test '${{ steps.research.outcome }}' = 'success'
+          test -f source/artifacts/digital-surface-arbitrage/CI_VERIFICATION.json
