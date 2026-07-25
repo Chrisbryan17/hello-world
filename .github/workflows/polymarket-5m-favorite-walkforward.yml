@@ -8,7 +8,7 @@ on:
       - .github/workflows/polymarket-5m-favorite-walkforward.yml
       - research/polymarket_5m_favorite/**
   pull_request:
-    branches: [main]
+    branches: [polymarket-5m-deep-eda-20260725]
     paths:
       - .github/workflows/polymarket-5m-favorite-walkforward.yml
       - research/polymarket_5m_favorite/**
@@ -18,7 +18,7 @@ permissions:
 
 concurrency:
   group: polymarket-5m-favorite-walkforward-20260725
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   PYTHONHASHSEED: '17'
@@ -98,8 +98,11 @@ jobs:
           PY
           sha256sum -c DATA_SHA256SUMS.txt
 
-      - name: Run strict favorite walk-forward
-        run: python research/polymarket_5m_favorite/favorite_walkforward.py
+      - name: Run partitioned strict favorite walk-forward
+        run: |
+          cd research/polymarket_5m_favorite
+          python favorite_walkforward_fast.py
+          cd ../..
 
       - name: Build deterministic research archive
         shell: bash
