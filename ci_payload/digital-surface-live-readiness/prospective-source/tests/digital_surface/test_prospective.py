@@ -78,3 +78,17 @@ def test_requires_fixed_length_source_and_policy_hashes(tmp_path):
             policy_sha256="short",
             source_sha256="2" * 64,
         )
+
+
+def test_preserves_canonical_market_metadata_in_hash_chain(tmp_path):
+    path = tmp_path / "prospective.jsonl"
+    ledger = ProspectiveLedger(path, diagnostic_market_ids=set())
+    record = ledger.append_observation(
+        market_id="new-meta",
+        first_seen_ts_ms=10,
+        policy_sha256="1" * 64,
+        source_sha256="2" * 64,
+        metadata={"slug": "btc-updown-5m-10", "tick_size": "0.01"},
+    )
+    assert record["metadata"]["slug"] == "btc-updown-5m-10"
+    assert ProspectiveLedger(path, diagnostic_market_ids=set()).head_hash == record["record_hash"]

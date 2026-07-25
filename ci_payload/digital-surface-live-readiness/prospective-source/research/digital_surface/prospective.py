@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Iterable
+from collections.abc import Container, Iterable
+from typing import Any, Mapping
 
 
 class ProspectiveContaminationError(RuntimeError):
@@ -26,9 +27,14 @@ def _validate_sha256(name: str, value: str) -> str:
 
 
 class ProspectiveLedger:
-    def __init__(self, path: str | Path, *, diagnostic_market_ids: Iterable[str]) -> None:
+    def __init__(self, path: str | Path, *, diagnostic_market_ids: Iterable[str] | Container[str]) -> None:
         self.path = Path(path)
-        self.diagnostic_market_ids = {str(value) for value in diagnostic_market_ids}
+        if isinstance(diagnostic_market_ids, (str, bytes)):
+            raise TypeError("diagnostic_market_ids must be an iterable/container of IDs, not a string")
+        if isinstance(diagnostic_market_ids, Container):
+            self.diagnostic_market_ids = diagnostic_market_ids
+        else:
+            self.diagnostic_market_ids = {str(value) for value in diagnostic_market_ids}
         self._rows: list[dict[str, Any]] = []
         self.market_ids: set[str] = set()
         self.head_hash = "0" * 64
@@ -73,6 +79,7 @@ class ProspectiveLedger:
         first_seen_ts_ms: int,
         policy_sha256: str,
         source_sha256: str,
+        metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         market = str(market_id)
         if not market:
@@ -94,6 +101,12 @@ class ProspectiveLedger:
             "source_sha256": source,
             "state": "observed",
         }
+        if metadata is not None:
+            try:
+                canonical_metadata = json.loads(_canonical_json(dict(metadata)).decode("utf-8"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("metadata must be JSON serializable") from exc
+            payload["metadata"] = canonical_metadata
         record = {**payload, "record_hash": hashlib.sha256(_canonical_json(payload)).hexdigest()}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8", newline="\n") as handle:
