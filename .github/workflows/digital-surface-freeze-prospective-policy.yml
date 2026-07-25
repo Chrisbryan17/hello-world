@@ -1,0 +1,205 @@
+name: Digital Surface Freeze Prospective Policy
+
+on:
+  push:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/digital-surface-freeze-prospective-policy.yml
+      - ci_payload/digital-surface-live-readiness/prospective-signal-source/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+  V5_ARTIFACT_ID: '8615107471'
+  V5_ARTIFACT_ZIP_SHA256: '479a25e235841d94077b3d2df070c8ed46bb736c7ebd8f9f1bde8016198a9c39'
+
+jobs:
+  freeze-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Reconstruct checksum-pinned v5 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat ci_payload/digital-surface/chunk-* > base.b64
+          base64 --decode base.b64 > base.tar.gz
+          echo 'e2a181ac3966e7bb1f786c4fab854294ae96449dc19c7a51bb83814728ec1330  base.tar.gz' | sha256sum -c -
+          mkdir source && tar -xzf base.tar.gz -C source
+          cat ci_payload/digital-surface-final-recovered/chunk-* > recovered.b64
+          base64 --decode recovered.b64 > recovered.tar.gz
+          echo 'ac3cf5f39d71facc9a1e4bc39a9ab05c64ae5ae5137889b74cab64bb540f9a15  recovered.tar.gz' | sha256sum -c -
+          tar -xzf recovered.tar.gz -C source
+          cp -a ci_payload/digital-surface-official-resolution-patch/. source/
+          for patch_file in timestamp-unit-fix.patch full-universe-gate-fix.patch resolved-universe-fix.patch asset-merge-fix.patch; do
+            patch -d source -p1 < "ci_payload/digital-surface-official-resolution-patch/${patch_file}"
+          done
+          cp -a ci_payload/digital-surface-live-readiness/prospective-signal-source/. source/
+
+      - name: Install pinned research stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy==2.2.6 pandas==2.2.3 scipy==1.15.3 scikit-learn==1.6.1 pyarrow==19.0.1 requests==2.32.3 pytest==8.3.5 tabulate==0.9.0
+
+      - name: Download and verify v5 research artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${V5_ARTIFACT_ID}/zip" \
+            -o v5.zip
+          echo "${V5_ARTIFACT_ZIP_SHA256}  v5.zip" | sha256sum -c -
+          mkdir v5 && unzip -q v5.zip -d v5
+          causal=$(find v5 -type f -name causal_panel.parquet -print -quit)
+          choices=$(find v5 -type f -name validation_choices.json -print -quit)
+          checksums=$(find v5 -type f -name SHA256SUMS.json -print -quit)
+          test -n "${causal}" && test -n "${choices}" && test -n "${checksums}"
+          cp "${causal}" source/causal_panel.parquet
+          cp "${choices}" source/validation_choices.json
+          cp "${checksums}" source/V5_SHA256SUMS.json
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          expected = json.loads(Path('source/V5_SHA256SUMS.json').read_text())
+          for name in ('causal_panel.parquet', 'validation_choices.json'):
+              got = hashlib.sha256(Path('source', name).read_bytes()).hexdigest()
+              assert got == expected[name], (name, got, expected[name])
+          PY
+
+      - name: Fit and freeze deterministic policy
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=. python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          import numpy as np
+          import pandas as pd
+
+          from research.digital_surface.prospective_signal import load_frozen_surface_policy
+          from research.digital_surface.run_research import _fit_surface
+
+          causal_path = Path('causal_panel.parquet')
+          choices_path = Path('validation_choices.json')
+          state = pd.read_parquet(causal_path)
+          choices = json.loads(choices_path.read_text())
+          assert len(choices) == 4, len(choices)
+          final_choice = max(choices, key=lambda row: int(row['fold_id']))
+          assert int(final_choice['fold_id']) == 4
+          assert final_choice['validation_weeks'] == ['03-2026-03-16', '04-2026-03-23'], final_choice
+          assert final_choice['test_week'] == '05-2026-03-30', final_choice
+          config = dict(final_choice['selected_config'])
+          assert config['config_id'] == 'e0.0200-c1.2500-tau3-60-cad5-slip0.010-u0.00', config
+
+          model_a = _fit_surface(state)
+          model_b = _fit_surface(state)
+          coeff_a = np.asarray(model_a.coefficients, dtype=float)
+          coeff_b = np.asarray(model_b.coefficients, dtype=float)
+          assert np.array_equal(coeff_a, coeff_b), (coeff_a, coeff_b)
+          assert coeff_a.shape == (4,)
+          assert np.isfinite(coeff_a).all()
+          assert coeff_a[1] >= 0.05
+
+          historical_weeks = sorted(state['week'].astype(str).unique().tolist())
+          payload = {
+              'version': 1,
+              'model': {
+                  'coefficients': [float(value) for value in coeff_a],
+                  'training_rows': int(model_a.training_rows),
+                  'training_contracts': int(model_a.training_contracts),
+                  'fit_scope': 'all_historical_pre_prospective',
+                  'historical_weeks': historical_weeks,
+              },
+              'candidate': {
+                  'min_edge': float(config['min_edge']),
+                  'max_total_cost': float(config['max_total_cost']),
+                  'min_tau_s': float(config['min_tau_s']),
+                  'max_tau_s': float(config['max_tau_s']),
+                  'decision_cadence_s': int(config['decision_cadence_s']),
+                  'pair_gap_ms': int(config['pair_gap_ms']),
+                  'slippage': float(config['slippage']),
+                  'uncertainty_penalty': float(config['uncertainty_penalty']),
+              },
+              'selection': 'first_trigger_per_expiry',
+              'flow_assumption': 'zero_without_public_causal_trade_flow',
+              'provenance': {
+                  'v5_artifact_id': 8615107471,
+                  'v5_artifact_zip_sha256': '479a25e235841d94077b3d2df070c8ed46bb736c7ebd8f9f1bde8016198a9c39',
+                  'causal_panel_sha256': hashlib.sha256(causal_path.read_bytes()).hexdigest(),
+                  'validation_choices_sha256': hashlib.sha256(choices_path.read_bytes()).hexdigest(),
+                  'configuration_selected_in_fold': 4,
+                  'configuration_validation_weeks': final_choice['validation_weeks'],
+                  'configuration_test_week_excluded_from_selection': final_choice['test_week'],
+                  'policy_frozen_before_prospective_observation': True,
+                  'historical_folds_are_diagnostic_only': True,
+              },
+          }
+          policy_path = Path('frozen_prospective_surface_policy_v1.json')
+          policy_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + '\n')
+          policy_sha = hashlib.sha256(policy_path.read_bytes()).hexdigest()
+          policy = load_frozen_surface_policy(policy_path)
+          assert policy.policy_sha256 == policy_sha
+          assert policy.config.config_id == config['config_id']
+          assert policy.training_rows == int(model_a.training_rows)
+          assert policy.training_contracts == int(model_a.training_contracts)
+
+          verification = {
+              'policy_sha256': policy_sha,
+              'coefficients': payload['model']['coefficients'],
+              'training_rows': policy.training_rows,
+              'training_contracts': policy.training_contracts,
+              'candidate_config_id': policy.config.config_id,
+              'configuration_validation_weeks': final_choice['validation_weeks'],
+              'configuration_test_week_excluded_from_selection': final_choice['test_week'],
+              'historical_weeks': historical_weeks,
+              'deterministic_refit_exact': True,
+              'future_prospective_rows_used': 0,
+              'live_mode': 'physically_disabled',
+          }
+          Path('FROZEN_POLICY_VERIFICATION.json').write_text(json.dumps(verification, indent=2, sort_keys=True))
+          Path('frozen_prospective_surface_policy_v1.json.sha256').write_text(
+              policy_sha + '  frozen_prospective_surface_policy_v1.json\n'
+          )
+          print(json.dumps(verification, indent=2))
+          PY
+
+      - name: Build deterministic policy artifact
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf digital-surface-frozen-prospective-policy-v1.tar.gz \
+            frozen_prospective_surface_policy_v1.json \
+            frozen_prospective_surface_policy_v1.json.sha256 \
+            FROZEN_POLICY_VERIFICATION.json
+          sha256sum digital-surface-frozen-prospective-policy-v1.tar.gz > digital-surface-frozen-prospective-policy-v1.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digital-surface-frozen-prospective-policy-v1
+          path: |
+            source/frozen_prospective_surface_policy_v1.json
+            source/frozen_prospective_surface_policy_v1.json.sha256
+            source/FROZEN_POLICY_VERIFICATION.json
+            source/digital-surface-frozen-prospective-policy-v1.tar.gz
+            source/digital-surface-frozen-prospective-policy-v1.tar.gz.sha256
+          retention-days: 90
