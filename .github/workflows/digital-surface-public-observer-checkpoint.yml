@@ -1,0 +1,271 @@
+name: Digital Surface Public Observer Checkpoint
+
+on:
+  push:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/digital-surface-public-observer-checkpoint.yml
+      - ci_payload/digital-surface-live-readiness/observer-source/**
+      - ci_payload/digital-surface-live-readiness/prospective-source/**
+      - ci_payload/digital-surface-live-readiness/shadow-source/**
+  pull_request:
+    branches: [digital-surface-ci-20260724]
+    paths:
+      - .github/workflows/digital-surface-public-observer-checkpoint.yml
+      - ci_payload/digital-surface-live-readiness/observer-source/**
+      - ci_payload/digital-surface-live-readiness/prospective-source/**
+      - ci_payload/digital-surface-live-readiness/shadow-source/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+  V5_ARTIFACT_ID: '8615107471'
+  V5_ARTIFACT_ZIP_SHA256: '479a25e235841d94077b3d2df070c8ed46bb736c7ebd8f9f1bde8016198a9c39'
+  CONTRACT_INVENTORY_SHA256: 'cea26cf5221e81b90ba311317f31e97b54e4110f0f1c716fcb14f06d9f1651f3'
+  EXPECTED_BLOOM_BITSET_SHA256: '5fd0bc41ab1ae15ddaf9ca33354d803ab74c112d19136240f00d77156186d113'
+
+jobs:
+  verify-public-observer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Reconstruct checksum-pinned source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat ci_payload/digital-surface/chunk-* > base.b64
+          base64 --decode base.b64 > base.tar.gz
+          echo 'e2a181ac3966e7bb1f786c4fab854294ae96449dc19c7a51bb83814728ec1330  base.tar.gz' | sha256sum -c -
+          mkdir source && tar -xzf base.tar.gz -C source
+
+          cat ci_payload/digital-surface-final-recovered/chunk-* > recovered.b64
+          base64 --decode recovered.b64 > recovered.tar.gz
+          echo 'ac3cf5f39d71facc9a1e4bc39a9ab05c64ae5ae5137889b74cab64bb540f9a15  recovered.tar.gz' | sha256sum -c -
+          tar -xzf recovered.tar.gz -C source
+
+          cp -a ci_payload/digital-surface-official-resolution-patch/. source/
+          for patch_file in timestamp-unit-fix.patch full-universe-gate-fix.patch resolved-universe-fix.patch asset-merge-fix.patch; do
+            patch -d source -p1 < "ci_payload/digital-surface-official-resolution-patch/${patch_file}"
+          done
+          echo 'f71f3a653ca58b4bf98609fc29d8ab16f9d031c9ed14906ebe5159f2b0de8eab  ci_payload/digital-surface-live-readiness/execution-diagnostics.patch' | sha256sum -c -
+          patch -d source -p1 < ci_payload/digital-surface-live-readiness/execution-diagnostics.patch
+          echo '8606cc925aa3b3a6417abb1fba9a11df916cc2b281880978fb6229aa25875be9  ci_payload/digital-surface-live-readiness/book-arrival-model.patch' | sha256sum -c -
+          patch -d source -p1 < ci_payload/digital-surface-live-readiness/book-arrival-model.patch
+
+          cp -a ci_payload/digital-surface-live-readiness/shadow-source/. source/
+          cp -a ci_payload/digital-surface-live-readiness/prospective-source/. source/
+          cp -a ci_payload/digital-surface-live-readiness/observer-source/. source/
+
+          cat > /tmp/observer-source.sha256 <<'EOF'
+          6aa02760d4d038098a6a69a99d9349bb5c6fef8d4593fa4c4cf0574971828fb2  source/research/digital_surface/live/__init__.py
+          9c5c9bcbd39e1262ac468024f5a96fb0667c0c95fc2879d846f7ca2066c38b5f  source/research/digital_surface/live/config.py
+          9e6dff73a17227f907dce4bf56cfd54921f4eb677280b1774d1a73c979b9065a  source/research/digital_surface/live/gateway.py
+          3be74a910e787a3f9e0f3548691e63ed93d78eeb3328fd9538e3a0e643b57d1c  source/research/digital_surface/live/report.py
+          b0ca12139437c004ec88e41902796cdd540f7e45c1b27c3aba96e3695d2267a1  source/research/digital_surface/live/report_chain.py
+          f9197d38fd8dcfcc073d83028ac498fd9ff07619fea2b2b6a90de9ab470a86e2  source/research/digital_surface/live/risk.py
+          50f32b2e400767702073b97ba4fd77a7e8c26f5fd4c7d6f7d9aafe282d6258f0  source/research/digital_surface/live/types.py
+          10d833f89194246ea2fe5dec8bb2fc4388c8509a4d8276c7fcdc0a2b1a13e76c  source/tests/digital_surface/live/test_report.py
+          a09860af2f96e950884e1a2d37d0dfe59c41d869f3cb183ef839bbec2896db4a  source/tests/digital_surface/live/test_report_chain.py
+          be1f59a4ae742f062b419ad7f7fb974eadf9bd076cb2ecdabcd0063eedf1df6d  source/tests/digital_surface/live/test_shadow_gateway.py
+          f3f1e2417305cd0ceee4b6971e461e488960f04f0e0b80ad292733a2a4b248af  source/research/digital_surface/diagnostic_filter.py
+          efd186a4ca00c2e920bc87b8d137ac46db52f2aa36385a275dc99e70b5618439  source/research/digital_surface/market_discovery.py
+          3fbb96286445b60b0b7deeb5e1f9ee45f53bfd5efdcc7a727b50617b19463224  source/research/digital_surface/prospective.py
+          73c5aaa7a4ca10baf85886eb28c6135d975eafaaab19e5193819d1ccbf82f2be  source/research/digital_surface/public_observer.py
+          ea56803a606ff33b7231b373141df3d22c159cedc1063603fef3dfb6255c60c9  source/research/digital_surface/shadow_observation_policy_v1.json
+          774575a18473899bfd2304f93be3786c60c0288fd28aa98d94a40aa043c74858  source/tests/digital_surface/test_diagnostic_filter.py
+          adf17ffb26a23332194eaa67c07201e713f2edf81927365cb54b21a348b5a7bd  source/tests/digital_surface/test_market_discovery.py
+          6efbf535ddfb50ca4b88209ecfa72c8e208a9f4049b0960781805cb888449b53  source/tests/digital_surface/test_prospective.py
+          87e32c6fc215d8ffe8f587357acd1d3efc12b1c78021f2f01740ebc06b9a0554  source/tests/digital_surface/test_public_observer.py
+          EOF
+          sed -i 's/^          //' /tmp/observer-source.sha256
+          sha256sum -c /tmp/observer-source.sha256
+          cp /tmp/observer-source.sha256 source/PUBLIC_OBSERVER_SOURCE_SHA256.txt
+
+      - name: Install pinned test stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy==2.2.6 pandas==2.2.3 scipy==1.15.3 scikit-learn==1.6.1 pyarrow==19.0.1 requests==2.32.3 pytest==8.3.5 tabulate==0.9.0
+
+      - name: Download immutable v5 inventory
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${V5_ARTIFACT_ID}/zip" \
+            -o v5.zip
+          echo "${V5_ARTIFACT_ZIP_SHA256}  v5.zip" | sha256sum -c -
+          mkdir v5 && unzip -q v5.zip -d v5
+          inventory=$(find v5 -type f -name contract_inventory.csv -print -quit)
+          test -n "${inventory}"
+          cp "${inventory}" source/contract_inventory.csv
+          echo "${CONTRACT_INVENTORY_SHA256}  source/contract_inventory.csv" | sha256sum -c -
+
+      - name: Regenerate and verify diagnostic Bloom filter
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=. python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import pandas as pd
+          from research.digital_surface.diagnostic_filter import DiagnosticBloomFilter, build_diagnostic_bloom
+
+          path = Path('contract_inventory.csv')
+          frame = pd.read_csv(path)
+          assert 'condition_id' in frame.columns, frame.columns.tolist()
+          ids = sorted(set(frame['condition_id'].astype(str)))
+          assert len(ids) == 12_465, len(ids)
+          source_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+          payload = build_diagnostic_bloom(ids, source_sha256=source_sha)
+          assert payload['item_count'] == 12_465
+          assert payload['m_bits'] == 262_144
+          assert payload['k_hashes'] == 7
+          assert payload['bitset_sha256'] == '5fd0bc41ab1ae15ddaf9ca33354d803ab74c112d19136240f00d77156186d113'
+          Path('diagnostic_market_filter.json').write_text(json.dumps(payload, indent=2, sort_keys=True) + '\n')
+          loaded = DiagnosticBloomFilter.from_path('diagnostic_market_filter.json')
+          assert loaded.item_count == 12_465
+          assert loaded.source_sha256 == source_sha
+          assert all(value in loaded for value in ids)
+          canonical_ids = ('\n'.join(ids) + '\n').encode()
+          ids_sha = hashlib.sha256(canonical_ids).hexdigest()
+          assert ids_sha == '4605a921c49ac3a73766f96f8f2cfd13b2436c7925f17b673b4b8f1c210a56e5'
+          Path('diagnostic_market_ids.sha256').write_text(ids_sha + '\n')
+          PY
+
+      - name: Compile and pass exactly 53 tests
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q research/digital_surface tests/digital_surface
+          PYTHONPATH=. pytest --collect-only -q tests/digital_surface | tee /tmp/collect.txt
+          grep -Eq '^53 tests collected' /tmp/collect.txt
+          PYTHONPATH=. pytest tests/digital_surface -q
+
+      - name: Prove observation-only boundary and hash chains
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ast
+          import hashlib
+          import json
+          import tempfile
+          from pathlib import Path
+
+          from research.digital_surface.diagnostic_filter import DiagnosticBloomFilter
+          from research.digital_surface.live import LiveTradingDisabledError, load_config
+          from research.digital_surface.market_discovery import GammaMarketRecord
+          from research.digital_surface.prospective import ProspectiveLedger
+          from research.digital_surface.public_observer import GAMMA_MARKETS_URL, observe_markets
+
+          try:
+              load_config({'TRADING_MODE': 'live', 'LIVE_ARM_TOKEN': 'present'})
+          except LiveTradingDisabledError:
+              pass
+          else:
+              raise AssertionError('live mode unexpectedly armed')
+
+          policy = json.loads(Path('research/digital_surface/shadow_observation_policy_v1.json').read_text())
+          assert policy['mode'] == 'observation_only'
+          assert policy['authenticated_requests'] is False
+          assert policy['order_submission'] is False
+          assert GAMMA_MARKETS_URL == 'https://gamma-api.polymarket.com/markets'
+
+          observer_tree = ast.parse(Path('research/digital_surface/public_observer.py').read_text())
+          call_names = {
+              node.func.attr for node in ast.walk(observer_tree)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+          }
+          assert not ({'post', 'put', 'patch', 'delete'} & call_names), call_names
+
+          bloom = DiagnosticBloomFilter.from_path('diagnostic_market_filter.json')
+          with tempfile.TemporaryDirectory() as directory:
+              directory = Path(directory)
+              ledger = ProspectiveLedger(directory/'ledger.jsonl', diagnostic_market_ids=bloom)
+              market = GammaMarketRecord(
+                  condition_id='prospective-smoke-test',
+                  slug='btc-updown-5m-1999999800',
+                  question='Bitcoin Up or Down',
+                  yes_token_id='yes-prospective',
+                  no_token_id='no-prospective',
+                  duration_seconds=300,
+                  open_epoch_seconds=1_999_999_800,
+                  end_date='2033-05-18T03:35:00Z',
+                  tick_size=__import__('decimal').Decimal('0.01'),
+              )
+              summary = observe_markets(
+                  [market], ledger=ledger, observed_ts_ms=1,
+                  policy_sha256='1'*64, source_sha256='2'*64,
+              )
+              assert summary['appended'] == 1
+              assert summary['markets_total_in_ledger'] == 1
+              reloaded = ProspectiveLedger(ledger.path, diagnostic_market_ids=bloom)
+              assert reloaded.head_hash == summary['ledger_head_sha256']
+              row = json.loads(ledger.path.read_text())
+              assert row['metadata']['yes_token_id'] == 'yes-prospective'
+              assert row['metadata']['tick_size'] == '0.01'
+
+          verified = {}
+          for line in Path('PUBLIC_OBSERVER_SOURCE_SHA256.txt').read_text().splitlines():
+              wanted, name = line.split(maxsplit=1)
+              got = hashlib.sha256(Path(name).read_bytes()).hexdigest()
+              assert got == wanted, (name, got, wanted)
+              verified[name] = got
+          result = {
+              'tests_collected': 53,
+              'historical_condition_ids': 12_465,
+              'historical_filter_bitset_sha256': bloom.bitset.hex() and hashlib.sha256(bloom.bitset).hexdigest(),
+              'public_market_endpoint': GAMMA_MARKETS_URL,
+              'authenticated_requests': 0,
+              'order_submissions': 0,
+              'trading_mode': 'observation_only',
+              'live_mode': 'physically_disabled',
+              'prospective_hash_chain_verified': True,
+              'source_files_verified': verified,
+          }
+          assert result['historical_filter_bitset_sha256'] == '5fd0bc41ab1ae15ddaf9ca33354d803ab74c112d19136240f00d77156186d113'
+          Path('PUBLIC_OBSERVER_VERIFICATION.json').write_text(json.dumps(result, indent=2, sort_keys=True))
+          print(json.dumps(result, indent=2))
+          PY
+
+      - name: Build deterministic source checkpoint
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf digital-surface-public-observer-source-v1.tar.gz \
+            research tests PUBLIC_OBSERVER_SOURCE_SHA256.txt PUBLIC_OBSERVER_VERIFICATION.json \
+            diagnostic_market_filter.json diagnostic_market_ids.sha256
+          sha256sum digital-surface-public-observer-source-v1.tar.gz > digital-surface-public-observer-source-v1.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digital-surface-public-observer-checkpoint-v1
+          path: |
+            source/PUBLIC_OBSERVER_SOURCE_SHA256.txt
+            source/PUBLIC_OBSERVER_VERIFICATION.json
+            source/diagnostic_market_filter.json
+            source/diagnostic_market_ids.sha256
+            source/digital-surface-public-observer-source-v1.tar.gz
+            source/digital-surface-public-observer-source-v1.tar.gz.sha256
+          retention-days: 30
