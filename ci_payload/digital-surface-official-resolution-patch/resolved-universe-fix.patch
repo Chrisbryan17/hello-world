@@ -1,0 +1,78 @@
+diff --git a/research/digital_surface/official_resolution.py b/research/digital_surface/official_resolution.py
+--- a/research/digital_surface/official_resolution.py
++++ b/research/digital_surface/official_resolution.py
+@@ -162,7 +162,15 @@
+         )
+         binance_direction_agreement = float(audit["oracle_agreement"])
+ 
+-        source_ids = patched_markets["condition_id"].astype(str).drop_duplicates()
++        market_ids = patched_markets["condition_id"].astype(str).drop_duplicates()
++        resolved_source = resolutions[["condition_id", "outcome"]].copy()
++        resolved_source["condition_id"] = resolved_source["condition_id"].astype(str)
++        resolved_source["outcome"] = resolved_source["outcome"].astype(str).str.title()
++        resolved_source = resolved_source[
++            resolved_source["outcome"].isin(["Up", "Down"])
++        ].drop_duplicates("condition_id", keep="last")
++        resolved_ids = set(resolved_source["condition_id"])
++        source_ids = market_ids[market_ids.isin(resolved_ids)]
+         official = (
+             load_official_resolution_snapshot(source_ids)
+             if official_resolutions is None
+@@ -214,7 +222,9 @@
+         audit["oracle_agreement"] = agreement
+         audit["official_resolution_coverage"] = coverage
+         audit["official_resolution_agreement"] = agreement
++        audit["official_resolution_market_contracts"] = int(len(market_ids))
+         audit["official_resolution_source_contracts"] = int(len(source_ids))
++        audit["official_resolution_unresolved_market_contracts"] = int(len(market_ids) - len(source_ids))
+         audit["official_resolution_panel_contracts"] = int(slots["condition_id"].nunique())
+         audit["binance_direction_agreement_diagnostic"] = binance_direction_agreement
+         return slots, books, trades, audit
+diff --git a/tests/digital_surface/test_data_adapter.py b/tests/digital_surface/test_data_adapter.py
+--- a/tests/digital_surface/test_data_adapter.py
++++ b/tests/digital_surface/test_data_adapter.py
+@@ -190,6 +190,16 @@
+             "market_type": "crypto_5m",
+             "slug": "btc-updown-5m-1772755500",
+         },
++        {
++            "market_id": "btc-updown-5m-1772755800",
++            "asset": "BTC",
++            "condition_id": "cpending",
++            "question": "Bitcoin Up or Down",
++            "start_time": pd.Timestamp("2026-03-06T00:15:00Z"),
++            "end_time": pd.Timestamp("2026-03-06T00:15:00Z"),
++            "market_type": "crypto_5m",
++            "slug": "btc-updown-5m-1772755800",
++        },
+     ])
+     resolutions = pd.DataFrame([
+         {"condition_id": "c5", "outcome": "Up"},
+@@ -200,6 +210,7 @@
+         {"condition_id": "c5", "yes_token_id": "yes5", "no_token_id": "no5"},
+         {"condition_id": "c15", "yes_token_id": "yes15", "no_token_id": "no15"},
+         {"condition_id": "cgap", "yes_token_id": "yesgap", "no_token_id": "nogap"},
++        {"condition_id": "cpending", "yes_token_id": "yespending", "no_token_id": "nopending"},
+     ])
+     spot = pd.DataFrame([
+         {"timestamp": pd.Timestamp("2026-03-06T00:00:00Z"), "asset": "BTC", "open": 100.0, "close": 100.5},
+@@ -244,6 +255,9 @@
+         )
+     official.loc[official["condition_id"] == "cgap", "official_outcome"] = "Up"
+ 
++    # Markets without a terminal Up/Down resolution are not label-bearing source
++    # contracts. They remain visible in the raw market audit but must not dilute
++    # official-outcome coverage or alter the 5,228 resolved-contract universe.
+     slots, books, trades, audit = normalize_obadiaha_source(
+         markets, resolutions, gamma, spot, raw_books, raw_trades, official_resolutions=official
+     )
+@@ -259,7 +273,9 @@
+     assert slots.set_index("condition_id").loc["c15", "resolved_side"] == "No"
+     assert audit["official_resolution_coverage"] == 1.0
+     assert audit["official_resolution_agreement"] == 1.0
++    assert audit["official_resolution_market_contracts"] == 4
+     assert audit["official_resolution_source_contracts"] == 3
++    assert audit["official_resolution_unresolved_market_contracts"] == 1
+     assert audit["official_resolution_panel_contracts"] == 2
+     assert audit["binance_direction_agreement_diagnostic"] == 0.5
+     b5 = books.set_index("condition_id").loc["c5"]
