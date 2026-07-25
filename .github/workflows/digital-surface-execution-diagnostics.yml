@@ -6,6 +6,11 @@ on:
     paths:
       - .github/workflows/digital-surface-execution-diagnostics.yml
       - ci_payload/digital-surface-live-readiness/**
+  pull_request:
+    branches: [digital-surface-ci-20260724]
+    paths:
+      - .github/workflows/digital-surface-execution-diagnostics.yml
+      - ci_payload/digital-surface-live-readiness/**
   workflow_dispatch:
 
 permissions:
