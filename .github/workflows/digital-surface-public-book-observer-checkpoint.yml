@@ -1,0 +1,212 @@
+name: Digital Surface Public Book Observer Checkpoint
+
+on:
+  push:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/digital-surface-public-book-observer-checkpoint.yml
+      - ci_payload/digital-surface-live-readiness/observer-source/**
+      - ci_payload/digital-surface-live-readiness/prospective-source/**
+      - ci_payload/digital-surface-live-readiness/shadow-source/**
+  pull_request:
+    branches: [digital-surface-ci-20260724]
+    paths:
+      - .github/workflows/digital-surface-public-book-observer-checkpoint.yml
+      - ci_payload/digital-surface-live-readiness/observer-source/**
+      - ci_payload/digital-surface-live-readiness/prospective-source/**
+      - ci_payload/digital-surface-live-readiness/shadow-source/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  verify-public-book-observer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Reconstruct checksum-pinned research source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat ci_payload/digital-surface/chunk-* > base.b64
+          base64 --decode base.b64 > base.tar.gz
+          echo 'e2a181ac3966e7bb1f786c4fab854294ae96449dc19c7a51bb83814728ec1330  base.tar.gz' | sha256sum -c -
+          mkdir source && tar -xzf base.tar.gz -C source
+          cat ci_payload/digital-surface-final-recovered/chunk-* > recovered.b64
+          base64 --decode recovered.b64 > recovered.tar.gz
+          echo 'ac3cf5f39d71facc9a1e4bc39a9ab05c64ae5ae5137889b74cab64bb540f9a15  recovered.tar.gz' | sha256sum -c -
+          tar -xzf recovered.tar.gz -C source
+          cp -a ci_payload/digital-surface-official-resolution-patch/. source/
+          for patch_file in timestamp-unit-fix.patch full-universe-gate-fix.patch resolved-universe-fix.patch asset-merge-fix.patch; do
+            patch -d source -p1 < "ci_payload/digital-surface-official-resolution-patch/${patch_file}"
+          done
+          echo 'f71f3a653ca58b4bf98609fc29d8ab16f9d031c9ed14906ebe5159f2b0de8eab  ci_payload/digital-surface-live-readiness/execution-diagnostics.patch' | sha256sum -c -
+          patch -d source -p1 < ci_payload/digital-surface-live-readiness/execution-diagnostics.patch
+          echo '8606cc925aa3b3a6417abb1fba9a11df916cc2b281880978fb6229aa25875be9  ci_payload/digital-surface-live-readiness/book-arrival-model.patch' | sha256sum -c -
+          patch -d source -p1 < ci_payload/digital-surface-live-readiness/book-arrival-model.patch
+          cp -a ci_payload/digital-surface-live-readiness/shadow-source/. source/
+          cp -a ci_payload/digital-surface-live-readiness/prospective-source/. source/
+          cp -a ci_payload/digital-surface-live-readiness/observer-source/. source/
+
+          cat > /tmp/public-book-source.sha256 <<'EOF'
+          d96e722e57b24b2dc37bdf772972133ceeb1fcbf3629973f3abae701b4943051  source/research/digital_surface/book_ledger.py
+          f3f1e2417305cd0ceee4b6971e461e488960f04f0e0b80ad292733a2a4b248af  source/research/digital_surface/diagnostic_filter.py
+          efd186a4ca00c2e920bc87b8d137ac46db52f2aa36385a275dc99e70b5618439  source/research/digital_surface/market_discovery.py
+          3fbb96286445b60b0b7deeb5e1f9ee45f53bfd5efdcc7a727b50617b19463224  source/research/digital_surface/prospective.py
+          088bab6729e5a1beb22baa853483433fd23180d3f8597035e0d3a4d036a8aec3  source/research/digital_surface/public_book_observer.py
+          1ee608819769dad77c19f343427fbe604cacb3afc95b693aa5153b4ea22a166e  source/research/digital_surface/public_books.py
+          73c5aaa7a4ca10baf85886eb28c6135d975eafaaab19e5193819d1ccbf82f2be  source/research/digital_surface/public_observer.py
+          ea56803a606ff33b7231b373141df3d22c159cedc1063603fef3dfb6255c60c9  source/research/digital_surface/shadow_observation_policy_v1.json
+          7220101c9f0d3684d241843f2647fef81d45725a178d27e23afb16068218272f  source/tests/digital_surface/test_book_ledger.py
+          774575a18473899bfd2304f93be3786c60c0288fd28aa98d94a40aa043c74858  source/tests/digital_surface/test_diagnostic_filter.py
+          adf17ffb26a23332194eaa67c07201e713f2edf81927365cb54b21a348b5a7bd  source/tests/digital_surface/test_market_discovery.py
+          6efbf535ddfb50ca4b88209ecfa72c8e208a9f4049b0960781805cb888449b53  source/tests/digital_surface/test_prospective.py
+          53b3d577327ab9b5fee56c1905a585f9caf2ef0d2f91c6e100ce83371da6f494  source/tests/digital_surface/test_public_book_observer.py
+          cf1f1c4cde4b0ec9db7766ada185640c4fbfc20bbc55bb7869b61b9f528df2b8  source/tests/digital_surface/test_public_books.py
+          87e32c6fc215d8ffe8f587357acd1d3efc12b1c78021f2f01740ebc06b9a0554  source/tests/digital_surface/test_public_observer.py
+          EOF
+          sed -i 's/^          //' /tmp/public-book-source.sha256
+          sha256sum -c /tmp/public-book-source.sha256
+          cp /tmp/public-book-source.sha256 source/PUBLIC_BOOK_OBSERVER_SOURCE_SHA256.txt
+
+      - name: Install pinned test stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy==2.2.6 pandas==2.2.3 scipy==1.15.3 scikit-learn==1.6.1 pyarrow==19.0.1 requests==2.32.3 pytest==8.3.5 tabulate==0.9.0
+
+      - name: Compile and pass exactly 60 tests
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q research/digital_surface tests/digital_surface
+          PYTHONPATH=. pytest --collect-only -q tests/digital_surface | tee /tmp/collect.txt
+          grep -Eq '^60 tests collected' /tmp/collect.txt
+          PYTHONPATH=. pytest tests/digital_surface -q
+
+      - name: Verify public-only surfaces and chained evidence
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ast
+          import hashlib
+          import json
+          import tempfile
+          from decimal import Decimal
+          from pathlib import Path
+
+          from research.digital_surface.book_ledger import PublicBookLedger
+          from research.digital_surface.diagnostic_filter import DiagnosticBloomFilter, build_diagnostic_bloom
+          from research.digital_surface.live import LiveTradingDisabledError, load_config
+          from research.digital_surface.market_discovery import GammaMarketRecord
+          from research.digital_surface.prospective import ProspectiveLedger
+          from research.digital_surface.public_book_observer import observe_public_books
+          from research.digital_surface.public_books import CLOB_BOOKS_URL, parse_public_order_book
+          from research.digital_surface.public_observer import GAMMA_MARKETS_URL, observe_markets
+
+          try:
+              load_config({'TRADING_MODE': 'live', 'LIVE_ARM_TOKEN': 'present'})
+          except LiveTradingDisabledError:
+              pass
+          else:
+              raise AssertionError('live mode unexpectedly armed')
+
+          assert GAMMA_MARKETS_URL == 'https://gamma-api.polymarket.com/markets'
+          assert CLOB_BOOKS_URL == 'https://clob.polymarket.com/books'
+          forbidden_literals = {
+              'https://clob.polymarket.com/order',
+              'wss://ws-subscriptions-clob.polymarket.com/ws/user',
+          }
+          for path in Path('research/digital_surface').glob('public_*.py'):
+              text = path.read_text()
+              assert not any(value in text for value in forbidden_literals), path
+
+          bloom = DiagnosticBloomFilter.from_payload(
+              build_diagnostic_bloom(['historical'], source_sha256='a'*64, m_bits=1024, k_hashes=4)
+          )
+          with tempfile.TemporaryDirectory() as directory:
+              directory = Path(directory)
+              market_ledger = ProspectiveLedger(directory/'markets.jsonl', diagnostic_market_ids=bloom)
+              market = GammaMarketRecord(
+                  condition_id='fresh', slug='btc-updown-5m-1999999800', question='Bitcoin Up or Down',
+                  yes_token_id='yes-fresh', no_token_id='no-fresh', duration_seconds=300,
+                  open_epoch_seconds=1_999_999_800, end_date='2033-05-18T03:35:00Z',
+                  tick_size=Decimal('0.01'),
+              )
+              market_summary = observe_markets(
+                  [market], ledger=market_ledger, observed_ts_ms=1,
+                  policy_sha256='1'*64, source_sha256='2'*64,
+              )
+              books = {
+                  token: parse_public_order_book({
+                      'market': 'fresh', 'asset_id': token, 'timestamp': '1', 'hash': 'h-'+token,
+                      'bids': [{'price': '0.40', 'size': '10'}],
+                      'asks': [{'price': '0.50', 'size': '10'}],
+                      'min_order_size': '1', 'tick_size': '0.01', 'neg_risk': False,
+                  })
+                  for token in ('yes-fresh', 'no-fresh')
+              }
+              book_ledger = PublicBookLedger(directory/'books.jsonl')
+              book_summary = observe_public_books(
+                  [market], books, ledger=book_ledger,
+                  prospective_market_ids=market_ledger.market_ids,
+                  prospective_head_sha256=market_ledger.head_hash,
+                  observed_ts_ms=2, policy_sha256='1'*64, source_sha256='2'*64,
+              )
+              assert market_summary['appended'] == 1
+              assert book_summary['books_appended'] == 2
+              assert book_summary['prospective_head_sha256'] == market_ledger.head_hash
+              assert PublicBookLedger(book_ledger.path).head_hash == book_ledger.head_hash
+
+          verified = {}
+          for line in Path('PUBLIC_BOOK_OBSERVER_SOURCE_SHA256.txt').read_text().splitlines():
+              wanted, name = line.split(maxsplit=1)
+              got = hashlib.sha256(Path(name).read_bytes()).hexdigest()
+              assert got == wanted, (name, got, wanted)
+              verified[name] = got
+          result = {
+              'tests_collected': 60,
+              'public_market_endpoint': GAMMA_MARKETS_URL,
+              'public_books_endpoint': CLOB_BOOKS_URL,
+              'authenticated_requests': 0,
+              'order_submissions': 0,
+              'market_hash_chain_verified': True,
+              'book_hash_chain_verified': True,
+              'live_mode': 'physically_disabled',
+              'source_files_verified': verified,
+          }
+          Path('PUBLIC_BOOK_OBSERVER_VERIFICATION.json').write_text(json.dumps(result, indent=2, sort_keys=True))
+          print(json.dumps(result, indent=2))
+          PY
+
+      - name: Build deterministic source checkpoint
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf digital-surface-public-book-observer-source-v1.tar.gz \
+            research tests PUBLIC_BOOK_OBSERVER_SOURCE_SHA256.txt PUBLIC_BOOK_OBSERVER_VERIFICATION.json
+          sha256sum digital-surface-public-book-observer-source-v1.tar.gz > digital-surface-public-book-observer-source-v1.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digital-surface-public-book-observer-checkpoint-v1
+          path: |
+            source/PUBLIC_BOOK_OBSERVER_SOURCE_SHA256.txt
+            source/PUBLIC_BOOK_OBSERVER_VERIFICATION.json
+            source/digital-surface-public-book-observer-source-v1.tar.gz
+            source/digital-surface-public-book-observer-source-v1.tar.gz.sha256
+          retention-days: 30
