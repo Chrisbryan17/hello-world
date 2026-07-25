@@ -1,6 +1,7 @@
 from .config import LiveTradingDisabledError, TradingConfig, load_config
 from .gateway import ShadowGateway, quantize_down
 from .report import ShadowCanaryMetrics, evaluate_shadow_admission
+from .report_chain import ShadowReportIntegrityError, ShadowReportLedger
 from .risk import evaluate_pair_risk
 from .types import BookQuote, PreparedOrder, PreparedPair, RiskDecision, RiskState, TradeIntent
 
@@ -11,6 +12,8 @@ __all__ = [
     "PreparedPair",
     "RiskDecision",
     "ShadowCanaryMetrics",
+    "ShadowReportIntegrityError",
+    "ShadowReportLedger",
     "RiskState",
     "ShadowGateway",
     "TradeIntent",
