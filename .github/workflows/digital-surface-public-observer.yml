@@ -1,0 +1,185 @@
+name: Digital Surface Public Observer
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: digital-surface-public-observer
+  cancel-in-progress: false
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+  V5_ARTIFACT_ID: '8615107471'
+  V5_ARTIFACT_ZIP_SHA256: '479a25e235841d94077b3d2df070c8ed46bb736c7ebd8f9f1bde8016198a9c39'
+  CONTRACT_INVENTORY_SHA256: 'cea26cf5221e81b90ba311317f31e97b54e4110f0f1c716fcb14f06d9f1651f3'
+  FILTER_CACHE_KEY: digital-surface-diagnostic-filter-v1-cea26cf5221e81b90ba311317f31e97b54e4110f0f1c716fcb14f06d9f1651f3
+
+jobs:
+  observe-public-markets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Reconstruct observation-only source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p source/research/digital_surface
+          touch source/research/__init__.py source/research/digital_surface/__init__.py
+          cp -a ci_payload/digital-surface-live-readiness/observer-source/research/digital_surface/. source/research/digital_surface/
+          cp -a ci_payload/digital-surface-live-readiness/prospective-source/research/digital_surface/. source/research/digital_surface/
+          cat > source/PUBLIC_OBSERVER_RUNTIME_SOURCE_SHA256.txt <<'EOF'
+          f3f1e2417305cd0ceee4b6971e461e488960f04f0e0b80ad292733a2a4b248af  research/digital_surface/diagnostic_filter.py
+          efd186a4ca00c2e920bc87b8d137ac46db52f2aa36385a275dc99e70b5618439  research/digital_surface/market_discovery.py
+          3fbb96286445b60b0b7deeb5e1f9ee45f53bfd5efdcc7a727b50617b19463224  research/digital_surface/prospective.py
+          73c5aaa7a4ca10baf85886eb28c6135d975eafaaab19e5193819d1ccbf82f2be  research/digital_surface/public_observer.py
+          ea56803a606ff33b7231b373141df3d22c159cedc1063603fef3dfb6255c60c9  research/digital_surface/shadow_observation_policy_v1.json
+          EOF
+          sed -i 's/^          //' source/PUBLIC_OBSERVER_RUNTIME_SOURCE_SHA256.txt
+          (cd source && sha256sum -c PUBLIC_OBSERVER_RUNTIME_SOURCE_SHA256.txt)
+
+      - name: Install observation-only dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pandas==2.2.3 requests==2.32.3
+
+      - name: Restore diagnostic filter
+        id: filter-cache
+        uses: actions/cache@v4
+        with:
+          path: observer-filter
+          key: ${{ env.FILTER_CACHE_KEY }}
+
+      - name: Generate diagnostic filter from immutable v5 inventory
+        if: steps.filter-cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${V5_ARTIFACT_ID}/zip" \
+            -o v5.zip
+          echo "${V5_ARTIFACT_ZIP_SHA256}  v5.zip" | sha256sum -c -
+          mkdir v5 observer-filter && unzip -q v5.zip -d v5
+          inventory=$(find v5 -type f -name contract_inventory.csv -print -quit)
+          test -n "${inventory}"
+          cp "${inventory}" observer-filter/contract_inventory.csv
+          echo "${CONTRACT_INVENTORY_SHA256}  observer-filter/contract_inventory.csv" | sha256sum -c -
+          PYTHONPATH=source python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import pandas as pd
+          from research.digital_surface.diagnostic_filter import build_diagnostic_bloom
+
+          path = Path('observer-filter/contract_inventory.csv')
+          frame = pd.read_csv(path)
+          ids = sorted(set(frame['condition_id'].astype(str)))
+          assert len(ids) == 12_465
+          source_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+          payload = build_diagnostic_bloom(ids, source_sha256=source_sha)
+          assert payload['bitset_sha256'] == '5fd0bc41ab1ae15ddaf9ca33354d803ab74c112d19136240f00d77156186d113'
+          Path('observer-filter/diagnostic_market_filter.json').write_text(
+              json.dumps(payload, indent=2, sort_keys=True) + '\n'
+          )
+          PY
+
+      - name: Verify restored diagnostic filter
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=source python - <<'PY'
+          import hashlib
+          from research.digital_surface.diagnostic_filter import DiagnosticBloomFilter
+          bloom = DiagnosticBloomFilter.from_path('observer-filter/diagnostic_market_filter.json')
+          assert bloom.item_count == 12_465
+          assert bloom.m_bits == 262_144
+          assert bloom.k_hashes == 7
+          assert bloom.source_sha256 == 'cea26cf5221e81b90ba311317f31e97b54e4110f0f1c716fcb14f06d9f1651f3'
+          assert hashlib.sha256(bloom.bitset).hexdigest() == '5fd0bc41ab1ae15ddaf9ca33354d803ab74c112d19136240f00d77156186d113'
+          PY
+
+      - name: Restore append-only prospective state
+        uses: actions/cache/restore@v4
+        with:
+          path: observer-state
+          key: digital-surface-public-observer-state-${{ github.run_id }}
+          restore-keys: |
+            digital-surface-public-observer-state-
+
+      - name: Observe public markets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p observer-state observer-output
+          PYTHONPATH=source python -m research.digital_surface.public_observer \
+            --diagnostic-filter observer-filter/diagnostic_market_filter.json \
+            --ledger observer-state/prospective_markets.jsonl \
+            --policy source/research/digital_surface/shadow_observation_policy_v1.json \
+            --source-manifest source/PUBLIC_OBSERVER_RUNTIME_SOURCE_SHA256.txt \
+            --summary observer-output/observer_summary.json \
+            --page-size 100 \
+            --max-pages 20
+
+      - name: Verify observation-only artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=source python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          from research.digital_surface.diagnostic_filter import DiagnosticBloomFilter
+          from research.digital_surface.prospective import ProspectiveLedger
+
+          summary = json.loads(Path('observer-output/observer_summary.json').read_text())
+          assert summary['trading_mode'] == 'observation_only'
+          assert summary['authenticated_requests'] == 0
+          assert summary['order_submissions'] == 0
+          bloom = DiagnosticBloomFilter.from_path('observer-filter/diagnostic_market_filter.json')
+          ledger = ProspectiveLedger('observer-state/prospective_markets.jsonl', diagnostic_market_ids=bloom)
+          assert ledger.head_hash == summary['ledger_head_sha256']
+          assert len(ledger.market_ids) == summary['markets_total_in_ledger']
+          verification = {
+              'workflow_run_id': '${{ github.run_id }}',
+              'workflow_run_attempt': '${{ github.run_attempt }}',
+              'ledger_head_sha256': ledger.head_hash,
+              'ledger_sha256': hashlib.sha256(Path('observer-state/prospective_markets.jsonl').read_bytes()).hexdigest(),
+              'markets_total_in_ledger': len(ledger.market_ids),
+              'summary': summary,
+              'authenticated_requests': 0,
+              'order_submissions': 0,
+              'trading_mode': 'observation_only',
+          }
+          Path('observer-output/OBSERVER_VERIFICATION.json').write_text(json.dumps(verification, indent=2, sort_keys=True))
+          print(json.dumps(verification, indent=2))
+          PY
+          cp observer-state/prospective_markets.jsonl observer-output/prospective_markets.jsonl
+          sha256sum observer-output/prospective_markets.jsonl observer-output/observer_summary.json observer-output/OBSERVER_VERIFICATION.json > observer-output/SHA256SUMS.txt
+
+      - name: Save append-only prospective state
+        uses: actions/cache/save@v4
+        with:
+          path: observer-state
+          key: digital-surface-public-observer-state-${{ github.run_id }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digital-surface-public-observer-${{ github.run_id }}
+          path: observer-output/
+          retention-days: 90
