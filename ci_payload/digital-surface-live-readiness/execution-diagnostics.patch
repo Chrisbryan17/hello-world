@@ -1,0 +1,269 @@
+diff --git a/research/digital_surface/run_research.py b/research/digital_surface/run_research.py
+index cbe6068..7d5d5cd 100644
+--- a/research/digital_surface/run_research.py
++++ b/research/digital_surface/run_research.py
+@@ -14,6 +14,7 @@ import pandas as pd
+ 
+ from .candidates import CandidateConfig, generate_cross_horizon_candidates, select_one_candidate_per_expiry
+ from .data import SOURCE_SPEC, build_research_panel, sha256_file
++from .diagnostics import attribute_execution_failures
+ from .execution import replay_atomic_fok, replay_single_leg_fok
+ from .fees import all_in_cost
+ from .portfolio import replay_bankroll
+@@ -495,6 +496,29 @@ def run(cache_dir: Path, output_dir: Path) -> dict[str, Any]:
+         _write_frame(fill_ledger, output_dir / "execution_ledger.parquet")
+     if not benchmark_fill_ledger.empty:
+         _write_frame(benchmark_fill_ledger, output_dir / "benchmark_execution_ledger.parquet")
++    if not candidate_ledger.empty:
++        attribution, diagnostic_summary = attribute_execution_failures(candidate_ledger, fill_ledger)
++        attribution.to_csv(output_dir / "execution_failure_attribution.csv", index=False)
++        (output_dir / "EXECUTION_DIAGNOSTICS.json").write_text(
++            json.dumps(diagnostic_summary, indent=2, default=_json_default),
++            encoding="utf-8",
++        )
++    else:
++        pd.DataFrame(columns=["candidate_id", "leg", "reason"]).to_csv(
++            output_dir / "execution_failure_attribution.csv", index=False
++        )
++        (output_dir / "EXECUTION_DIAGNOSTICS.json").write_text(
++            json.dumps(
++                {
++                    "candidates_attributed": 0,
++                    "legs_attributed": 0,
++                    "complete_attribution": True,
++                    "reason_counts": [],
++                },
++                indent=2,
++            ),
++            encoding="utf-8",
++        )
+     pd.DataFrame(coherence_rows).to_csv(output_dir / "coherence.csv", index=False)
+     pd.DataFrame(calibration_rows).to_csv(output_dir / "calibration.csv", index=False)
+     (output_dir / "validation_choices.json").write_text(json.dumps(validation_choices, indent=2, default=_json_default), encoding="utf-8")
+diff --git a/research/digital_surface/diagnostics.py b/research/digital_surface/diagnostics.py
+new file mode 100644
+index 0000000..c80fd53
+--- /dev/null
++++ b/research/digital_surface/diagnostics.py
+@@ -0,0 +1,135 @@
++from __future__ import annotations
++
++from typing import Any
++
++import numpy as np
++import pandas as pd
++
++
++_CANDIDATE_REQUIRED = {"candidate_id"}
++_EXECUTION_REQUIRED = {
++    "candidate_id",
++    "shares",
++    "atomic",
++    "low_yes_book_ts_ms",
++    "high_no_book_ts_ms",
++    "low_yes_arrival_ask",
++    "high_no_arrival_ask",
++    "low_yes_arrival_size",
++    "high_no_arrival_size",
++    "low_yes_tape_size",
++    "high_no_tape_size",
++    "low_yes_limit",
++    "high_no_limit",
++}
++
++
++def _require_columns(frame: pd.DataFrame, required: set[str], name: str) -> None:
++    missing = sorted(required - set(frame.columns))
++    if missing:
++        raise ValueError(f"{name} missing required columns: {missing}")
++
++
++def _reason_for_leg(row: pd.Series, prefix: str) -> str:
++    book_ts = row[f"{prefix}_book_ts_ms"]
++    ask = float(row[f"{prefix}_arrival_ask"]) if pd.notna(row[f"{prefix}_arrival_ask"]) else np.nan
++    limit_px = float(row[f"{prefix}_limit"])
++    displayed = float(row[f"{prefix}_arrival_size"]) if pd.notna(row[f"{prefix}_arrival_size"]) else 0.0
++    tape = float(row[f"{prefix}_tape_size"]) if pd.notna(row[f"{prefix}_tape_size"]) else 0.0
++    shares = float(row["shares"])
++
++    if pd.isna(book_ts):
++        return "missing_post_arrival_book"
++    if not np.isfinite(ask) or ask > limit_px + 1e-12:
++        return "ask_above_limit"
++    if not np.isfinite(displayed) or displayed < shares:
++        return "insufficient_displayed_depth"
++    if not np.isfinite(tape) or tape < shares:
++        return "insufficient_post_arrival_tape"
++    return "filled"
++
++
++def attribute_execution_failures(
++    candidates: pd.DataFrame,
++    executions: pd.DataFrame,
++) -> tuple[pd.DataFrame, dict[str, Any]]:
++    """Assign exactly one terminal execution reason to each candidate leg."""
++    _require_columns(candidates, _CANDIDATE_REQUIRED, "candidates")
++    _require_columns(executions, _EXECUTION_REQUIRED, "executions")
++    if candidates["candidate_id"].astype(str).duplicated().any():
++        raise ValueError("candidates contain duplicate candidate_id values")
++    if executions["candidate_id"].astype(str).duplicated().any():
++        raise ValueError("executions contain duplicate candidate_id values")
++
++    candidate_frame = candidates.copy()
++    execution_frame = executions.copy()
++    candidate_frame["candidate_id"] = candidate_frame["candidate_id"].astype(str)
++    execution_frame["candidate_id"] = execution_frame["candidate_id"].astype(str)
++    merged = candidate_frame.merge(
++        execution_frame,
++        on="candidate_id",
++        how="left",
++        validate="one_to_one",
++        suffixes=("", "_execution"),
++        indicator=True,
++    )
++    if not merged["_merge"].eq("both").all():
++        missing = merged.loc[merged["_merge"] != "both", "candidate_id"].head(10).tolist()
++        raise ValueError(f"missing execution rows for candidates: {missing}")
++    merged = merged.drop(columns="_merge")
++
++    rows: list[dict[str, Any]] = []
++    passthrough = [
++        column
++        for column in (
++            "fold_id",
++            "test_week",
++            "decision_ts_ms",
++            "close_ts",
++            "tau_s",
++            "expected_cost",
++            "theoretical_edge",
++            "config_id",
++            "shares",
++            "atomic",
++            "orphan_leg",
++        )
++        if column in merged.columns
++    ]
++    for _, row in merged.iterrows():
++        base = {column: row[column] for column in passthrough}
++        for leg, prefix in (("low_yes", "low_yes"), ("high_no", "high_no")):
++            reason = _reason_for_leg(row, prefix)
++            rows.append(
++                {
++                    "candidate_id": str(row["candidate_id"]),
++                    "leg": leg,
++                    "reason": reason,
++                    "book_ts_ms": row[f"{prefix}_book_ts_ms"],
++                    "arrival_ask": row[f"{prefix}_arrival_ask"],
++                    "limit_px": row[f"{prefix}_limit"],
++                    "displayed_size": row[f"{prefix}_arrival_size"],
++                    "post_arrival_tape_size": row[f"{prefix}_tape_size"],
++                    **base,
++                }
++            )
++    ledger = pd.DataFrame(rows)
++    expected_legs = 2 * len(candidates)
++    complete = bool(len(ledger) == expected_legs and ledger["reason"].notna().all())
++    if not complete:
++        raise AssertionError("execution attribution is incomplete")
++
++    reason_counts = (
++        ledger.groupby([column for column in ("test_week", "leg", "reason") if column in ledger.columns], dropna=False)
++        .size()
++        .rename("count")
++        .reset_index()
++        .to_dict("records")
++    )
++    summary: dict[str, Any] = {
++        "candidates_attributed": int(len(candidates)),
++        "legs_attributed": int(len(ledger)),
++        "complete_attribution": complete,
++        "reason_counts": reason_counts,
++    }
++    return ledger.sort_values(["candidate_id", "leg"], kind="mergesort").reset_index(drop=True), summary
+diff --git a/tests/digital_surface/test_diagnostics.py b/tests/digital_surface/test_diagnostics.py
+new file mode 100644
+index 0000000..ad441ac
+--- /dev/null
++++ b/tests/digital_surface/test_diagnostics.py
+@@ -0,0 +1,68 @@
++import numpy as np
++import pandas as pd
++
++from research.digital_surface.diagnostics import attribute_execution_failures
++
++
++def test_attributes_each_leg_to_one_terminal_reason():
++    candidates = pd.DataFrame([
++        {
++            "candidate_id": "a",
++            "tau_s": 30.0,
++            "expected_cost": 1.05,
++            "theoretical_edge": 0.03,
++            "fold_id": 1,
++            "test_week": "w1",
++        },
++        {
++            "candidate_id": "b",
++            "tau_s": 12.0,
++            "expected_cost": 1.02,
++            "theoretical_edge": 0.04,
++            "fold_id": 1,
++            "test_week": "w1",
++        },
++    ])
++    executions = pd.DataFrame([
++        {
++            "candidate_id": "a",
++            "shares": 5.0,
++            "atomic": False,
++            "orphan_leg": None,
++            "low_yes_book_ts_ms": np.nan,
++            "high_no_book_ts_ms": 2,
++            "low_yes_arrival_ask": np.nan,
++            "high_no_arrival_ask": 0.40,
++            "low_yes_arrival_size": 0.0,
++            "high_no_arrival_size": 10.0,
++            "low_yes_tape_size": 0.0,
++            "high_no_tape_size": 2.0,
++            "low_yes_limit": 0.50,
++            "high_no_limit": 0.50,
++        },
++        {
++            "candidate_id": "b",
++            "shares": 5.0,
++            "atomic": True,
++            "orphan_leg": None,
++            "low_yes_book_ts_ms": 2,
++            "high_no_book_ts_ms": 2,
++            "low_yes_arrival_ask": 0.30,
++            "high_no_arrival_ask": 0.40,
++            "low_yes_arrival_size": 10.0,
++            "high_no_arrival_size": 10.0,
++            "low_yes_tape_size": 8.0,
++            "high_no_tape_size": 7.0,
++            "low_yes_limit": 0.50,
++            "high_no_limit": 0.50,
++        },
++    ])
++
++    ledger, summary = attribute_execution_failures(candidates, executions)
++    indexed = ledger.set_index(["candidate_id", "leg"])
++    assert indexed.loc[("a", "low_yes"), "reason"] == "missing_post_arrival_book"
++    assert indexed.loc[("a", "high_no"), "reason"] == "insufficient_post_arrival_tape"
++    assert ledger[ledger["candidate_id"] == "b"]["reason"].tolist() == ["filled", "filled"]
++    assert summary["candidates_attributed"] == 2
++    assert summary["legs_attributed"] == 4
++    assert summary["complete_attribution"] is True
+diff --git a/tests/digital_surface/test_integration.py b/tests/digital_surface/test_integration.py
+index f972c36..a7c2788 100644
+--- a/tests/digital_surface/test_integration.py
++++ b/tests/digital_surface/test_integration.py
+@@ -64,6 +64,7 @@ def test_end_to_end_runner_writes_auditable_artifacts(tmp_path, monkeypatch):
+     for name in [
+         "REPORT.md", "MANIFEST.json", "SHA256SUMS.json", "fold_results.csv",
+         "validation_grid.csv", "admission.json", "INVALIDATIONS.md",
++        "execution_failure_attribution.csv", "EXECUTION_DIAGNOSTICS.json",
+     ]:
+         assert (output / name).exists(), name
+     folds = pd.read_csv(output / "fold_results.csv")
