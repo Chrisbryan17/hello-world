@@ -1,0 +1,142 @@
+name: Polymarket 5m Deep EDA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [polymarket-5m-deep-eda-20260725]
+    paths:
+      - .github/workflows/polymarket-5m-deep-eda.yml
+      - research/polymarket_5m_eda/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: polymarket-5m-deep-eda-20260725
+  cancel-in-progress: false
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+  HF_HUB_DISABLE_TELEMETRY: '1'
+
+jobs:
+  deep-eda:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install analytical stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            duckdb==1.3.2 \
+            pyarrow==19.0.1 \
+            pandas==2.2.3 \
+            numpy==2.2.6 \
+            scipy==1.15.3 \
+            huggingface-hub==0.34.4 \
+            tabulate==0.9.0
+
+      - name: Restore immutable dataset cache
+        id: data-cache
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: polymarket-5m-kachoio-2026-06-17-v1
+
+      - name: Download and fingerprint full dataset
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          from huggingface_hub import HfApi, snapshot_download
+
+          repo = 'kachoio/polymarket-5-minute-crypto-up-down-markets'
+          assets = ['btc', 'eth', 'sol', 'xrp', 'doge', 'hype', 'bnb']
+          patterns = [f'{asset}_{kind}.parquet' for asset in assets for kind in ('markets', 'ticks')]
+          Path('data').mkdir(exist_ok=True)
+          info = HfApi().dataset_info(repo)
+          snapshot_download(
+              repo_id=repo,
+              repo_type='dataset',
+              revision=info.sha,
+              allow_patterns=patterns,
+              local_dir='data',
+              max_workers=8,
+          )
+          missing = [name for name in patterns if not (Path('data') / name).exists()]
+          assert not missing, missing
+          hashes = {}
+          rows = []
+          for name in sorted(patterns):
+              path = Path('data') / name
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              hashes[name] = digest
+              rows.append(f'{digest}  {path.as_posix()}')
+          Path('DATASET_REVISION.json').write_text(json.dumps({
+              'repo': repo,
+              'revision': info.sha,
+              'files': hashes,
+          }, indent=2, sort_keys=True))
+          Path('DATA_SHA256SUMS.txt').write_text('\n'.join(rows) + '\n')
+          print(json.dumps({'revision': info.sha, 'files': len(hashes)}, indent=2))
+          PY
+          sha256sum -c DATA_SHA256SUMS.txt
+
+      - name: Run structural microstructure EDA
+        run: python research/polymarket_5m_eda/phase1_structural.py
+
+      - name: Run BTC lead-lag walk-forward search
+        run: python research/polymarket_5m_eda/phase2_leadlag.py
+
+      - name: Build deterministic research archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          cp -a results artifact/
+          cp -a research/polymarket_5m_eda artifact/source
+          cp DATASET_REVISION.json DATA_SHA256SUMS.txt artifact/
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          files = {}
+          for path in sorted(Path('artifact').rglob('*')):
+              if path.is_file():
+                  files[path.relative_to('artifact').as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+          Path('artifact/SHA256SUMS.json').write_text(json.dumps(files, indent=2, sort_keys=True))
+          PY
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf polymarket-5m-deep-eda-v1.tar.gz artifact
+          sha256sum polymarket-5m-deep-eda-v1.tar.gz > polymarket-5m-deep-eda-v1.tar.gz.sha256
+
+      - name: Publish executive summary
+        shell: bash
+        run: |
+          {
+            echo '# Polymarket 5m Deep EDA'
+            echo
+            cat results/phase1_structural/REPORT.md
+            echo
+            cat results/phase2_leadlag/REPORT.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: polymarket-5m-deep-eda-v1
+          path: |
+            artifact/
+            polymarket-5m-deep-eda-v1.tar.gz
+            polymarket-5m-deep-eda-v1.tar.gz.sha256
+          retention-days: 90
