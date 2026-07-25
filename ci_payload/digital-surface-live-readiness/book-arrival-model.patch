@@ -1,0 +1,264 @@
+diff --git a/research/digital_surface/execution.py b/research/digital_surface/execution.py
+--- a/research/digital_surface/execution.py
++++ b/research/digital_surface/execution.py
+@@ -25,8 +25,12 @@
+     tape_full: bool
+ 
+     @property
++    def book_executable(self) -> bool:
++        return self.book_crossable and self.book_full
++
++    @property
+     def filled(self) -> bool:
+-        return self.book_crossable and self.book_full and self.tape_full
++        return self.book_executable and self.tape_full
+ 
+ 
+ def _prepare_books(books: pd.DataFrame, condition_ids: set[str] | None = None) -> dict[str, pd.DataFrame]:
+@@ -146,6 +150,7 @@
+     max_book_gap_ms: int = 4_000,
+     shares: float = 5.0,
+     adverse_slippage: float = 0.0,
++    fill_model: str = "tape_confirmed",
+ ) -> pd.DataFrame:
+     required = {
+         "candidate_id",
+@@ -165,6 +170,8 @@
+         raise ValueError(f"candidates missing required columns: {missing}")
+     if shares <= 0:
+         raise ValueError("shares must be positive")
++    if fill_model not in {"tape_confirmed", "book_arrival"}:
++        raise ValueError("fill_model must be 'tape_confirmed' or 'book_arrival'")
+     condition_ids = set(candidates["low_condition_id"].astype(str)) | set(candidates["high_condition_id"].astype(str))
+     token_ids = set(candidates["low_yes_token_id"].astype(str)) | set(candidates["high_no_token_id"].astype(str))
+     book_groups = _prepare_books(books, condition_ids)
+@@ -198,15 +205,17 @@
+             tape_window_ms=tape_window_ms,
+             max_book_gap_ms=max_book_gap_ms,
+         )
+-        atomic = low.filled and high.filled
++        low_filled = low.filled if fill_model == "tape_confirmed" else low.book_executable
++        high_filled = high.filled if fill_model == "tape_confirmed" else high.book_executable
++        atomic = low_filled and high_filled
+         orphan_leg: str | None = None
+-        if low.filled != high.filled:
+-            orphan_leg = "low_yes" if low.filled else "high_no"
++        if low_filled != high_filled:
++            orphan_leg = "low_yes" if low_filled else "high_no"
+ 
+-        low_px = low.arrival_ask if low.filled else math.nan
+-        high_px = high.arrival_ask if high.filled else math.nan
+-        low_cost = all_in_cost(min(0.99, low_px + adverse_slippage)) if low.filled else 0.0
+-        high_cost = all_in_cost(min(0.99, high_px + adverse_slippage)) if high.filled else 0.0
++        low_px = low.arrival_ask if low_filled else math.nan
++        high_px = high.arrival_ask if high_filled else math.nan
++        low_cost = all_in_cost(min(0.99, low_px + adverse_slippage)) if low_filled else 0.0
++        high_cost = all_in_cost(min(0.99, high_px + adverse_slippage)) if high_filled else 0.0
+         low_payoff = 1.0 if bool(candidate.low_resolved_yes) else 0.0
+         high_no_payoff = 0.0 if bool(candidate.high_resolved_yes) else 1.0
+         if atomic:
+@@ -229,10 +238,15 @@
+                 "arrival_ts_ms": arrival,
+                 "close_ts": int(candidate.close_ts),
+                 "shares": float(shares),
++                "fill_model": fill_model,
+                 "atomic": bool(atomic),
+                 "orphan_leg": orphan_leg,
+-                "low_yes_filled": bool(low.filled),
+-                "high_no_filled": bool(high.filled),
++                "low_yes_filled": bool(low_filled),
++                "high_no_filled": bool(high_filled),
++                "low_yes_book_executable": bool(low.book_executable),
++                "high_no_book_executable": bool(high.book_executable),
++                "low_yes_tape_confirmed": bool(low.filled),
++                "high_no_tape_confirmed": bool(high.filled),
+                 "low_yes_book_ts_ms": low.book_ts_ms,
+                 "high_no_book_ts_ms": high.book_ts_ms,
+                 "low_yes_arrival_ask": low.arrival_ask,
+diff --git a/research/digital_surface/run_research.py b/research/digital_surface/run_research.py
+--- a/research/digital_surface/run_research.py
++++ b/research/digital_surface/run_research.py
+@@ -109,6 +109,7 @@
+     week: str,
+     hours: float,
+     adverse_slippage: float = 0.0,
++    fill_model: str = "tape_confirmed",
+ ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+     if candidates.empty:
+         summary = {
+@@ -121,6 +122,7 @@
+             "quality_ratio": 0.0,
+             "max_drawdown": 0.0,
+             "adverse_slippage": adverse_slippage,
++            "fill_model": fill_model,
+         }
+         return pd.DataFrame(), pd.DataFrame(), summary
+     fills = replay_atomic_fok(
+@@ -132,6 +134,7 @@
+         max_book_gap_ms=4_000,
+         shares=BASE_SHARES,
+         adverse_slippage=adverse_slippage,
++        fill_model=fill_model,
+     )
+     eligible = fills[fills["atomic"] | fills["orphan_leg"].notna()].copy()
+     if eligible.empty:
+@@ -157,6 +160,7 @@
+         "quality_ratio": float(report["quality_ratio"]),
+         "max_drawdown": float(report["max_drawdown"]),
+         "adverse_slippage": float(adverse_slippage),
++        "fill_model": fill_model,
+     }
+     return fills, ledger, summary
+ 
+@@ -361,6 +365,8 @@
+     benchmark_rows: list[dict[str, Any]] = []
+     all_candidates: list[pd.DataFrame] = []
+     all_fills: list[pd.DataFrame] = []
++    all_book_fills: list[pd.DataFrame] = []
++    book_fold_rows: list[dict[str, Any]] = []
+     all_benchmark_fills: list[pd.DataFrame] = []
+     coherence_rows: list[dict[str, Any]] = []
+     calibration_rows: list[dict[str, Any]] = []
+@@ -410,6 +416,30 @@
+         two_fills, _, two = _execute_pair_week(
+             candidates, books, trades, week=fold.test_week, hours=_hours(test_state), adverse_slippage=0.02
+         )
++        book_fills, _, book_summary = _execute_pair_week(
++            candidates,
++            books,
++            trades,
++            week=fold.test_week,
++            hours=_hours(test_state),
++            adverse_slippage=0.0,
++            fill_model="book_arrival",
++        )
++        book_fold_rows.append(
++            {
++                "fold_id": fold.fold_id,
++                "test_week": fold.test_week,
++                "config_id": selected_id,
++                "candidate_count": book_summary["candidate_count"],
++                "atomic_count": book_summary["atomic_count"],
++                "atomic_per_hour": book_summary["atomic_per_hour"],
++                "orphan_rate": book_summary["orphan_rate"],
++                "terminal_growth": book_summary["terminal_growth"],
++                "quality_ratio": book_summary["quality_ratio"],
++                "max_drawdown": book_summary["max_drawdown"],
++                "fill_model": "book_arrival",
++            }
++        )
+         fold_rows.append(
+             {
+                 "fold_id": fold.fold_id,
+@@ -437,6 +467,12 @@
+             tagged_fills["test_week"] = fold.test_week
+             all_fills.append(taged_fills)
+ 
++        if not book_fills.empty:
++            tagged_book_fills = book_fills.copy()
++            tagged_book_fills["fold_id"] = fold.fold_id
++            tagged_book_fills["test_week"] = fold.test_week
++            all_book_fills.append(tagged_book_fills)
++
+         benchmark_fills, benchmark = _evaluate_benchmark_week(test_state, books, trades, fold.test_week)
+         benchmark["fold_id"] = fold.fold_id
+         benchmark_rows.append(benchmark)
+@@ -450,6 +486,8 @@
+     validation_frame = pd.DataFrame(validation_rows)
+     candidate_ledger = pd.concat(all_candidates, ignore_index=True) if all_candidates else pd.DataFrame()
+     fill_ledger = pd.concat(all_fills, ignore_index=True) if all_fills else pd.DataFrame()
++    book_fill_ledger = pd.concat(all_book_fills, ignore_index=True) if all_book_fills else pd.DataFrame()
++    book_fold_results = pd.DataFrame(book_fold_rows)
+     benchmark_fill_ledger = pd.concat(all_benchmark_fills, ignore_index=True) if all_benchmark_fills else pd.DataFrame()
+ 
+     atomic_pnl = fill_ledger.loc[fill_ledger.get("atomic", False).astype(bool), "pnl"] if not fill_ledger.empty else pd.Series(dtype=float)
+@@ -488,12 +526,15 @@
+         admission["permutation_ruin_rate"] = 0.0
+ 
+     fold_results.to_csv(output_dir / "fold_results.csv", index=False)
++    book_fold_results.to_csv(output_dir / "book_fold_results.csv", index=False)
+     benchmark_results.to_csv(output_dir / "benchmark_results.csv", index=False)
+     validation_frame.to_csv(output_dir / "validation_grid.csv", index=False)
+     if not candidate_ledger.empty:
+        _write_frame(candidate_ledger, output_dir / "candidate_ledger.parquet")
+     if not fill_ledger.empty:
+        _write_frame(fill_ledger, output_dir / "execution_ledger.parquet")
++    if not book_fill_ledger.empty:
++        _write_frame(book_fill_ledger, output_dir / "book_execution_ledger.parquet")
+     if not benchmark_fill_ledger.empty:
+         _write_frame(benchmark_fill_ledger, output_dir / "benchmark_execution_ledger.parquet")
+     if not candidate_ledger.empty:
+@@ -531,7 +572,14 @@
+         "weeks": weeks,
+         "folds": [fold.__dict__ if hasattr(fold, "__dict__") else {"fold_id": fold.fold_id, "validation_weeks": fold.validation_weeks, "test_week": fold.test_week, "fit_weeks": fold.fit_weeks} for fold in folds],
+         "configs": [config.__dict__ if hasattr(config, "__dict__") else {field: getattr(config, field) for field in config.__dataclass_fields__} for config in configs],
+-        "execution": {"latency_ms": 1000, "tape_window_ms": 1500, "shares": BASE_SHARES, "base_slippage": 0.01},
++        "execution": {
++            "latency_ms": 1000,
++            "tape_window_ms": 1500,
++            "shares": BASE_SHARES,
++            "base_slippage": 0.01,
++            "admission_fill_model": "tape_confirmed",
++            "diagnostic_fill_model": "book_arrival",
++        },
+         "risk": {"per_position_max_loss_fraction": 0.01, "concurrent_max_loss_fraction": 0.20},
+         "environment": {"python": sys.version, "platform": platform.platform(), "pythonhashseed": os.environ.get("PYTHONHASHSEED")},
+         "admission": admission,
+diff --git a/tests/digital_surface/test_execution.py b/tests/digital_surface/test_execution.py
+--- a/tests/digital_surface/test_execution.py
++++ b/tests/digital_surface/test_execution.py
+@@ -59,3 +59,36 @@
+     bad = replay_single_leg_fok(signals, books(), tape(prearrival_only=True), shares=5)
+     assert good.iloc[0].filled and good.iloc[0].pnl > 0
+     assert not bad.iloc[0].filled
++
++
++def test_book_arrival_model_uses_post_latency_executable_depth_without_future_tape():
++    conservative = replay_atomic_fok(
++        candidate(), books(), tape(prearrival_only=True), shares=5, latency_ms=1000
++    )
++    estimated = replay_atomic_fok(
++        candidate(),
++        books(),
++        tape(prearrival_only=True),
++        shares=5,
++        latency_ms=1000,
++        fill_model="book_arrival",
++    )
++    assert not conservative.iloc[0].atomic
++    assert estimated.iloc[0].atomic
++    assert estimated.iloc[0].fill_model == "book_arrival"
++    assert estimated.iloc[0].low_yes_book_executable
++    assert estimated.iloc[0].high_no_book_executable
++    assert not estimated.iloc[0].low_yes_tape_confirmed
++    assert not estimated.iloc[0].high_no_tape_confirmed
++
++
++def test_book_arrival_model_still_rejects_missing_or_uncrossable_books():
++    missing_high = books().loc[lambda frame: frame["condition_id"] != "high"]
++    missing = replay_atomic_fok(
++        candidate(), missing_high, tape(), shares=5, latency_ms=1000, fill_model="book_arrival"
++    )
++    expensive = replay_atomic_fok(
++        candidate(), books(high_ask=.60), tape(), shares=5, latency_ms=1000, fill_model="book_arrival"
++    )
++    assert not missing.iloc[0].atomic
++    assert not expensive.iloc[0].atomic
+diff --git a/tests/digital_surface/test_integration.py b/tests/digital_surface/test_integration.py
+--- a/tests/digital_surface/test_integration.py
++++ b/tests/digital_surface/test_integration.py
+@@ -65,9 +65,14 @@
+         "REPORT.md", "MANIFEST.json", "SHA256SUMS.json", "fold_results.csv",
+         "validation_grid.csv", "admission.json", "INVALIDATIONS.md",
+         "execution_failure_attribution.csv", "EXECUTION_DIAGNOSTICS.json",
++        "book_fold_results.csv",
+     ]:
+         assert (output / name).exists(), name
++    assert (output / "book_execution_ledger.parquet").exists() or (output / "book_execution_ledger.csv").exists()
+     folds = pd.read_csv(output / "fold_results.csv")
+     assert len(folds) == 4
+     assert folds["atomic_count"].sum() == 4
++    book_folds = pd.read_csv(output / "book_fold_results.csv")
++    assert len(book_folds) == 4
++    assert book_folds["atomic_count"].sum() == 4
+     assert "pre-arrival" in (output / "INVALIDATIONS.md").read_text().lower()
