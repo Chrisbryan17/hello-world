@@ -58,22 +58,25 @@ jobs:
           set -euxo pipefail
           python -m compileall -q src scripts
 
-      - name: Generate, validate, and physically replay one demonstration
-        working-directory: robosuite-expert-demo-generator
+      - name: Generate, validate, physically replay, and diagnose
         shell: bash
         run: |
           set -uo pipefail
-          mkdir -p artifacts/real-physics
-          export PYTHONPATH="$PWD/src"
+          mkdir -p robosuite-expert-demo-generator/artifacts/real-physics
+          export PYTHONPATH="$PWD/robosuite-expert-demo-generator/src"
           export PYTHONUNBUFFERED=1
           set +e
-          python scripts/integration_probe.py \
-            --output artifacts/real-physics/probe-demo.hdf5 \
-            2>&1 | tee artifacts/real-physics/probe.log
+          python robosuite-expert-demo-generator/scripts/integration_probe.py \
+            --output robosuite-expert-demo-generator/artifacts/real-physics/probe-demo.hdf5 \
+            2>&1 | tee robosuite-expert-demo-generator/artifacts/real-physics/probe.log
           status=${PIPESTATUS[0]}
+          if test -f robosuite-expert-demo-generator/artifacts/real-physics/probe-demo.hdf5; then
+            python robosuite_probe_payload/replay_diagnostics.py \
+              2>&1 | tee robosuite-expert-demo-generator/artifacts/real-physics/replay-diagnostics.log
+          fi
           set -e
-          printf '%s\n' "$status" > artifacts/real-physics/exit-code.txt
-          python -m pip freeze > artifacts/real-physics/pip-freeze.txt
+          printf '%s\n' "$status" > robosuite-expert-demo-generator/artifacts/real-physics/exit-code.txt
+          python -m pip freeze > robosuite-expert-demo-generator/artifacts/real-physics/pip-freeze.txt
           exit "$status"
 
       - name: Upload all probe evidence
