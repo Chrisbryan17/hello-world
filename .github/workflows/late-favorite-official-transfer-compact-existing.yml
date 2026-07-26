@@ -5,6 +5,10 @@ on:
     branches: [digital-surface-live-readiness-20260725]
     paths:
       - .github/workflows/late-favorite-official-transfer-compact-existing.yml
+  pull_request:
+    branches: [digital-surface-ci-20260724]
+    paths:
+      - .github/workflows/late-favorite-official-transfer-compact-existing.yml
   workflow_dispatch:
 
 permissions:
