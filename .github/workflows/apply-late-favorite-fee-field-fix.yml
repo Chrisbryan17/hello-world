@@ -1,0 +1,81 @@
+name: Apply Late Favorite Fee-Field Fix
+
+on:
+  push:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/apply-late-favorite-fee-field-fix.yml
+
+permissions:
+  contents: write
+
+env:
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: digital-surface-live-readiness-20260725
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned test stack
+        run: python -m pip install pandas==2.2.3 huggingface_hub==0.33.4 pytest==8.3.5
+      - name: Apply minimal fee-field correction
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('ci_payload/digital-surface-live-readiness/late-favorite-repro-source/late_favorite_transfer.py')
+          text = path.read_text()
+
+          anchor = '''    result["hypothetical_fok_fill"] = True
+              result["decision"] = "hypothetical_fok_fill"
+              normalized_outcome = str(outcome).title() if outcome is not None else None
+          '''.replace('          ', '')
+          replacement = '''    result["hypothetical_fok_fill"] = True
+              result["decision"] = "hypothetical_fok_fill"
+              fee = fee_per_share(arrival_ask)
+              result["fee_per_share"] = fee
+              normalized_outcome = str(outcome).title() if outcome is not None else None
+          '''.replace('          ', '')
+          if text.count(anchor) != 1:
+              raise RuntimeError(f'fee insertion anchor count={text.count(anchor)}')
+          text = text.replace(anchor, replacement)
+
+          old_fee_line = '        fee = fee_per_share(arrival_ask)\n'
+          if text.count(old_fee_line) != 1:
+              raise RuntimeError(f'old fee line count={text.count(old_fee_line)}')
+          text = text.replace(old_fee_line, '', 1)
+
+          old_update_line = '                "fee_per_share": fee,\n'
+          if text.count(old_update_line) != 1:
+              raise RuntimeError(f'old update fee line count={text.count(old_update_line)}')
+          text = text.replace(old_update_line, '', 1)
+
+          path.write_text(text)
+          PY
+      - name: Compile and verify regressions
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-repro-source
+        run: |
+          python -m py_compile ci_payload/digital-surface-live-readiness/late-favorite-repro-source/late_favorite_transfer.py
+          pytest -q \
+            ci_payload/digital-surface-live-readiness/late-favorite-repro-source/test_late_favorite_transfer.py \
+            ci_payload/digital-surface-live-readiness/late-favorite-repro-source/test_fee_field_regression.py
+      - name: Commit verified source correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'research-checkpoint-bot'
+          git config user.email 'research-checkpoint-bot@users.noreply.github.com'
+          git add ci_payload/digital-surface-live-readiness/late-favorite-repro-source/late_favorite_transfer.py
+          git diff --cached --check
+          git commit -m 'fix: record fees for unlabeled hypothetical fills'
+          git push origin HEAD:digital-surface-live-readiness-20260725
