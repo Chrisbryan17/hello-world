@@ -31,7 +31,7 @@ jobs:
           python-version: '3.11'
       - name: Install pinned test stack
         run: python -m pip install pytest==8.3.5
-      - name: Compile observer source when present
+      - name: Require and compile observer source
         shell: bash
         run: |
           test -f ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source/late_favorite_v3.py
