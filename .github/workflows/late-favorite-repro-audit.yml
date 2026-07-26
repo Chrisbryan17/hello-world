@@ -1,0 +1,56 @@
+name: Late Favorite Repro Audit
+
+on:
+  push:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/late-favorite-repro-audit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  red-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install test dependency
+        run: python -m pip install pytest==8.3.5
+      - name: Write frozen-policy contract test
+        shell: bash
+        run: |
+          mkdir -p /tmp/late-favorite-tests
+          cat > /tmp/late-favorite-tests/test_contract.py <<'PY'
+          import importlib
+          import pytest
+
+          def test_frozen_policy_contract_exists():
+              try:
+                  module = importlib.import_module('late_favorite_transfer')
+              except ModuleNotFoundError:
+                  pytest.fail('late_favorite_transfer is not implemented')
+              assert module.frozen_policy() == {
+                  'assets': ('btc', 'eth'),
+                  'entry_second': 210,
+                  'signal_ask_min': 0.85,
+                  'latency_seconds': 1,
+                  'fok_limit': 'signal_ask',
+                  'shares': 5,
+                  'cancel_below_signal_by_more_than': 0.01,
+                  'hold': 'settlement',
+                  'fee_rate': 0.07,
+                  'live_submission': 'disabled',
+              }
+          PY
+      - name: Verify RED contract
+        working-directory: /tmp/late-favorite-tests
+        run: pytest -q
