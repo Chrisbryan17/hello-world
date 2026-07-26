@@ -1,0 +1,112 @@
+name: UGMC PyBullet Build Relay
+
+on:
+  push:
+    branches:
+      - ugmc-pybullet-relay-20260726
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-pybullet-cp313:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout pinned Bullet source
+        uses: actions/checkout@v4
+        with:
+          repository: bulletphysics/bullet3
+          ref: 63c4d67e337017f9d8b298c900e9aabdb69296e7
+          path: bullet3
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up CPython 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Build wheel from source without NumPy C API
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade pip setuptools wheel
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cd "$GITHUB_WORKSPACE/bullet3"
+          python setup.py bdist_wheel 2>&1 | tee "$GITHUB_WORKSPACE/out/build.log"
+          cp dist/*.whl "$GITHUB_WORKSPACE/out/"
+
+      - name: Install wheel and run physics smoke test
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install "$GITHUB_WORKSPACE"/out/*.whl
+          python - <<'PY' 2>&1 | tee "$GITHUB_WORKSPACE/out/smoke.log"
+          import json
+          import pathlib
+          import platform
+          import sys
+          import pybullet as p
+          import pybullet_data
+          cid = p.connect(p.DIRECT)
+          assert cid >= 0
+          p.setAdditionalSearchPath(pybullet_data.getDataPath())
+          p.setGravity(0, 0, -9.81)
+          p.setTimeStep(1.0 / 240.0)
+          p.loadURDF('plane.urdf')
+          robot = p.loadURDF('r2d2.urdf', [0, 0, 1])
+          for _ in range(480):
+              p.stepSimulation()
+          pos, orn = p.getBasePositionAndOrientation(robot)
+          assert pos[2] > 0.05, pos
+          image = p.getCameraImage(64, 64, renderer=p.ER_TINY_RENDERER)
+          assert image[0] == 64 and image[1] == 64
+          p.disconnect()
+          metadata = {
+              'python': sys.version,
+              'platform': platform.platform(),
+              'bullet_commit': '63c4d67e337017f9d8b298c900e9aabdb69296e7',
+              'final_position': pos,
+              'camera_width': image[0],
+              'camera_height': image[1],
+          }
+          pathlib.Path('out/smoke_metadata.json').write_text(json.dumps(metadata, indent=2))
+          print(json.dumps(metadata, indent=2))
+          PY
+
+      - name: Package shallow source clone
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git -C bullet3 remote set-url origin https://github.com/bulletphysics/bullet3.git
+          git -C bullet3 status --short
+          tar -I 'gzip -1' -cf out/bullet3-pinned-shallow-clone.tar.gz bullet3
+          sha256sum out/* > out/SHA256SUMS.txt
+          ls -lh out
+
+      - name: Upload wheel and verification logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: pybullet-cp313-linux-wheel-and-logs
+          path: |
+            out/*.whl
+            out/*.log
+            out/*.json
+            out/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 0
+
+      - name: Upload pinned Bullet shallow clone
+        uses: actions/upload-artifact@v4
+        with:
+          name: bullet3-pinned-shallow-clone
+          path: out/bullet3-pinned-shallow-clone.tar.gz
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 0
