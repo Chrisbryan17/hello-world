@@ -43,10 +43,6 @@ jobs:
             hf_xet==1.1.5 \
             pytest==8.3.5
 
-      - name: Apply checksum-visible accounting patch
-        working-directory: ci_payload/digital-surface-live-readiness/late-favorite-repro-source
-        run: patch -p1 < unlabeled-accounting.patch
-
       - name: Compile source
         run: |
           python -m py_compile \
