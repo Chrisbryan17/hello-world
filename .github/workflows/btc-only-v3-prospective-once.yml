@@ -1,0 +1,246 @@
+name: BTC-Only v3 Prospective Observation Once
+
+on:
+  push:
+    branches: [btc-only-v3-prospective-run-20260726]
+    paths:
+      - .github/workflows/btc-only-v3-prospective-once.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: btc-only-v3-prospective-once-20260726
+  cancel-in-progress: true
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+  RUN_LABEL: first-post-cutoff-observation
+
+jobs:
+  observe-one-market:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pinned public and test clients
+        run: python -m pip install requests==2.32.4 pytest==8.3.5
+
+      - name: Verify cache-busted terminal resolver
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector
+        run: |
+          root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
+          python -m py_compile "$root/collector/resolution.py" "$root/tests/test_resolution_cache_bust.py"
+          pytest -q "$root/tests/test_resolution_cache_bust.py"
+
+      - name: Select a genuinely prospective BTC window
+        id: select
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import time
+          now = time.time_ns() // 1_000_000_000
+          opening = (now // 300) * 300
+          if now > opening + 205:
+              opening += 300
+          print(f"opening={opening}")
+          print(f"signal_target_ms={opening * 1000 + 210000}")
+          print(f"arrival_target_ms={opening * 1000 + 211000}")
+          print(f"resolution_target_ms={opening * 1000 + 305000}")
+          PY
+
+      - name: Wait until market discovery is valid
+        env:
+          OPENING: ${{ steps.select.outputs.opening }}
+        run: |
+          python - <<'PY'
+          import os
+          import time
+          target = int(os.environ['OPENING']) * 1000 + 5000
+          while True:
+              remaining = target - time.time_ns() // 1_000_000
+              if remaining <= 0:
+                  break
+              time.sleep(min(remaining / 1000, 0.5))
+          PY
+
+      - name: Capture discovery, signal, and arrival
+        env:
+          OPENING: ${{ steps.select.outputs.opening }}
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
+          mkdir -p prospective-data
+          python "$root/collector/cli.py" \
+            --root "$root" \
+            --output-dir prospective-data \
+            --timeout-seconds 5 \
+            capture --market-open "$OPENING" | tee capture-output.json
+          cat prospective-data/last_capture.json
+
+      - name: Wait until terminal resolution window
+        env:
+          RESOLUTION_TARGET_MS: ${{ steps.select.outputs.resolution_target_ms }}
+        run: |
+          python - <<'PY'
+          import os
+          import time
+          target = int(os.environ['RESOLUTION_TARGET_MS'])
+          while True:
+              remaining = target - time.time_ns() // 1_000_000
+              if remaining <= 0:
+                  break
+              time.sleep(min(remaining / 1000, 0.5))
+          PY
+
+      - name: Watch authoritative Gamma terminal prices
+        id: resolution
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector
+        shell: bash
+        run: |
+          set -uo pipefail
+          root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
+          condition_id="$(python - <<'PY'
+          import json
+          print(json.load(open('prospective-data/last_capture.json'))['condition_id'])
+          PY
+          )"
+          resolved=0
+          attempts=0
+          for attempt in $(seq 1 120); do
+            attempts="$attempt"
+            if python "$root/collector/cli.py" \
+              --root "$root" \
+              --output-dir prospective-data \
+              --timeout-seconds 5 \
+              resolve --condition-id "$condition_id" | tee resolution-output.json; then
+              resolved=1
+              break
+            fi
+            sleep 10
+          done
+          echo "resolved=$resolved" >> "$GITHUB_OUTPUT"
+          echo "attempts=$attempts" >> "$GITHUB_OUTPUT"
+          if test "$resolved" -eq 1; then
+            cat prospective-data/last_resolution.json
+          else
+            echo "Gamma remained non-terminal after $attempts attempts; preserving unresolved evidence."
+          fi
+          exit 0
+
+      - name: Verify append-only prospective evidence
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector
+          EXPECTED_OPENING: ${{ steps.select.outputs.opening }}
+          RESOLVED: ${{ steps.resolution.outputs.resolved }}
+          RESOLUTION_ATTEMPTS: ${{ steps.resolution.outputs.attempts }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from capture_policy import CaptureBoundLifecycleLedger, load_capture_policy
+          from cli import _combined_source_sha256
+          from late_favorite_v3 import load_frozen_policy
+          from public_collector import RawEvidenceStore
+
+          root = Path('ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3')
+          out = Path('prospective-data')
+          source_sha = _combined_source_sha256(root)
+          trading = load_frozen_policy(root / 'CANDIDATE_SPEC.json', root / 'FREEZE_MANIFEST.json', source_sha256=source_sha)
+          capture = load_capture_policy(root / 'CAPTURE_POLICY.json', root / 'CAPTURE_FREEZE_MANIFEST.json')
+          ledger = CaptureBoundLifecycleLedger(out / 'lifecycle.jsonl', trading, capture)
+          evidence = RawEvidenceStore(out / 'raw')
+          event_types = [row['event_type'] for row in ledger.records]
+          allowed = {
+              ('discovered', 'signal'),
+              ('discovered', 'signal', 'arrival'),
+              ('discovered', 'signal', 'resolution'),
+              ('discovered', 'signal', 'arrival', 'resolution'),
+          }
+          assert tuple(event_types) in allowed, event_types
+          opening = int(os.environ['EXPECTED_OPENING'])
+          assert opening > capture.valid_market_open_after_epoch_seconds
+          assert {int(row['market_open_epoch_seconds']) for row in ledger.records} == {opening}
+          assert len(evidence.records) >= 2
+          capture_result = json.loads((out / 'last_capture.json').read_text())
+          resolution_path = out / 'last_resolution.json'
+          resolution = json.loads(resolution_path.read_text()) if resolution_path.exists() else None
+          resolved = os.environ.get('RESOLVED') == '1'
+          if resolved:
+              assert event_types[-1] == 'resolution'
+              assert resolution is not None
+              assert resolution['official_outcome'] in {'Up', 'Down'}
+              assert resolution['decision'] in {'resolved_fill', 'resolved_no_fill'}
+          else:
+              assert event_types[-1] != 'resolution'
+              assert resolution is None
+          run = {
+              'candidate': 'late_favorite_btc_only_v3_prospective_shadow',
+              'run_label': os.environ.get('RUN_LABEL'),
+              'github_sha': os.environ.get('GITHUB_SHA'),
+              'market_open_epoch_seconds': opening,
+              'condition_id': ledger.records[0]['condition_id'],
+              'capture_decision': capture_result['decision'],
+              'resolution_status': 'terminal' if resolved else 'unresolved',
+              'resolution_attempts': int(os.environ.get('RESOLUTION_ATTEMPTS') or 0),
+              'resolution': resolution,
+              'lifecycle_event_types': event_types,
+              'lifecycle_records': len(ledger.records),
+              'lifecycle_head_sha256': ledger.head_hash,
+              'raw_evidence_records': len(evidence.records),
+              'raw_evidence_head_sha256': evidence.head_hash,
+              'candidate_policy_sha256': trading.policy_sha256,
+              'capture_policy_sha256': capture.capture_policy_sha256,
+              'combined_source_sha256': source_sha,
+              'credentials_used': 0,
+              'authenticated_requests': 0,
+              'order_submissions': 0,
+              'historical_admission_credit': 0,
+              'live_submission': 'physically_absent',
+          }
+          (out / 'PROSPECTIVE_RUN.json').write_text(json.dumps(run, indent=2, sort_keys=True) + '\n')
+          print(json.dumps(run, indent=2, sort_keys=True))
+          PY
+
+      - name: Build deterministic evidence archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          find prospective-data -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > prospective-data/SHA256SUMS
+          sha256sum -c prospective-data/SHA256SUMS
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf btc-only-v3-prospective-run-v1.tar.gz prospective-data
+          sha256sum btc-only-v3-prospective-run-v1.tar.gz > btc-only-v3-prospective-run-v1.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: btc-only-v3-prospective-run-v1
+          path: |
+            prospective-data/
+            btc-only-v3-prospective-run-v1.tar.gz
+            btc-only-v3-prospective-run-v1.tar.gz.sha256
+          compression-level: 0
+          retention-days: 30
+
+      - name: Require terminal resolution for admission evidence
+        run: |
+          python - <<'PY'
+          import json
+          run = json.load(open('prospective-data/PROSPECTIVE_RUN.json'))
+          assert run['resolution_status'] == 'terminal', run['resolution_status']
+          PY

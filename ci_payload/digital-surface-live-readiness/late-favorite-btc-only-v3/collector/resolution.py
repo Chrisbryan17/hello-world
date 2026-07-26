@@ -99,7 +99,10 @@ class SingleMarketResolver:
         if discovered is None or signal is None:
             raise RuntimeError("resolution requires discovered and signal lifecycle events")
         slug = str(discovered.get("slug") or f"btc-updown-5m-{opening}")
-        evidence = self.client.request_json("GET", f"{GAMMA_BASE}/markets/slug/{slug}")
+        cache_bust = len(self.evidence_store.records)
+        evidence = self.client.request_json(
+            "GET", f"{GAMMA_BASE}/markets/slug/{slug}?cache_bust={cache_bust}"
+        )
         manifest = self.evidence_store.append(evidence, purpose="official_resolution")
         if not isinstance(evidence.payload, Mapping):
             raise PublicResponseError("Gamma terminal response must be an object")

@@ -1,0 +1,37 @@
+{
+  "arrival": {
+    "arrival_best_ask": "0.99",
+    "arrival_book_sha256": "b58474a8562bb06af33e7dce84be1b27af50c482ac945c2a0226f0c61836996d",
+    "book_timestamp_ms": 1785099811069,
+    "decision": "no_fill_ask_above_limit",
+    "hypothetical_fok_fill": false,
+    "request_completed_ts_ms": 1785099811152,
+    "request_duration_ms": 152,
+    "request_started_ts_ms": 1785099811000,
+    "signal_ask": "0.98"
+  },
+  "condition_id": "0x4c02c25039452fa49c84a0a8d10f59390ac9b26b8b11f52a58ecfcec7962f13c",
+  "market_open_epoch_seconds": 1785099600,
+  "resolution": {
+    "decision": "resolved_no_fill",
+    "official_outcome": "Up",
+    "official_won": null,
+    "pnl_per_share": null,
+    "pnl_total": null,
+    "resolution_payload_sha256": "aa55f228e06bcdbcfb71679b5d417e7571bd8e97bd35ef78fbaa3498e984df14"
+  },
+  "signal": {
+    "book_timestamps_ms": [
+      1785099810080,
+      1785099810080
+    ],
+    "decision": "signal",
+    "down_book_sha256": "02fe0740029381cbab1dcb7c6c697b7790f3a8e451ba5fb017adee0bce6438b2",
+    "request_completed_ts_ms": 1785099810155,
+    "request_duration_ms": 155,
+    "request_started_ts_ms": 1785099810000,
+    "selected_side": "Up",
+    "signal_ask": "0.98",
+    "up_book_sha256": "da0b50980004035a111c91241adf5cd0381eec5a5345a561e86396039c5b3f42"
+  }
+}

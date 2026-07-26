@@ -51,9 +51,10 @@ jobs:
             "$root/tests/test_capture_policy.py" \
             "$root/tests/test_public_collector.py" \
             "$root/tests/test_resolution.py" \
+            "$root/tests/test_resolution_cache_bust.py" \
             "$root/tests/test_cli.py"
 
-      - name: Pass exactly 24 behavior contracts
+      - name: Pass exactly 25 behavior contracts
         shell: bash
         env:
           PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector
@@ -61,7 +62,7 @@ jobs:
           set -euo pipefail
           root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
           pytest --collect-only -q "$root/tests" | tee /tmp/collect.txt
-          grep -Eq '^24 tests collected' /tmp/collect.txt
+          grep -Eq '^25 tests collected' /tmp/collect.txt
           pytest -q "$root/tests"
 
       - name: Verify frozen policies and contamination cutoffs
@@ -117,7 +118,7 @@ jobs:
 
           verification = {
               'candidate': 'late_favorite_btc_only_v3_prospective_shadow',
-              'tests_collected': 24,
+              'tests_collected': 25,
               'candidate_policy_sha256': trading.policy_sha256,
               'capture_policy_sha256': capture.capture_policy_sha256,
               'candidate_cutoff_epoch_seconds': trading.valid_market_open_after_epoch_seconds,
@@ -126,7 +127,7 @@ jobs:
               'cli_sha256': cli_sha256,
               'source_files_sha256': source_hashes,
               'public_endpoints': [
-                  'GET https://gamma-api.polymarket.com/markets/slug/{slug}',
+                  'GET https://gamma-api.polymarket.com/markets/slug/{slug}?cache_bust={attempt}',
                   'POST https://clob.polymarket.com/books',
               ],
               'official_resolution': 'Gamma closed binary terminal outcome',
@@ -192,6 +193,8 @@ jobs:
           assert 'https://clob.polymarket.com' in public_text
           assert 'parsed.path == "/books"' in public_text
           assert 'parsed.path.startswith("/markets/slug/")' in public_text
+          resolution_text = (root / 'collector/resolution.py').read_text()
+          assert '?cache_bust=' in resolution_text
           cli_text = (root / 'collector/cli.py').read_text()
           assert 'capture' in cli_text and 'resolve' in cli_text
           PY
@@ -214,15 +217,15 @@ jobs:
           cp "$root/collector/cli.py" btc-only-v3-observer-checkpoint/
           (cd btc-only-v3-observer-checkpoint && sha256sum * > SHA256SUMS)
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
-            -czf btc-only-v3-observer-checkpoint-v2.tar.gz btc-only-v3-observer-checkpoint
-          sha256sum btc-only-v3-observer-checkpoint-v2.tar.gz > btc-only-v3-observer-checkpoint-v2.tar.gz.sha256
+            -czf btc-only-v3-observer-checkpoint-v3.tar.gz btc-only-v3-observer-checkpoint
+          sha256sum btc-only-v3-observer-checkpoint-v3.tar.gz > btc-only-v3-observer-checkpoint-v3.tar.gz.sha256
 
       - uses: actions/upload-artifact@v4
         with:
-          name: btc-only-v3-observer-checkpoint-v2
+          name: btc-only-v3-observer-checkpoint-v3
           path: |
             btc-only-v3-observer-checkpoint/
-            btc-only-v3-observer-checkpoint-v2.tar.gz
-            btc-only-v3-observer-checkpoint-v2.tar.gz.sha256
+            btc-only-v3-observer-checkpoint-v3.tar.gz
+            btc-only-v3-observer-checkpoint-v3.tar.gz.sha256
           compression-level: 0
           retention-days: 30
