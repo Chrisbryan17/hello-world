@@ -13,6 +13,10 @@ on:
       - ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/**
   workflow_dispatch:
 
+concurrency:
+  group: btc-only-v3-observer-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
