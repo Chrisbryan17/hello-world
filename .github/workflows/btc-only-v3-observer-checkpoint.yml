@@ -7,7 +7,7 @@ on:
       - .github/workflows/btc-only-v3-observer-checkpoint.yml
       - ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/**
   pull_request:
-    branches: [digital-surface-ci-20260724]
+    branches: [digital-surface-ci-20260724, digital-surface-live-readiness-20260725]
     paths:
       - .github/workflows/btc-only-v3-observer-checkpoint.yml
       - ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/**
