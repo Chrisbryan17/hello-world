@@ -17,6 +17,7 @@ concurrency:
 env:
   PYTHONHASHSEED: '17'
   PYTHONUNBUFFERED: '1'
+  RUN_LABEL: first-post-cutoff-observation
 
 jobs:
   observe-one-market:
@@ -128,7 +129,6 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import hashlib
           import json
           import os
           from pathlib import Path
@@ -156,6 +156,7 @@ jobs:
           assert resolution['decision'] in {'resolved_fill', 'resolved_no_fill'}
           run = {
               'candidate': 'late_favorite_btc_only_v3_prospective_shadow',
+              'run_label': os.environ.get('RUN_LABEL'),
               'github_sha': os.environ.get('GITHUB_SHA'),
               'market_open_epoch_seconds': opening,
               'condition_id': ledger.records[0]['condition_id'],
