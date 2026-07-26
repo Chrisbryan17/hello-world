@@ -5,10 +5,14 @@ on:
     branches: [digital-surface-live-readiness-20260725]
     paths:
       - .github/workflows/late-favorite-repro-audit.yml
+      - ci_payload/digital-surface-live-readiness/late-favorite-repro-source/**
+      - ci_payload/digital-surface-live-readiness/deep-favorite-eda-v2/CANDIDATE_SPEC.json
   pull_request:
     branches: [digital-surface-ci-20260724]
     paths:
       - .github/workflows/late-favorite-repro-audit.yml
+      - ci_payload/digital-surface-live-readiness/late-favorite-repro-source/**
+      - ci_payload/digital-surface-live-readiness/deep-favorite-eda-v2/CANDIDATE_SPEC.json
   workflow_dispatch:
 
 permissions:
@@ -19,42 +23,116 @@ env:
   PYTHONUNBUFFERED: '1'
 
 jobs:
-  red-contract:
+  reproduce-frozen-candidate:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install test dependency
-        run: python -m pip install pytest==8.3.5
-      - name: Write frozen-policy contract test
-        shell: bash
-        run: |
-          mkdir -p /tmp/late-favorite-tests
-          cat > /tmp/late-favorite-tests/test_contract.py <<'PY'
-          import importlib
-          import pytest
 
-          def test_frozen_policy_contract_exists():
-              try:
-                  module = importlib.import_module('late_favorite_transfer')
-              except ModuleNotFoundError:
-                  pytest.fail('late_favorite_transfer is not implemented')
-              assert module.frozen_policy() == {
-                  'assets': ('btc', 'eth'),
-                  'entry_second': 210,
-                  'signal_ask_min': 0.85,
-                  'latency_seconds': 1,
-                  'fok_limit': 'signal_ask',
-                  'shares': 5,
-                  'cancel_below_signal_by_more_than': 0.01,
-                  'hold': 'settlement',
-                  'fee_rate': 0.07,
-                  'live_submission': 'disabled',
-              }
+      - name: Install pinned analysis stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            numpy==2.2.6 \
+            pandas==2.2.3 \
+            pyarrow==19.0.1 \
+            huggingface_hub==0.33.4 \
+            hf_xet==1.1.5 \
+            pytest==8.3.5
+
+      - name: Compile source
+        run: |
+          python -m py_compile \
+            ci_payload/digital-surface-live-readiness/late-favorite-repro-source/late_favorite_transfer.py \
+            ci_payload/digital-surface-live-readiness/late-favorite-repro-source/test_late_favorite_transfer.py
+
+      - name: Pass frozen-policy behavior tests
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-repro-source
+        run: |
+          pytest -q ci_payload/digital-surface-live-readiness/late-favorite-repro-source/test_late_favorite_transfer.py
+
+      - name: Verify live submission remains physically absent
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          path = Path('ci_payload/digital-surface-live-readiness/late-favorite-repro-source/late_favorite_transfer.py')
+          tree = ast.parse(path.read_text())
+          imports = {
+              node.names[0].name
+              for node in ast.walk(tree)
+              if isinstance(node, ast.Import) and node.names
+          }
+          imported_from = {
+              node.module
+              for node in ast.walk(tree)
+              if isinstance(node, ast.ImportFrom)
+          }
+          forbidden = {'web3', 'py_clob_client', 'eth_account'}
+          assert not (forbidden & imports)
+          assert not (forbidden & imported_from)
+          text = path.read_text().lower()
+          for token in ('create_order', 'post_order', 'submit_order', 'private_key', 'api_secret'):
+              assert token not in text, token
           PY
-      - name: Verify RED contract
-        working-directory: /tmp/late-favorite-tests
-        run: pytest -q
+
+      - name: Build complete BTC ETH reproducibility ledger
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-repro-source
+          HF_XET_HIGH_PERFORMANCE: '1'
+        run: |
+          python ci_payload/digital-surface-live-readiness/late-favorite-repro-source/late_favorite_transfer.py \
+            --candidate-spec ci_payload/digital-surface-live-readiness/deep-favorite-eda-v2/CANDIDATE_SPEC.json \
+            --out-dir late-favorite-repro-results \
+            --cache-dir .cache/late-favorite-data
+
+      - name: Verify output contract and evidence boundary
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          out = Path('late-favorite-repro-results')
+          required = {'AUDIT.json', 'REPORT.md', 'SHA256SUMS', 'market_ledger.csv.gz', 'eligible_trades.csv.gz'}
+          assert required == {path.name for path in out.iterdir() if path.is_file()}
+          audit = json.loads((out / 'AUDIT.json').read_text())
+          assert audit['candidate'] == 'late_favorite_btc_eth_v2_diagnostic'
+          assert audit['official_outcomes_used'] == 0
+          assert audit['future_outcomes_used_for_signal'] == 0
+          assert audit['live_submission'] == 'physically_absent'
+          assert audit['markets'] > 0
+          assert audit['signals'] > 0
+          assert audit['hypothetical_fok_fills'] > 0
+          assert set(audit['by_asset']) == {'btc', 'eth'}
+          assert len(audit['all_condition_ids_sha256']) == 64
+          assert len(audit['filled_condition_ids_sha256']) == 64
+          assert audit['split_reproduction'].startswith('not claimed')
+          PY
+          (cd late-favorite-repro-results && sha256sum -c SHA256SUMS)
+
+      - name: Build deterministic checkpoint archive
+        run: |
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf late-favorite-repro-audit-v1.tar.gz late-favorite-repro-results
+          sha256sum late-favorite-repro-audit-v1.tar.gz > late-favorite-repro-audit-v1.tar.gz.sha256
+          cat late-favorite-repro-results/REPORT.md
+          cat late-favorite-repro-results/AUDIT.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: late-favorite-repro-audit-v1
+          path: |
+            late-favorite-repro-results/AUDIT.json
+            late-favorite-repro-results/REPORT.md
+            late-favorite-repro-results/SHA256SUMS
+            late-favorite-repro-results/market_ledger.csv.gz
+            late-favorite-repro-results/eligible_trades.csv.gz
+            late-favorite-repro-audit-v1.tar.gz
+            late-favorite-repro-audit-v1.tar.gz.sha256
+          compression-level: 0
+          retention-days: 30
