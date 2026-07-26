@@ -6,6 +6,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,6 +27,10 @@ _RUNTIME_SOURCE_PATHS = (
     "collector/resolution.py",
     "runner/observer_cli.py",
 )
+
+MAX_BLOCK_MARKETS = 12
+DEFAULT_RESOLUTION_ATTEMPTS = 120
+DEFAULT_RETRY_DELAY_MS = 10_000
 
 
 @dataclass(slots=True)
@@ -156,27 +161,32 @@ def _evidence_head(runtime: ObserverRuntime) -> str:
     return str(getattr(runtime.evidence_store, "head_hash", "0" * 64))
 
 
-def collect_next(runtime: ObserverRuntime, *, now_ts_ms: int | None = None) -> dict[str, Any]:
-    now = int(runtime.clock_ms() if now_ts_ms is None else now_ts_ms)
-    opening = next_collectable_open(
-        now,
-        int(runtime.capture_policy.valid_market_open_after_epoch_seconds),
-    )
-    discovery_target = opening * 1000 + 1_000
-    if now < discovery_target:
+def _collect_opening(runtime: ObserverRuntime, opening: int) -> dict[str, Any]:
+    selected_opening = int(opening)
+    discovery_target = selected_opening * 1000 + 1_000
+    if int(runtime.clock_ms()) < discovery_target:
         runtime.sleep_until_ms(discovery_target)
-    result = dict(runtime.collector.capture(opening))
+    result = dict(runtime.collector.capture(selected_opening))
     summary = {
         **result,
         "command": "collect-next",
-        "market_open_epoch_seconds": opening,
+        "market_open_epoch_seconds": selected_opening,
         "source_sha256": runtime.source_sha256,
         "lifecycle_head_sha256": str(runtime.ledger.head_hash),
         "raw_evidence_head_sha256": _evidence_head(runtime),
         "lifecycle_records": len(getattr(runtime.ledger, "records", [])),
         "raw_evidence_records": len(getattr(runtime.evidence_store, "records", [])),
     }
-    return _write_summary(runtime, f"collect-{opening}", summary)
+    return _write_summary(runtime, f"collect-{selected_opening}", summary)
+
+
+def collect_next(runtime: ObserverRuntime, *, now_ts_ms: int | None = None) -> dict[str, Any]:
+    now = int(runtime.clock_ms() if now_ts_ms is None else now_ts_ms)
+    opening = next_collectable_open(
+        now,
+        int(runtime.capture_policy.valid_market_open_after_epoch_seconds),
+    )
+    return _collect_opening(runtime, opening)
 
 
 def resolve_condition(runtime: ObserverRuntime, condition_id: str) -> dict[str, Any]:
@@ -194,6 +204,121 @@ def resolve_condition(runtime: ObserverRuntime, condition_id: str) -> dict[str, 
         "raw_evidence_records": len(getattr(runtime.evidence_store, "records", [])),
     }
     return _write_summary(runtime, f"resolve-{condition}", summary)
+
+
+def _positive_int(name: str, value: int) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise ValueError(f"{name} must be positive")
+    return parsed
+
+
+def _pnl_total(resolution: dict[str, Any]) -> Decimal:
+    value = resolution.get("pnl_total")
+    if value is None:
+        return Decimal("0")
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"invalid pnl_total in resolution: {value!r}") from exc
+
+
+def collect_block(
+    runtime: ObserverRuntime,
+    *,
+    markets: int,
+    now_ts_ms: int | None = None,
+    max_resolution_attempts: int = DEFAULT_RESOLUTION_ATTEMPTS,
+    retry_delay_ms: int = DEFAULT_RETRY_DELAY_MS,
+) -> dict[str, Any]:
+    market_count = _positive_int("markets", markets)
+    if market_count > MAX_BLOCK_MARKETS:
+        raise ValueError(f"markets must be <= {MAX_BLOCK_MARKETS}")
+    attempt_limit = _positive_int("max_resolution_attempts", max_resolution_attempts)
+    retry_delay = _positive_int("retry_delay_ms", retry_delay_ms)
+
+    now = int(runtime.clock_ms() if now_ts_ms is None else now_ts_ms)
+    first_opening = next_collectable_open(
+        now,
+        int(runtime.capture_policy.valid_market_open_after_epoch_seconds),
+    )
+    openings = [first_opening + 300 * index for index in range(market_count)]
+
+    # Capture every requested consecutive window before making any resolution
+    # request. This keeps terminal latency from causing a missed +210s signal.
+    captures = [_collect_opening(runtime, opening) for opening in openings]
+    condition_ids = [str(capture["condition_id"]) for capture in captures]
+
+    resolutions: list[dict[str, Any]] = []
+    unresolved: list[str] = []
+    attempts_by_condition: dict[str, int] = {}
+    last_errors: dict[str, dict[str, str]] = {}
+
+    for condition in condition_ids:
+        resolved: dict[str, Any] | None = None
+        for attempt in range(1, attempt_limit + 1):
+            attempts_by_condition[condition] = attempt
+            try:
+                resolved = resolve_condition(runtime, condition)
+                break
+            except Exception as exc:  # fail closed and preserve the block evidence
+                last_errors[condition] = {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                }
+                if attempt < attempt_limit:
+                    runtime.sleep_until_ms(int(runtime.clock_ms()) + retry_delay)
+        if resolved is None:
+            unresolved.append(condition)
+        else:
+            resolutions.append(resolved)
+            last_errors.pop(condition, None)
+
+    decision_counts: dict[str, int] = {}
+    hypothetical_fok_fills = 0
+    for capture in captures:
+        decision = str(capture.get("decision", "unknown"))
+        decision_counts[decision] = decision_counts.get(decision, 0) + 1
+        if capture.get("hypothetical_fok_fill") is True or decision == "hypothetical_fok_fill":
+            hypothetical_fok_fills += 1
+
+    total_pnl = sum((_pnl_total(resolution) for resolution in resolutions), Decimal("0"))
+    summary = {
+        "command": "collect-block",
+        "status": "complete" if not unresolved else "unresolved",
+        "markets_requested": market_count,
+        "markets_collected": len(captures),
+        "first_market_open_epoch_seconds": openings[0],
+        "last_market_open_epoch_seconds": openings[-1],
+        "market_open_epoch_seconds": openings,
+        "condition_ids": condition_ids,
+        "capture_decision_counts": dict(sorted(decision_counts.items())),
+        "hypothetical_fok_fills": hypothetical_fok_fills,
+        "conditions_resolved": len(resolutions),
+        "unresolved_condition_ids": unresolved,
+        "resolution_attempts_by_condition": attempts_by_condition,
+        "last_resolution_errors": last_errors,
+        "resolution_decision_counts": {
+            decision: sum(1 for row in resolutions if str(row.get("decision")) == decision)
+            for decision in sorted({str(row.get("decision")) for row in resolutions})
+        },
+        "prospective_pnl_total": format(total_pnl, "f"),
+        "source_sha256": runtime.source_sha256,
+        "lifecycle_head_sha256": str(runtime.ledger.head_hash),
+        "raw_evidence_head_sha256": _evidence_head(runtime),
+        "lifecycle_records": len(getattr(runtime.ledger, "records", [])),
+        "raw_evidence_records": len(getattr(runtime.evidence_store, "records", [])),
+        "credentials_used": 0,
+        "authenticated_requests": 0,
+        "order_submissions": 0,
+        "live_submission": "physically_absent",
+        "policy_changes": 0,
+    }
+    return _write_summary(
+        runtime,
+        f"block-{openings[0]}-{openings[-1]}",
+        summary,
+    )
 
 
 def runtime_status(runtime: ObserverRuntime) -> dict[str, Any]:
@@ -232,6 +357,18 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     collect = commands.add_parser("collect-next", help="collect the next eligible BTC window")
     collect.add_argument("--now-ms", type=int)
+    block = commands.add_parser(
+        "collect-block",
+        help="capture consecutive BTC windows, then resolve the captured queue",
+    )
+    block.add_argument("--markets", type=int, required=True)
+    block.add_argument("--now-ms", type=int)
+    block.add_argument(
+        "--max-resolution-attempts",
+        type=int,
+        default=DEFAULT_RESOLUTION_ATTEMPTS,
+    )
+    block.add_argument("--retry-delay-ms", type=int, default=DEFAULT_RETRY_DELAY_MS)
     resolve = commands.add_parser("resolve", help="resolve one collected condition")
     resolve.add_argument("--condition-id", required=True)
     commands.add_parser("status", help="show ledger and unresolved-condition status")
@@ -243,6 +380,14 @@ def main(argv: list[str] | None = None) -> int:
     runtime = build_runtime(args.project_root, args.state_dir)
     if args.command == "collect-next":
         output = collect_next(runtime, now_ts_ms=args.now_ms)
+    elif args.command == "collect-block":
+        output = collect_block(
+            runtime,
+            markets=args.markets,
+            now_ts_ms=args.now_ms,
+            max_resolution_attempts=args.max_resolution_attempts,
+            retry_delay_ms=args.retry_delay_ms,
+        )
     elif args.command == "resolve":
         output = resolve_condition(runtime, args.condition_id)
     elif args.command == "status":
@@ -250,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:
     else:  # pragma: no cover
         raise RuntimeError(f"unsupported command: {args.command}")
     print(json.dumps(output, indent=2, sort_keys=True))
-    return 0
+    return 0 if output.get("status") != "unresolved" else 2
 
 
 if __name__ == "__main__":
