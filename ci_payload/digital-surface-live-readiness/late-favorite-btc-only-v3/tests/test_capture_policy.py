@@ -4,14 +4,14 @@ from decimal import Decimal
 
 import pytest
 
-from late_favorite_v3 import (
+from capture_policy import (
+    CaptureBoundLifecycleLedger,
     CapturePolicy,
     CaptureWindowError,
-    FrozenPolicy,
-    ProspectiveLifecycleLedger,
     evaluate_arrival_capture,
     evaluate_signal_capture,
 )
+from late_favorite_v3 import FrozenPolicy
 
 
 def trading_policy() -> FrozenPolicy:
@@ -61,16 +61,11 @@ def test_signal_capture_rejects_pre_target_request() -> None:
     target = opening * 1000 + 210_000
     with pytest.raises(CaptureWindowError):
         evaluate_signal_capture(
-            trading_policy(),
-            capture_policy(),
-            condition_id="c1",
-            market_open_epoch_seconds=opening,
-            up_token_id="up",
-            down_token_id="down",
+            trading_policy(), capture_policy(), condition_id="c1",
+            market_open_epoch_seconds=opening, up_token_id="up", down_token_id="down",
             up_book=book("c1", "up", "0.90", timestamp_ms=target),
             down_book=book("c1", "down", "0.12", timestamp_ms=target),
-            request_started_ts_ms=target - 1,
-            request_completed_ts_ms=target + 20,
+            request_started_ts_ms=target - 1, request_completed_ts_ms=target + 20,
             response_payload_sha256="4" * 64,
         )
 
@@ -79,32 +74,21 @@ def test_signal_capture_records_late_and_stale_fail_closed() -> None:
     opening = 1_800_000_300
     target = opening * 1000 + 210_000
     late = evaluate_signal_capture(
-        trading_policy(),
-        capture_policy(),
-        condition_id="c1",
-        market_open_epoch_seconds=opening,
-        up_token_id="up",
-        down_token_id="down",
+        trading_policy(), capture_policy(), condition_id="c1",
+        market_open_epoch_seconds=opening, up_token_id="up", down_token_id="down",
         up_book=book("c1", "up", "0.90", timestamp_ms=target),
         down_book=book("c1", "down", "0.12", timestamp_ms=target),
-        request_started_ts_ms=target + 251,
-        request_completed_ts_ms=target + 300,
+        request_started_ts_ms=target + 251, request_completed_ts_ms=target + 300,
         response_payload_sha256="4" * 64,
     )
     assert late["decision"] == "missed_signal_window"
     assert late["signal"] is False
-
     stale = evaluate_signal_capture(
-        trading_policy(),
-        capture_policy(),
-        condition_id="c1",
-        market_open_epoch_seconds=opening,
-        up_token_id="up",
-        down_token_id="down",
+        trading_policy(), capture_policy(), condition_id="c1",
+        market_open_epoch_seconds=opening, up_token_id="up", down_token_id="down",
         up_book=book("c1", "up", "0.90", timestamp_ms=target - 2_001),
         down_book=book("c1", "down", "0.12", timestamp_ms=target),
-        request_started_ts_ms=target,
-        request_completed_ts_ms=target + 100,
+        request_started_ts_ms=target, request_completed_ts_ms=target + 100,
         response_payload_sha256="4" * 64,
     )
     assert stale["decision"] == "no_signal_stale_book"
@@ -115,16 +99,11 @@ def test_valid_signal_capture_preserves_target_and_transport_evidence() -> None:
     opening = 1_800_000_300
     target = opening * 1000 + 210_000
     result = evaluate_signal_capture(
-        trading_policy(),
-        capture_policy(),
-        condition_id="c1",
-        market_open_epoch_seconds=opening,
-        up_token_id="up",
-        down_token_id="down",
+        trading_policy(), capture_policy(), condition_id="c1",
+        market_open_epoch_seconds=opening, up_token_id="up", down_token_id="down",
         up_book=book("c1", "up", "0.90", timestamp_ms=target + 10),
         down_book=book("c1", "down", "0.12", timestamp_ms=target + 10),
-        request_started_ts_ms=target + 25,
-        request_completed_ts_ms=target + 100,
+        request_started_ts_ms=target + 25, request_completed_ts_ms=target + 100,
         response_payload_sha256="4" * 64,
     )
     assert result["decision"] == "signal"
@@ -141,25 +120,17 @@ def test_arrival_target_is_market_open_plus_211_seconds() -> None:
     signal_target = opening * 1000 + 210_000
     arrival_target = opening * 1000 + 211_000
     signal = evaluate_signal_capture(
-        trading_policy(),
-        capture_policy(),
-        condition_id="c1",
-        market_open_epoch_seconds=opening,
-        up_token_id="up",
-        down_token_id="down",
+        trading_policy(), capture_policy(), condition_id="c1",
+        market_open_epoch_seconds=opening, up_token_id="up", down_token_id="down",
         up_book=book("c1", "up", "0.90", timestamp_ms=signal_target),
         down_book=book("c1", "down", "0.12", timestamp_ms=signal_target),
-        request_started_ts_ms=signal_target + 200,
-        request_completed_ts_ms=signal_target + 900,
+        request_started_ts_ms=signal_target + 200, request_completed_ts_ms=signal_target + 900,
         response_payload_sha256="4" * 64,
     )
     arrival = evaluate_arrival_capture(
-        trading_policy(),
-        capture_policy(),
-        signal,
+        trading_policy(), capture_policy(), signal,
         book("c1", "up", "0.90", timestamp_ms=arrival_target),
-        request_started_ts_ms=arrival_target,
-        request_completed_ts_ms=arrival_target + 100,
+        request_started_ts_ms=arrival_target, request_completed_ts_ms=arrival_target + 100,
         response_payload_sha256="5" * 64,
     )
     assert arrival["decision"] == "hypothetical_fok_fill"
@@ -168,16 +139,16 @@ def test_arrival_target_is_market_open_plus_211_seconds() -> None:
 
 
 def test_lifecycle_record_binds_capture_policy_hash(tmp_path) -> None:
-    ledger = ProspectiveLifecycleLedger(
-        tmp_path / "ledger.jsonl",
-        trading_policy(),
-        capture_policy=capture_policy(),
+    ledger = CaptureBoundLifecycleLedger(
+        tmp_path / "ledger.jsonl", trading_policy(), capture_policy()
     )
     row = ledger.append(
-        condition_id="c1",
-        market_open_epoch_seconds=1_800_000_300,
-        event_type="discovered",
-        observed_ts_ms=1_800_000_301_000,
+        condition_id="c1", market_open_epoch_seconds=1_800_000_300,
+        event_type="discovered", observed_ts_ms=1_800_000_301_000,
         payload={"slug": "btc-updown-5m-1800000300"},
     )
     assert row["capture_policy_sha256"] == "3" * 64
+    reloaded = CaptureBoundLifecycleLedger(
+        tmp_path / "ledger.jsonl", trading_policy(), capture_policy()
+    )
+    assert reloaded.head_hash == ledger.head_hash
