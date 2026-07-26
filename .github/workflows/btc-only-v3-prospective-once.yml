@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: btc-only-v3-prospective-once-20260726
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   PYTHONHASHSEED: '17'
