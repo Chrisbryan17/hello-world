@@ -29,8 +29,16 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install pinned public client
-        run: python -m pip install requests==2.32.4
+      - name: Install pinned public and test clients
+        run: python -m pip install requests==2.32.4 pytest==8.3.5
+
+      - name: Verify cache-busted terminal resolver
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector
+        run: |
+          root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
+          python -m py_compile "$root/collector/resolution.py" "$root/tests/test_resolution_cache_bust.py"
+          pytest -q "$root/tests/test_resolution_cache_bust.py"
 
       - name: Select a genuinely prospective BTC window
         id: select
