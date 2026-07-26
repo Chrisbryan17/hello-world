@@ -1,14 +1,15 @@
 name: UGMC Package PyBullet Local Runtime
 
 on:
-  pull_request:
+  push:
     branches:
       - main
     paths:
-      - 'UGMC_PYBULLET_BUILD_REQUEST*.txt'
+      - 'UGMC_PYBULLET_MAIN_TRIGGER*.txt'
 
 permissions:
-  contents: read
+  contents: write
+  actions: read
 
 jobs:
   package-runtime:
@@ -63,12 +64,23 @@ jobs:
           p.loadURDF('plane.urdf')
           kuka = p.loadURDF('kuka_iiwa/model.urdf', [-1.5, 0, 0], useFixedBase=True)
           husky = p.loadURDF('husky/husky.urdf', [0, -1.5, 0.25])
-          laikago = p.loadURDF('laikago/laikago_toes.urdf', [0, 1.5, 0.55], p.getQuaternionFromEuler([0, 0, 0]), flags=p.URDF_USE_SELF_COLLISION)
+          laikago = p.loadURDF(
+              'laikago/laikago_toes.urdf',
+              [0, 1.5, 0.55],
+              p.getQuaternionFromEuler([0, 0, 0]),
+              flags=p.URDF_USE_SELF_COLLISION,
+          )
           for _ in range(240):
               p.stepSimulation()
           view = p.computeViewMatrix([4, -6, 3], [0, 0, 0.6], [0, 0, 1])
           projection = p.computeProjectionMatrixFOV(55, 640 / 480, 0.02, 30)
-          width, height, rgba, _, _ = p.getCameraImage(640, 480, viewMatrix=view, projectionMatrix=projection, renderer=p.ER_TINY_RENDERER)
+          width, height, rgba, _, _ = p.getCameraImage(
+              640,
+              480,
+              viewMatrix=view,
+              projectionMatrix=projection,
+              renderer=p.ER_TINY_RENDERER,
+          )
           result = {
               'kuka_joints': p.getNumJoints(kuka),
               'husky_joints': p.getNumJoints(husky),
@@ -106,7 +118,8 @@ jobs:
       - name: Create runtime manifest
         run: |
           python - <<'PY'
-          import json, platform
+          import json
+          import platform
           from pathlib import Path
           manifest = {
               'bullet_commit': Path('BULLET_COMMIT.txt').read_text().strip(),
@@ -115,7 +128,9 @@ jobs:
               'bootstrap_pybullet': '3.2.7',
               'smoke_test': json.loads(Path('PYBULLET_SMOKE_TEST.json').read_text()),
           }
-          Path('manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+          Path('manifest.json').write_text(
+              json.dumps(manifest, indent=2), encoding='utf-8'
+          )
           PY
 
       - name: Package runtime and source
@@ -125,12 +140,16 @@ jobs:
           cp BULLET_COMMIT.txt portable/BULLET_COMMIT.txt
           cp PYBULLET_SMOKE_TEST.json portable/PYBULLET_SMOKE_TEST.json
           tar -C portable -czf pybullet-portable-python311-linux-x86_64.tar.gz .
-          git -C bullet3 archive --format=tar.gz --output=../bullet3-source-63c4d67e337017f9d8b298c900e9aabdb69296e7.tar.gz HEAD
+          git -C bullet3 archive \
+            --format=tar.gz \
+            --output=../bullet3-source-63c4d67e337017f9d8b298c900e9aabdb69296e7.tar.gz \
+            HEAD
           sha256sum pybullet-portable-python311-linux-x86_64.tar.gz > RUNTIME_SHA256.txt
           sha256sum bullet3-source-63c4d67e337017f9d8b298c900e9aabdb69296e7.tar.gz > SOURCE_SHA256.txt
           ls -lh pybullet-portable-python311-linux-x86_64.tar.gz bullet3-source-*.tar.gz
 
       - name: Upload portable runtime
+        id: upload_runtime
         uses: actions/upload-artifact@v4
         with:
           name: ugmc-pybullet-portable-runtime
@@ -145,6 +164,7 @@ jobs:
           compression-level: 0
 
       - name: Upload pinned Bullet source
+        id: upload_source
         uses: actions/upload-artifact@v4
         with:
           name: ugmc-bullet3-pinned-source
@@ -155,3 +175,45 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+
+      - name: Publish artifact IDs and digests
+        env:
+          RUNTIME_ARTIFACT_ID: ${{ steps.upload_runtime.outputs.artifact-id }}
+          RUNTIME_ARTIFACT_URL: ${{ steps.upload_runtime.outputs.artifact-url }}
+          RUNTIME_ARTIFACT_DIGEST: ${{ steps.upload_runtime.outputs.artifact-digest }}
+          SOURCE_ARTIFACT_ID: ${{ steps.upload_source.outputs.artifact-id }}
+          SOURCE_ARTIFACT_URL: ${{ steps.upload_source.outputs.artifact-url }}
+          SOURCE_ARTIFACT_DIGEST: ${{ steps.upload_source.outputs.artifact-digest }}
+        run: |
+          set -euxo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          data = {
+              'run_id': int(os.environ['GITHUB_RUN_ID']),
+              'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'commit': os.environ['GITHUB_SHA'],
+              'bullet_commit': Path('BULLET_COMMIT.txt').read_text().strip(),
+              'runtime': {
+                  'id': int(os.environ['RUNTIME_ARTIFACT_ID']),
+                  'url': os.environ['RUNTIME_ARTIFACT_URL'],
+                  'digest': os.environ['RUNTIME_ARTIFACT_DIGEST'],
+              },
+              'source': {
+                  'id': int(os.environ['SOURCE_ARTIFACT_ID']),
+                  'url': os.environ['SOURCE_ARTIFACT_URL'],
+                  'digest': os.environ['SOURCE_ARTIFACT_DIGEST'],
+              },
+          }
+          Path('UGMC_PYBULLET_ARTIFACTS.json').write_text(
+              json.dumps(data, indent=2), encoding='utf-8'
+          )
+          print(json.dumps(data, indent=2))
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add UGMC_PYBULLET_ARTIFACTS.json
+          git commit -m 'ci: publish UGMC PyBullet artifact metadata'
+          git pull --rebase origin main
+          git push origin HEAD:main
