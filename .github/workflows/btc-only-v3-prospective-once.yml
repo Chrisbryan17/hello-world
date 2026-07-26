@@ -22,7 +22,7 @@ env:
 jobs:
   observe-one-market:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -72,6 +72,7 @@ jobs:
         run: |
           set -euo pipefail
           root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
+          mkdir -p prospective-data
           python "$root/collector/cli.py" \
             --root "$root" \
             --output-dir prospective-data \
@@ -94,37 +95,48 @@ jobs:
               time.sleep(min(remaining / 1000, 0.5))
           PY
 
-      - name: Resolve from authoritative Gamma terminal prices
+      - name: Watch authoritative Gamma terminal prices
+        id: resolution
         env:
           PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
           condition_id="$(python - <<'PY'
           import json
           print(json.load(open('prospective-data/last_capture.json'))['condition_id'])
           PY
           )"
-          success=0
-          for attempt in $(seq 1 24); do
+          resolved=0
+          attempts=0
+          for attempt in $(seq 1 120); do
+            attempts="$attempt"
             if python "$root/collector/cli.py" \
               --root "$root" \
               --output-dir prospective-data \
               --timeout-seconds 5 \
               resolve --condition-id "$condition_id" | tee resolution-output.json; then
-              success=1
+              resolved=1
               break
             fi
             sleep 10
           done
-          test "$success" -eq 1
-          cat prospective-data/last_resolution.json
+          echo "resolved=$resolved" >> "$GITHUB_OUTPUT"
+          echo "attempts=$attempts" >> "$GITHUB_OUTPUT"
+          if test "$resolved" -eq 1; then
+            cat prospective-data/last_resolution.json
+          else
+            echo "Gamma remained non-terminal after $attempts attempts; preserving unresolved evidence."
+          fi
+          exit 0
 
       - name: Verify append-only prospective evidence
         env:
           PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector
           EXPECTED_OPENING: ${{ steps.select.outputs.opening }}
+          RESOLVED: ${{ steps.resolution.outputs.resolved }}
+          RESOLUTION_ATTEMPTS: ${{ steps.resolution.outputs.attempts }}
         shell: bash
         run: |
           set -euo pipefail
@@ -146,19 +158,29 @@ jobs:
           ledger = CaptureBoundLifecycleLedger(out / 'lifecycle.jsonl', trading, capture)
           evidence = RawEvidenceStore(out / 'raw')
           event_types = [row['event_type'] for row in ledger.records]
-          assert event_types in (
-              ['discovered', 'signal', 'resolution'],
-              ['discovered', 'signal', 'arrival', 'resolution'],
-          ), event_types
+          allowed = {
+              ('discovered', 'signal'),
+              ('discovered', 'signal', 'arrival'),
+              ('discovered', 'signal', 'resolution'),
+              ('discovered', 'signal', 'arrival', 'resolution'),
+          }
+          assert tuple(event_types) in allowed, event_types
           opening = int(os.environ['EXPECTED_OPENING'])
           assert opening > capture.valid_market_open_after_epoch_seconds
           assert {int(row['market_open_epoch_seconds']) for row in ledger.records} == {opening}
-          minimum_evidence_records = 3 if len(event_types) == 3 else 4
-          assert len(evidence.records) >= minimum_evidence_records
+          assert len(evidence.records) >= 2
           capture_result = json.loads((out / 'last_capture.json').read_text())
-          resolution = json.loads((out / 'last_resolution.json').read_text())
-          assert resolution['official_outcome'] in {'Up', 'Down'}
-          assert resolution['decision'] in {'resolved_fill', 'resolved_no_fill'}
+          resolution_path = out / 'last_resolution.json'
+          resolution = json.loads(resolution_path.read_text()) if resolution_path.exists() else None
+          resolved = os.environ.get('RESOLVED') == '1'
+          if resolved:
+              assert event_types[-1] == 'resolution'
+              assert resolution is not None
+              assert resolution['official_outcome'] in {'Up', 'Down'}
+              assert resolution['decision'] in {'resolved_fill', 'resolved_no_fill'}
+          else:
+              assert event_types[-1] != 'resolution'
+              assert resolution is None
           run = {
               'candidate': 'late_favorite_btc_only_v3_prospective_shadow',
               'run_label': os.environ.get('RUN_LABEL'),
@@ -166,6 +188,8 @@ jobs:
               'market_open_epoch_seconds': opening,
               'condition_id': ledger.records[0]['condition_id'],
               'capture_decision': capture_result['decision'],
+              'resolution_status': 'terminal' if resolved else 'unresolved',
+              'resolution_attempts': int(os.environ.get('RESOLUTION_ATTEMPTS') or 0),
               'resolution': resolution,
               'lifecycle_event_types': event_types,
               'lifecycle_records': len(ledger.records),
@@ -204,3 +228,11 @@ jobs:
             btc-only-v3-prospective-run-v1.tar.gz.sha256
           compression-level: 0
           retention-days: 30
+
+      - name: Require terminal resolution for admission evidence
+        run: |
+          python - <<'PY'
+          import json
+          run = json.load(open('prospective-data/PROSPECTIVE_RUN.json'))
+          assert run['resolution_status'] == 'terminal', run['resolution_status']
+          PY
