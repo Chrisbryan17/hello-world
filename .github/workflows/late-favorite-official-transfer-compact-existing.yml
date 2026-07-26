@@ -1,0 +1,86 @@
+name: Late Favorite Compact Existing Official Evidence
+
+on:
+  push:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/late-favorite-official-transfer-compact-existing.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  SOURCE_RUN_ID: '30213818908'
+  SOURCE_ARTIFACT_DIGEST: '210984541bcd64597ca48d480ad59102427f56b4ac204ab1308ad8f8a4f93ce5'
+
+jobs:
+  extract-compact-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the already-green full evidence artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: late-favorite-official-transfer-v1
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          github-token: ${{ github.token }}
+          path: source-artifact
+
+      - name: Locate and verify decision evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          find source-artifact -maxdepth 4 -type f -printf '%p %s bytes\n' | sort
+          results="$(find source-artifact -type d -name late-favorite-official-transfer-results -print -quit)"
+          test -n "$results"
+          for name in AUDIT.json REPORT.md SHA256SUMS official_transfer_ledger.csv.gz raw_response_manifest.jsonl.gz; do
+            test -f "$results/$name"
+          done
+          (cd "$results" && sha256sum -c SHA256SUMS)
+          mkdir compact
+          cp "$results/AUDIT.json" compact/
+          cp "$results/REPORT.md" compact/
+          cp "$results/SHA256SUMS" compact/
+          cp "$results/official_transfer_ledger.csv.gz" compact/
+          cp "$results/raw_response_manifest.jsonl.gz" compact/
+          printf '%s  source-full-artifact.zip\n' "$SOURCE_ARTIFACT_DIGEST" > compact/SOURCE_ARTIFACT_SHA256.txt
+          printf '%s\n' "$SOURCE_RUN_ID" > compact/SOURCE_RUN_ID.txt
+
+      - name: Verify compact summary contract
+        run: |
+          python - <<'PY'
+          import gzip
+          import json
+          from pathlib import Path
+
+          root = Path('compact')
+          audit = json.loads((root / 'AUDIT.json').read_text())
+          assert audit['candidate'] == 'late_favorite_btc_eth_v2_diagnostic'
+          assert audit['fills'] == 9268
+          assert audit['filled_condition_set_sha256'] == 'bf276fbce187d9651d56ecae976520d4251140c1d5b0d440696c5d077838a67a'
+          assert audit['credentials_used'] == 0
+          assert audit['thresholds_changed'] == 0
+          assert audit['live_submission'] == 'physically_absent'
+          assert sum(audit['classification_counts'].values()) == 9268
+          with gzip.open(root / 'raw_response_manifest.jsonl.gz', 'rt', encoding='utf-8') as handle:
+              count = sum(1 for line in handle if line.strip())
+          assert count == audit['raw_responses']
+          print((root / 'REPORT.md').read_text())
+          print(json.dumps(audit, indent=2, sort_keys=True))
+          PY
+
+      - name: Hash compact evidence
+        run: |
+          (cd compact && sha256sum AUDIT.json REPORT.md SHA256SUMS official_transfer_ledger.csv.gz raw_response_manifest.jsonl.gz SOURCE_ARTIFACT_SHA256.txt SOURCE_RUN_ID.txt > COMPACT_SHA256SUMS)
+          cat compact/COMPACT_SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: late-favorite-official-transfer-compact-from-run-30213818908
+          path: compact/
+          compression-level: 0
+          retention-days: 30
