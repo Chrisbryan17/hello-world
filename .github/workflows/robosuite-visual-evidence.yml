@@ -1,0 +1,155 @@
+name: robosuite visual evidence
+
+on:
+  pull_request:
+    paths:
+      - "robosuite_probe_payload/**"
+      - ".github/workflows/robosuite-visual-evidence.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  render-evidence:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      MUJOCO_GL: osmesa
+      PYOPENGL_PLATFORM: osmesa
+
+    steps:
+      - name: Check out visual probe branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref || github.ref }}
+
+      - name: Reconstruct exact tested source and renderer
+        run: |
+          set -euxo pipefail
+          cat robosuite_probe_payload/source.b64.part* | base64 --decode > robosuite-source.zip
+          echo "d44576adcafafba05f6a1c702f3c2510fc31e455cf6b5b30cb0daeab0f938f61  robosuite-source.zip" | sha256sum --check -
+          unzip -q robosuite-source.zip
+          cp robosuite_probe_payload/patches/robosuite_adapter.py \
+            robosuite-expert-demo-generator/src/expert_demos/robosuite_adapter.py
+          base64 --decode robosuite_probe_payload/render_visual_evidence.py.gz.b64 \
+            | gunzip > robosuite-expert-demo-generator/scripts/render_visual_evidence.py
+          echo "a3bfb87717e5a5abe9cc6018339bf3860fc57c858b452fcb61cf5a2a83fcf839  robosuite-expert-demo-generator/scripts/render_visual_evidence.py" \
+            | sha256sum --check -
+          chmod +x robosuite-expert-demo-generator/scripts/render_visual_evidence.py
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install headless MuJoCo rendering stack
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg \
+            libgl1 \
+            libgl1-mesa-dev \
+            libglfw3 \
+            libosmesa6-dev
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir \
+            "numpy>=1.24,<3" \
+            "h5py>=3.8,<4" \
+            "mujoco==3.3.7" \
+            "robosuite==1.5.2" \
+            "imageio==2.37.0" \
+            "imageio-ffmpeg==0.6.0" \
+            "Pillow>=10,<13" \
+            "PyOpenGL>=3.1.7,<4"
+          python - <<'PY'
+          import imageio, mujoco, robosuite
+          from OpenGL import GL
+          print("MuJoCo", mujoco.__version__)
+          print("robosuite", robosuite.__version__)
+          print("imageio", imageio.__version__)
+          print("OpenGL import", GL.__name__)
+          assert mujoco.__version__ == "3.3.7"
+          assert robosuite.__version__ == "1.5.2"
+          PY
+
+      - name: Compile source and visual renderer
+        working-directory: robosuite-expert-demo-generator
+        run: |
+          set -euxo pipefail
+          python -m compileall -q src scripts
+
+      - name: Generate the proven real-physics demonstration
+        working-directory: robosuite-expert-demo-generator
+        run: |
+          set -euxo pipefail
+          mkdir -p artifacts/visual-evidence
+          export PYTHONPATH="$PWD/src"
+          export PYTHONUNBUFFERED=1
+          python scripts/integration_probe.py \
+            --output artifacts/visual-evidence/probe-demo.hdf5 \
+            2>&1 | tee artifacts/visual-evidence/generation-and-replay.log
+
+      - name: Render MP4 GIF comparison and keyframes
+        working-directory: robosuite-expert-demo-generator
+        run: |
+          set -euxo pipefail
+          export PYTHONPATH="$PWD/src"
+          export PYTHONUNBUFFERED=1
+          python scripts/render_visual_evidence.py \
+            --dataset artifacts/visual-evidence/probe-demo.hdf5 \
+            --output-dir artifacts/visual-evidence/rendered \
+            --camera agentview \
+            --width 512 \
+            --height 512 \
+            --fps 20 \
+            2>&1 | tee artifacts/visual-evidence/render.log
+
+      - name: Validate visual evidence files
+        working-directory: robosuite-expert-demo-generator
+        run: |
+          set -euxo pipefail
+          ffprobe -v error -show_entries stream=codec_name,width,height,r_frame_rate,nb_frames \
+            -of json artifacts/visual-evidence/rendered/panda-lift-action-replay.mp4 \
+            > artifacts/visual-evidence/rendered/action-replay-ffprobe.json
+          ffprobe -v error -show_entries stream=codec_name,width,height,r_frame_rate,nb_frames \
+            -of json artifacts/visual-evidence/rendered/panda-lift-replay-vs-recorded.mp4 \
+            > artifacts/visual-evidence/rendered/comparison-ffprobe.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from PIL import Image
+
+          root = Path("artifacts/visual-evidence/rendered")
+          report = json.loads((root / "visual-evidence-manifest.json").read_text())
+          assert report["valid"] is True, report
+          assert report["verification"]["final_replay_success"] is True
+          assert report["verification"]["max_pre_state_l2_error"] <= 1e-7
+          assert report["verification"]["max_post_state_l2_error"] <= 1e-7
+          assert report["verification"]["max_pixel_difference"] == 0
+          assert report["render"]["frames"] == 59
+          for name in (
+              "panda-lift-action-replay.mp4",
+              "panda-lift-replay-vs-recorded.mp4",
+              "panda-lift-action-replay.gif",
+              "panda-lift-keyframes.png",
+          ):
+              path = root / name
+              assert path.is_file() and path.stat().st_size > 10_000, (name, path.stat().st_size)
+          image = Image.open(root / "panda-lift-keyframes.png")
+          assert image.width == 1280 and image.height >= 640
+          print(json.dumps(report["verification"], indent=2))
+          PY
+          find artifacts/visual-evidence -type f -print0 | sort -z | xargs -0 sha256sum \
+            > artifacts/visual-evidence/SHA256SUMS.txt
+
+      - name: Upload visual evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: robosuite-visual-evidence-${{ github.run_id }}
+          path: robosuite-expert-demo-generator/artifacts/visual-evidence/
+          if-no-files-found: error
+          retention-days: 14
