@@ -1,1 +1,0 @@
-Observer source intentionally absent at this checkpoint; the isolated contract must fail before implementation.

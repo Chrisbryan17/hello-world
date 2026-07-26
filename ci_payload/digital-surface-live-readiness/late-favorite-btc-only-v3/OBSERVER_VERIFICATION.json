@@ -1,0 +1,25 @@
+{
+  "authenticated_requests": 0,
+  "candidate": "late_favorite_btc_only_v3_prospective_shadow",
+  "candidate_cutoff_epoch_seconds": 1785093071,
+  "candidate_policy_sha256": "82b923b0d4034d801156b77a213db6084be719f27491478247e5354ea93e92ba",
+  "capture_cutoff_epoch_seconds": 1785094521,
+  "capture_policy_sha256": "888810ae61a0ab3e067c68850faeba5f2709a57bb69ef0c2ad708e128b311edc",
+  "combined_source_sha256": "f2e086bb5e74f0343a4ea29f46ea2bf8e23062952b456303e204c6b5469b6126",
+  "credentials_used": 0,
+  "historical_admission_credit": 0,
+  "live_submission": "physically_absent",
+  "official_resolution": "Gamma closed binary terminal outcome",
+  "order_submissions": 0,
+  "public_endpoints": [
+    "GET https://gamma-api.polymarket.com/markets/slug/{slug}",
+    "POST https://clob.polymarket.com/books"
+  ],
+  "source_files_sha256": {
+    "collector/public_collector.py": "85c16a1e9805b89a234139f15140c4f0f39658887419d70c2caf4c238dd5cc6b",
+    "collector/resolution.py": "bb4a643d4618e78442c11ef21ac15483c048a89e5bc7e900500af661f6a8c91c",
+    "source/capture_policy.py": "bda91808405d5b9e6ee6a09bd464cecd751c23573584bc2624891f5bf091e955",
+    "source/late_favorite_v3.py": "190ad8d358229f448b42a4dd8dc0e25532b440ce88a8e897fb9cb3c835cc42ee"
+  },
+  "tests_collected": 22
+}
