@@ -36,7 +36,7 @@ jobs:
       - name: Install pinned test stack
         run: python -m pip install requests==2.32.4 pytest==8.3.5
 
-      - name: Compile observer, capture, and public collector sources
+      - name: Compile observer, capture, collector, and resolution sources
         shell: bash
         run: |
           set -euo pipefail
@@ -45,11 +45,13 @@ jobs:
             "$root/source/late_favorite_v3.py" \
             "$root/source/capture_policy.py" \
             "$root/collector/public_collector.py" \
+            "$root/collector/resolution.py" \
             "$root/tests/test_late_favorite_v3.py" \
             "$root/tests/test_capture_policy.py" \
-            "$root/tests/test_public_collector.py"
+            "$root/tests/test_public_collector.py" \
+            "$root/tests/test_resolution.py"
 
-      - name: Pass exactly 19 behavior contracts
+      - name: Pass exactly 22 behavior contracts
         shell: bash
         env:
           PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector
@@ -57,7 +59,7 @@ jobs:
           set -euo pipefail
           root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
           pytest --collect-only -q "$root/tests" | tee /tmp/collect.txt
-          grep -Eq '^19 tests collected' /tmp/collect.txt
+          grep -Eq '^22 tests collected' /tmp/collect.txt
           pytest -q "$root/tests"
 
       - name: Verify frozen policies and contamination cutoffs
@@ -79,6 +81,7 @@ jobs:
               root / 'source/late_favorite_v3.py',
               root / 'source/capture_policy.py',
               root / 'collector/public_collector.py',
+              root / 'collector/resolution.py',
           ]
           combined = hashlib.sha256()
           source_hashes = {}
@@ -109,7 +112,7 @@ jobs:
 
           verification = {
               'candidate': 'late_favorite_btc_only_v3_prospective_shadow',
-              'tests_collected': 19,
+              'tests_collected': 22,
               'candidate_policy_sha256': trading.policy_sha256,
               'capture_policy_sha256': capture.capture_policy_sha256,
               'candidate_cutoff_epoch_seconds': trading.valid_market_open_after_epoch_seconds,
@@ -120,6 +123,7 @@ jobs:
                   'GET https://gamma-api.polymarket.com/markets/slug/{slug}',
                   'POST https://clob.polymarket.com/books',
               ],
+              'official_resolution': 'Gamma closed binary terminal outcome',
               'credentials_used': 0,
               'authenticated_requests': 0,
               'order_submissions': 0,
@@ -151,38 +155,36 @@ jobs:
               'api_secret', 'sign_transaction', 'poly_api_key', 'poly_signature',
               'poly_passphrase', 'poly_address',
           }
-          for path in sorted((root / 'source').glob('*.py')):
-              text = path.read_text()
-              tree = ast.parse(text)
+          def imports_for(path: Path) -> set[str]:
+              tree = ast.parse(path.read_text())
               imports = set()
               for node in ast.walk(tree):
                   if isinstance(node, ast.Import):
                       imports.update(alias.name.split('.')[0] for alias in node.names)
                   elif isinstance(node, ast.ImportFrom) and node.module:
                       imports.add(node.module.split('.')[0])
+              return imports
+
+          for path in sorted((root / 'source').glob('*.py')):
+              imports = imports_for(path)
               assert not (imports & core_forbidden), (path, imports & core_forbidden)
-              lowered = text.lower()
+              lowered = path.read_text().lower()
               for token in forbidden_tokens:
                   assert token not in lowered, (path, token)
 
-          collector = root / 'collector/public_collector.py'
-          text = collector.read_text()
-          tree = ast.parse(text)
-          imports = set()
-          for node in ast.walk(tree):
-              if isinstance(node, ast.Import):
-                  imports.update(alias.name.split('.')[0] for alias in node.names)
-              elif isinstance(node, ast.ImportFrom) and node.module:
-                  imports.add(node.module.split('.')[0])
-          assert imports & {'requests'}
-          assert not (imports & privileged), imports & privileged
-          lowered = text.lower()
-          for token in forbidden_tokens:
-              assert token not in lowered, token
-          assert 'https://gamma-api.polymarket.com' in text
-          assert 'https://clob.polymarket.com' in text
-          assert 'parsed.path == "/books"' in text
-          assert 'parsed.path.startswith("/markets/slug/")' in text
+          collector_paths = sorted((root / 'collector').glob('*.py'))
+          all_collector_imports = set().union(*(imports_for(path) for path in collector_paths))
+          assert 'requests' in all_collector_imports
+          assert not (all_collector_imports & privileged), all_collector_imports & privileged
+          for path in collector_paths:
+              lowered = path.read_text().lower()
+              for token in forbidden_tokens:
+                  assert token not in lowered, (path, token)
+          public_text = (root / 'collector/public_collector.py').read_text()
+          assert 'https://gamma-api.polymarket.com' in public_text
+          assert 'https://clob.polymarket.com' in public_text
+          assert 'parsed.path == "/books"' in public_text
+          assert 'parsed.path.startswith("/markets/slug/")' in public_text
           PY
 
       - name: Build deterministic observer checkpoint
@@ -199,6 +201,7 @@ jobs:
           cp "$root/source/late_favorite_v3.py" btc-only-v3-observer-checkpoint/
           cp "$root/source/capture_policy.py" btc-only-v3-observer-checkpoint/
           cp "$root/collector/public_collector.py" btc-only-v3-observer-checkpoint/
+          cp "$root/collector/resolution.py" btc-only-v3-observer-checkpoint/
           (cd btc-only-v3-observer-checkpoint && sha256sum * > SHA256SUMS)
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
             -czf btc-only-v3-observer-checkpoint-v1.tar.gz btc-only-v3-observer-checkpoint
