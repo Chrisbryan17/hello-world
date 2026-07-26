@@ -1,0 +1,46 @@
+{
+  "candidate": "late_favorite_btc_only_v3_prospective_shadow",
+  "candidate_policy_sha256": "82b923b0d4034d801156b77a213db6084be719f27491478247e5354ea93e92ba",
+  "capture_policy_sha256": "888810ae61a0ab3e067c68850faeba5f2709a57bb69ef0c2ad708e128b311edc",
+  "current": {
+    "complete_untouched_weekly_blocks": 0,
+    "hypothetical_fok_fills": 0,
+    "official_outcome_coverage": {
+      "denominator": 4,
+      "numerator": 4
+    },
+    "prospective_markets_observed": 4,
+    "prospective_pnl_total": "0.00",
+    "unresolved_states": 0
+  },
+  "gates": {
+    "maximum_top_two_day_pnl_concentration": 0.4,
+    "maximum_unresolved_states": 0,
+    "minimum_complete_untouched_weekly_blocks": 4,
+    "minimum_hypothetical_fok_fills": 100,
+    "minimum_prospective_markets_observed": 500,
+    "official_outcome_coverage": 1.0,
+    "positive_day_block_bootstrap_lower_bound": true,
+    "positive_total_pnl_after_fees": true
+  },
+  "observations": [
+    {
+      "artifact_zip_sha256": "8d00c88d6046806a2abc07f43da8b2f0ab08449890ee8a7f9e1f7071b92c4e21",
+      "checkpoint": "prospective-run-v1",
+      "hypothetical_fok_fills": 0,
+      "markets": 1,
+      "pnl_total": "0.00",
+      "runtime_source_sha256": "ce477bf97589997899c91ad22af9025de521520f8ee7aa46a21b50a313958bd7"
+    },
+    {
+      "artifact_zip_sha256": "222d8261ea92dfdfcd3fbb9ccb12dbf6948d03f6bed1e7558f3d9e4bdc6a5580",
+      "checkpoint": "prospective-block-v1",
+      "hypothetical_fok_fills": 0,
+      "markets": 3,
+      "pnl_total": "0.00",
+      "runtime_source_sha256": "81a13d2aeb3df3c2088b8aa99272b10e217a392eabc839a01a8f2b71f570ecbb"
+    }
+  ],
+  "status": "prospective_shadow_only_not_admitted",
+  "version": 1
+}
