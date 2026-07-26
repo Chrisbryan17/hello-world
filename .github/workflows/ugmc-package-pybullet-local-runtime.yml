@@ -19,26 +19,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up CPython 3.11
+      - name: Set up build CPython 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install runtime and local-build dependencies
+      - name: Install build-side PyBullet
         run: |
           set -euxo pipefail
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install \
-            'pybullet==3.2.7' \
-            'numpy==1.26.4' \
-            'pandas==2.2.3' \
-            'imageio==2.37.0' \
-            'pillow==11.3.0' \
-            'matplotlib==3.10.3' \
-            'pytest==8.4.1' \
-            'gin-config==0.5.0' \
-            'absl-py==2.3.1' \
-            'gym==0.25.2'
+          python -m pip install --upgrade pip
+          python -m pip install 'pybullet==3.2.7' 'numpy==1.26.4'
 
       - name: Clone exact Bullet source revision
         run: |
@@ -48,13 +38,14 @@ jobs:
           git -C bullet3 rev-parse HEAD | tee BULLET_COMMIT.txt
           test "$(cat BULLET_COMMIT.txt)" = "63c4d67e337017f9d8b298c900e9aabdb69296e7"
 
-      - name: Run real-URDF smoke test
+      - name: Run build-side real-URDF smoke test
         run: |
           set -euxo pipefail
           python - <<'PY'
           import json
           import pybullet as p
           import pybullet_data
+
           client = p.connect(p.DIRECT)
           assert client >= 0
           p.setAdditionalSearchPath(pybullet_data.getDataPath())
@@ -99,38 +90,82 @@ jobs:
           p.disconnect()
           PY
 
-      - name: Copy and verify portable runtime
+      - name: Download pinned portable CPython 3.11
         run: |
           set -euxo pipefail
-          PY_PREFIX="$(python -c 'import sys; print(sys.prefix)')"
+          curl -fL --retry 5 --retry-delay 3 \
+            -o python-standalone.tar.gz \
+            'https://github.com/astral-sh/python-build-standalone/releases/download/20260203/cpython-3.11.14%2B20260203-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz'
           mkdir -p portable
-          cp -a "$PY_PREFIX" portable/python
+          tar -xzf python-standalone.tar.gz -C portable
+          portable/python/bin/python3.11 -V
+          portable/python/bin/python3.11 -m ensurepip --upgrade
+          portable/python/bin/python3.11 -m pip install --upgrade pip setuptools wheel
+          portable/python/bin/python3.11 -m pip install \
+            'pybullet==3.2.7' \
+            'numpy==1.26.4' \
+            'pandas==2.2.3' \
+            'imageio==2.37.0' \
+            'pillow==11.3.0' \
+            'gin-config==0.5.0' \
+            'absl-py==2.3.1' \
+            'gym==0.25.2'
+
+      - name: Verify portable runtime with real URDFs
+        run: |
+          set -euxo pipefail
           portable/python/bin/python3.11 - <<'PY'
+          import json
+          import platform
           import pybullet as p
           import pybullet_data
+
           client = p.connect(p.DIRECT)
           assert client >= 0
-          assert pybullet_data.getDataPath()
+          p.setAdditionalSearchPath(pybullet_data.getDataPath())
+          p.resetSimulation()
+          p.setGravity(0, 0, -9.81)
+          p.loadURDF('plane.urdf')
+          kuka = p.loadURDF('kuka_iiwa/model.urdf', useFixedBase=True)
+          husky = p.loadURDF('husky/husky.urdf', [0, -1.5, 0.25])
+          laikago = p.loadURDF('laikago/laikago_toes.urdf', [0, 1.5, 0.55])
+          for _ in range(120):
+              p.stepSimulation()
+          result = {
+              'python': platform.python_version(),
+              'kuka_joints': p.getNumJoints(kuka),
+              'husky_joints': p.getNumJoints(husky),
+              'laikago_joints': p.getNumJoints(laikago),
+              'pybullet_data': pybullet_data.getDataPath(),
+          }
+          assert result['python'] == '3.11.14'
+          assert result['kuka_joints'] >= 7
+          assert result['husky_joints'] >= 4
+          assert result['laikago_joints'] >= 12
+          print(json.dumps(result, indent=2))
           p.disconnect()
-          print('PORTABLE_RUNTIME_OK')
           PY
 
       - name: Create runtime manifest
         run: |
-          python - <<'PY'
+          portable/python/bin/python3.11 - <<'PY'
           import json
           import platform
           from pathlib import Path
+
           manifest = {
               'bullet_commit': Path('BULLET_COMMIT.txt').read_text().strip(),
               'python': platform.python_version(),
               'platform': platform.platform(),
+              'python_distribution': 'python-build-standalone',
+              'python_distribution_release': '20260203',
               'bootstrap_pybullet': '3.2.7',
               'smoke_test': json.loads(Path('PYBULLET_SMOKE_TEST.json').read_text()),
           }
           Path('manifest.json').write_text(
               json.dumps(manifest, indent=2), encoding='utf-8'
           )
+          print(json.dumps(manifest, indent=2))
           PY
 
       - name: Package runtime and source
@@ -190,6 +225,7 @@ jobs:
           import json
           import os
           from pathlib import Path
+
           data = {
               'run_id': int(os.environ['GITHUB_RUN_ID']),
               'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
