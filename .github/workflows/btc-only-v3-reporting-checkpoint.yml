@@ -1,0 +1,53 @@
+name: BTC-Only v3 Reporting Checkpoint
+
+on:
+  push:
+    branches: [btc-only-v3-reporting-20260726]
+    paths:
+      - .github/workflows/btc-only-v3-reporting-checkpoint.yml
+      - ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/reporting/**
+  pull_request:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/btc-only-v3-reporting-checkpoint.yml
+      - ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/reporting/**
+  workflow_dispatch:
+
+concurrency:
+  group: btc-only-v3-reporting-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  reporting-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned test stack
+        run: python -m pip install pytest==8.3.5
+      - name: Require and compile reporting source
+        shell: bash
+        run: |
+          root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
+          test -f "$root/reporting/prospective_aggregate.py"
+          python -m py_compile \
+            "$root/reporting/prospective_aggregate.py" \
+            "$root/reporting/tests/test_prospective_aggregate.py"
+      - name: Pass exactly five reporting contracts
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/reporting
+        run: |
+          root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
+          pytest --collect-only -q "$root/reporting/tests" | tee /tmp/collect.txt
+          grep -Eq '^5 tests collected' /tmp/collect.txt
+          pytest -q "$root/reporting/tests"
