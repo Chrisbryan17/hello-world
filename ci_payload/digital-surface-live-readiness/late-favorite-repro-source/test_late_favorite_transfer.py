@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import math
 
+import pandas as pd
 import pytest
 
-from late_favorite_transfer import evaluate_market, fee_per_share, frozen_policy
+from late_favorite_transfer import (
+    evaluate_market,
+    fee_per_share,
+    frozen_policy,
+    summarize_asset,
+)
 
 
 def signal(up: float, down: float) -> dict[str, float]:
@@ -79,3 +85,26 @@ def test_loss_pnl_uses_executable_ask_and_fee() -> None:
     assert result["won"] is False
     assert result["pnl_per_share"] == pytest.approx(-0.90 - fee_per_share(0.90))
     assert math.isclose(result["pnl_at_five_shares"], result["pnl_per_share"] * 5)
+
+
+def test_asset_summary_exposes_missing_labels_in_denominators() -> None:
+    frame = pd.DataFrame(
+        {
+            "condition_id": ["a", "b", "c"],
+            "market_start": pd.to_datetime(
+                ["2026-05-01T00:00:00Z", "2026-05-01T00:05:00Z", "2026-05-01T00:10:00Z"]
+            ),
+            "signal": [True, True, True],
+            "hypothetical_fok_fill": [True, True, True],
+            "won": [True, False, None],
+            "pnl_at_five_shares": [0.4, -4.5, None],
+            "pnl_per_share": [0.08, -0.9, None],
+        }
+    )
+    summary = summarize_asset(frame)
+    assert summary["hypothetical_fok_fills"] == 3
+    assert summary["labeled_fills"] == 2
+    assert summary["unlabeled_fills"] == 1
+    assert summary["inferred_label_wins"] == 1
+    assert summary["inferred_label_win_rate"] == pytest.approx(0.5)
+    assert summary["inferred_label_pnl_at_five_shares"] == pytest.approx(-4.1)
