@@ -1,0 +1,44 @@
+name: BTC-Only v3 Observer Checkpoint
+
+on:
+  push:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/btc-only-v3-observer-checkpoint.yml
+      - ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/**
+  pull_request:
+    branches: [digital-surface-ci-20260724]
+    paths:
+      - .github/workflows/btc-only-v3-observer-checkpoint.yml
+      - ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  observer-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned test stack
+        run: python -m pip install pytest==8.3.5
+      - name: Compile observer source when present
+        shell: bash
+        run: |
+          test -f ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source/late_favorite_v3.py
+          python -m py_compile \
+            ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source/late_favorite_v3.py \
+            ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/tests/test_late_favorite_v3.py
+      - name: Run observer behavior contract
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source
+        run: pytest -q ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/tests/test_late_favorite_v3.py
