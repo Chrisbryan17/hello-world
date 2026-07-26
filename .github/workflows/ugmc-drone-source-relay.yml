@@ -1,0 +1,50 @@
+name: UGMC Crazyflie Source Relay
+
+on:
+  push:
+    branches:
+      - ugmc-pybullet-relay-20260726
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export-drone-source:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout pinned gym-pybullet-drones source
+        uses: actions/checkout@v4
+        with:
+          repository: learnsyslab/gym-pybullet-drones
+          ref: e712698a05a80728b06572819dcf044596707754
+          path: gym-pybullet-drones
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify and package clean shallow clone
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git -C gym-pybullet-drones rev-parse HEAD)" = "e712698a05a80728b06572819dcf044596707754"
+          git -C gym-pybullet-drones remote set-url origin https://github.com/learnsyslab/gym-pybullet-drones.git
+          test -z "$(git -C gym-pybullet-drones status --porcelain=v1)"
+          mkdir -p out
+          tar -I 'gzip -1' -cf out/gym-pybullet-drones-pinned-clean-shallow-clone.tar.gz gym-pybullet-drones
+          sha256sum out/gym-pybullet-drones-pinned-clean-shallow-clone.tar.gz > out/SHA256SUMS.txt
+          du -sh gym-pybullet-drones out/*
+
+      - name: Upload pinned drone source
+        uses: actions/upload-artifact@v4
+        with:
+          name: gym-pybullet-drones-pinned-clean-shallow-clone
+          path: |
+            out/gym-pybullet-drones-pinned-clean-shallow-clone.tar.gz
+            out/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 0
