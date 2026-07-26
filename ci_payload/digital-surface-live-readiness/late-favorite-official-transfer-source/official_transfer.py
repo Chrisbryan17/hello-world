@@ -4,7 +4,6 @@ import argparse
 import gzip
 import hashlib
 import json
-import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -29,6 +28,12 @@ def _sha256_bytes(raw: bytes) -> str:
 
 def _canonical_json_bytes(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _payload_for_hash(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: item for key, item in value.items() if not str(key).startswith("_")}
+    return value
 
 
 def _normalize_condition_id(value: Any) -> str:
@@ -63,7 +68,7 @@ def _base_parse_result(source: str, classification: str) -> dict[str, Any]:
 
 def parse_gamma_terminal(payload: Any, *, expected_condition_id: str) -> dict[str, Any]:
     result = _base_parse_result("gamma", "malformed_gamma_payload")
-    result["payload_sha256"] = _sha256_bytes(_canonical_json_bytes(payload))
+    result["payload_sha256"] = _sha256_bytes(_canonical_json_bytes(_payload_for_hash(payload)))
     if not isinstance(payload, Mapping):
         return result
 
@@ -110,7 +115,7 @@ def parse_gamma_terminal(payload: Any, *, expected_condition_id: str) -> dict[st
 
 def parse_clob_terminal(payload: Any, *, expected_condition_id: str) -> dict[str, Any]:
     result = _base_parse_result("clob", "malformed_clob_payload")
-    result["payload_sha256"] = _sha256_bytes(_canonical_json_bytes(payload))
+    result["payload_sha256"] = _sha256_bytes(_canonical_json_bytes(_payload_for_hash(payload)))
     if not isinstance(payload, Mapping):
         return result
 
@@ -219,9 +224,13 @@ class ResponseArchive:
 
     def write_manifest(self) -> Path:
         path = self.root / "raw_response_manifest.jsonl.gz"
-        with gzip.open(path, "wt", encoding="utf-8", mtime=0) as handle:
-            for record in self.records:
-                handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+        raw = "".join(
+            json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+            for record in self.records
+        ).encode("utf-8")
+        with path.open("wb") as handle:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=handle, mtime=0) as compressed:
+                compressed.write(raw)
         return path
 
 
@@ -441,8 +450,7 @@ def fetch_clob_payloads(
 
 
 def _unavailable(source: str, classification: str = "unavailable") -> dict[str, Any]:
-    result = _base_parse_result(source, classification)
-    return result
+    return _base_parse_result(source, classification)
 
 
 def build_transfer_ledger(
@@ -557,6 +565,14 @@ def summarize_transfer(ledger: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def _format_percent(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.4%}"
+
+
+def _format_decimal(value: float | None, places: int = 6) -> str:
+    return "n/a" if value is None else f"{value:.{places}f}"
+
+
 def run_transfer(
     *,
     eligible_path: Path,
@@ -630,18 +646,15 @@ def run_transfer(
     audit_path = out_dir / "AUDIT.json"
     audit_path.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n")
 
-    coverage = audit["official_coverage"]
-    win_rate = audit["official_win_rate"]
-    mean_pnl = audit["official_mean_pnl_per_share"]
     report = (
         "# Late-Favorite BTC/ETH Official Outcome Transfer\n\n"
         "## Result\n\n"
         f"- Frozen filled condition set: `{condition_set_sha256}`\n"
         f"- Fills: {audit['fills']:,}\n"
-        f"- Official usable labels: {audit['official_usable']:,} ({coverage:.4%})\n"
-        f"- Official win rate: {win_rate:.4%}\n"
-        f"- Official mean P&L/share: {mean_pnl:.6f}\n"
-        f"- Official P&L at five shares: ${audit['official_pnl_at_five_shares']:.6f}\n"
+        f"- Official usable labels: {audit['official_usable']:,} ({_format_percent(audit['official_coverage'])})\n"
+        f"- Official win rate: {_format_percent(audit['official_win_rate'])}\n"
+        f"- Official mean P&L/share: {_format_decimal(audit['official_mean_pnl_per_share'])}\n"
+        f"- Official P&L at five shares: ${_format_decimal(audit['official_pnl_at_five_shares'])}\n"
         f"- Comparable inferred labels: {audit['comparable_to_inferred']:,}\n"
         f"- Official/inferred disagreements: {audit['official_vs_inferred_disagreements']:,}\n"
         f"- Gamma payloads: {audit['gamma_payloads']:,}\n"
