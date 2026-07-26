@@ -5,6 +5,10 @@ on:
     branches: [digital-surface-live-readiness-20260725]
     paths:
       - .github/workflows/apply-late-favorite-fee-field-fix.yml
+  pull_request:
+    branches: [digital-surface-ci-20260724]
+    paths:
+      - .github/workflows/apply-late-favorite-fee-field-fix.yml
 
 permissions:
   contents: write
@@ -35,16 +39,18 @@ jobs:
           path = Path('ci_payload/digital-surface-live-readiness/late-favorite-repro-source/late_favorite_transfer.py')
           text = path.read_text()
 
-          anchor = '''    result["hypothetical_fok_fill"] = True
-              result["decision"] = "hypothetical_fok_fill"
-              normalized_outcome = str(outcome).title() if outcome is not None else None
-          '''.replace('          ', '')
-          replacement = '''    result["hypothetical_fok_fill"] = True
-              result["decision"] = "hypothetical_fok_fill"
-              fee = fee_per_share(arrival_ask)
-              result["fee_per_share"] = fee
-              normalized_outcome = str(outcome).title() if outcome is not None else None
-          '''.replace('          ', '')
+          anchor = (
+              '    result["hypothetical_fok_fill"] = True\n'
+              '    result["decision"] = "hypothetical_fok_fill"\n'
+              '    normalized_outcome = str(outcome).title() if outcome is not None else None\n'
+          )
+          replacement = (
+              '    result["hypothetical_fok_fill"] = True\n'
+              '    result["decision"] = "hypothetical_fok_fill"\n'
+              '    fee = fee_per_share(arrival_ask)\n'
+              '    result["fee_per_share"] = fee\n'
+              '    normalized_outcome = str(outcome).title() if outcome is not None else None\n'
+          )
           if text.count(anchor) != 1:
               raise RuntimeError(f'fee insertion anchor count={text.count(anchor)}')
           text = text.replace(anchor, replacement)
@@ -70,6 +76,7 @@ jobs:
             ci_payload/digital-surface-live-readiness/late-favorite-repro-source/test_late_favorite_transfer.py \
             ci_payload/digital-surface-live-readiness/late-favorite-repro-source/test_fee_field_regression.py
       - name: Commit verified source correction
+        if: github.event_name == 'push'
         shell: bash
         run: |
           set -euo pipefail
