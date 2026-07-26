@@ -1,0 +1,237 @@
+name: BTC-Only v3 Prospective One-Shot
+
+on:
+  push:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/btc-only-v3-prospective-one-shot.yml
+  workflow_dispatch:
+
+concurrency:
+  group: btc-only-v3-prospective-one-shot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+  CANDIDATE_ROOT: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
+  STATE_DIR: btc-only-v3-prospective-state
+
+jobs:
+  collect-and-resolve-one-market:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: digital-surface-live-readiness-20260725
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pinned public client
+        run: python -m pip install requests==2.32.4
+
+      - name: Verify frozen source and command boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile \
+            "$CANDIDATE_ROOT/source/late_favorite_v3.py" \
+            "$CANDIDATE_ROOT/source/capture_policy.py" \
+            "$CANDIDATE_ROOT/collector/public_collector.py" \
+            "$CANDIDATE_ROOT/collector/resolution.py" \
+            "$CANDIDATE_ROOT/runner/observer_cli.py"
+          PYTHONPATH="$CANDIDATE_ROOT/source:$CANDIDATE_ROOT/collector:$CANDIDATE_ROOT/runner" \
+            python "$CANDIDATE_ROOT/runner/observer_cli.py" \
+              --project-root "$CANDIDATE_ROOT" \
+              --state-dir "$STATE_DIR" \
+              status | tee initial-status.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          status = json.loads(Path('initial-status.json').read_text())
+          assert status['conditions_seen'] == 0
+          assert status['conditions_resolved'] == 0
+          assert status['lifecycle_head_sha256'] == '0' * 64
+          assert status['raw_evidence_head_sha256'] == '0' * 64
+          PY
+
+      - name: Collect next genuinely new BTC window
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH="$CANDIDATE_ROOT/source:$CANDIDATE_ROOT/collector:$CANDIDATE_ROOT/runner" \
+            python "$CANDIDATE_ROOT/runner/observer_cli.py" \
+              --project-root "$CANDIDATE_ROOT" \
+              --state-dir "$STATE_DIR" \
+              collect-next | tee collect-output.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          output = json.loads(Path('collect-output.json').read_text())
+          condition = str(output['condition_id'])
+          opening = int(output['market_open_epoch_seconds'])
+          assert opening > 1785094521
+          assert output['command'] == 'collect-next'
+          assert len(output['lifecycle_head_sha256']) == 64
+          assert len(output['raw_evidence_head_sha256']) == 64
+          with Path('/tmp/prospective.env').open('w') as handle:
+              handle.write(f'CONDITION_ID={condition}\n')
+              handle.write(f'MARKET_OPEN_EPOCH_SECONDS={opening}\n')
+              handle.write(f'COLLECT_DECISION={output["decision"]}\n')
+          print(json.dumps(output, indent=2, sort_keys=True))
+          PY
+          cat /tmp/prospective.env >> "$GITHUB_ENV"
+
+      - name: Wait for terminal resolution window
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import time
+          opening = int(os.environ['MARKET_OPEN_EPOCH_SECONDS'])
+          target_ms = (opening + 305) * 1000
+          while True:
+              remaining = target_ms - time.time_ns() // 1_000_000
+              if remaining <= 0:
+                  break
+              time.sleep(min(remaining / 1000.0, 1.0))
+          PY
+
+      - name: Resolve from authoritative terminal outcome
+        shell: bash
+        run: |
+          set -euo pipefail
+          success=0
+          for attempt in $(seq 1 24); do
+            echo "resolution attempt $attempt"
+            if PYTHONPATH="$CANDIDATE_ROOT/source:$CANDIDATE_ROOT/collector:$CANDIDATE_ROOT/runner" \
+              python "$CANDIDATE_ROOT/runner/observer_cli.py" \
+                --project-root "$CANDIDATE_ROOT" \
+                --state-dir "$STATE_DIR" \
+                resolve --condition-id "$CONDITION_ID" \
+                > resolve-output.json; then
+              cat resolve-output.json
+              success=1
+              break
+            fi
+            sleep 15
+          done
+          test "$success" -eq 1
+
+      - name: Verify complete prospective lifecycle and raw evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH="$CANDIDATE_ROOT/source:$CANDIDATE_ROOT/collector:$CANDIDATE_ROOT/runner" \
+            python "$CANDIDATE_ROOT/runner/observer_cli.py" \
+              --project-root "$CANDIDATE_ROOT" \
+              --state-dir "$STATE_DIR" \
+              status | tee final-status.json
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          state = Path(os.environ['STATE_DIR'])
+          collect = json.loads(Path('collect-output.json').read_text())
+          resolution = json.loads(Path('resolve-output.json').read_text())
+          status = json.loads(Path('final-status.json').read_text())
+          condition = os.environ['CONDITION_ID']
+          opening = int(os.environ['MARKET_OPEN_EPOCH_SECONDS'])
+
+          assert status['conditions_seen'] == 1
+          assert status['conditions_resolved'] == 1
+          assert status['unresolved_condition_ids'] == []
+          assert resolution['condition_id'] == condition
+          assert resolution['command'] == 'resolve'
+          assert resolution['official_outcome'] in {'Up', 'Down'}
+          assert resolution['decision'] in {'resolved_fill', 'resolved_no_fill'}
+          assert opening > 1785094521
+
+          lifecycle_rows = [
+              json.loads(line)
+              for line in (state / 'lifecycle.jsonl').read_text().splitlines()
+              if line.strip()
+          ]
+          assert lifecycle_rows[0]['event_type'] == 'discovered'
+          assert lifecycle_rows[-1]['event_type'] == 'resolution'
+          assert all(row['condition_id'] == condition for row in lifecycle_rows)
+          assert all(row['policy_sha256'] == '82b923b0d4034d801156b77a213db6084be719f27491478247e5354ea93e92ba' for row in lifecycle_rows)
+          assert all(row['capture_policy_sha256'] == '888810ae61a0ab3e067c68850faeba5f2709a57bb69ef0c2ad708e128b311edc' for row in lifecycle_rows)
+          assert all(int(row['market_open_epoch_seconds']) == opening for row in lifecycle_rows)
+
+          manifest_rows = [
+              json.loads(line)
+              for line in (state / 'raw_evidence/manifest.jsonl').read_text().splitlines()
+              if line.strip()
+          ]
+          assert len(manifest_rows) >= 3
+          allowed = {
+              ('GET', 'gamma-api.polymarket.com'),
+              ('POST', 'clob.polymarket.com'),
+          }
+          from urllib.parse import urlparse
+          for row in manifest_rows:
+              parsed = urlparse(row['url'])
+              assert (row['method'], parsed.netloc) in allowed
+              body = state / 'raw_evidence' / row['body_path']
+              assert hashlib.sha256(body.read_bytes()).hexdigest() == row['response_body_sha256']
+
+          audit = {
+              'candidate': 'late_favorite_btc_only_v3_prospective_shadow',
+              'condition_id': condition,
+              'market_open_epoch_seconds': opening,
+              'collect_decision': collect['decision'],
+              'resolution_decision': resolution['decision'],
+              'official_outcome': resolution['official_outcome'],
+              'official_won': resolution.get('official_won'),
+              'pnl_total': resolution.get('pnl_total'),
+              'lifecycle_records': len(lifecycle_rows),
+              'raw_evidence_records': len(manifest_rows),
+              'lifecycle_head_sha256': status['lifecycle_head_sha256'],
+              'raw_evidence_head_sha256': status['raw_evidence_head_sha256'],
+              'source_sha256': status['source_sha256'],
+              'candidate_policy_sha256': '82b923b0d4034d801156b77a213db6084be719f27491478247e5354ea93e92ba',
+              'capture_policy_sha256': '888810ae61a0ab3e067c68850faeba5f2709a57bb69ef0c2ad708e128b311edc',
+              'credentials_used': 0,
+              'authenticated_requests': 0,
+              'order_submissions': 0,
+              'live_submission': 'physically_absent',
+              'historical_admission_credit': 0,
+              'prospective_markets': 1,
+          }
+          Path('PROSPECTIVE_RUN_AUDIT.json').write_text(
+              json.dumps(audit, indent=2, sort_keys=True) + '\n'
+          )
+          print(json.dumps(audit, indent=2, sort_keys=True))
+          PY
+
+      - name: Build deterministic prospective evidence archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp collect-output.json "$STATE_DIR/"
+          cp resolve-output.json "$STATE_DIR/"
+          cp final-status.json "$STATE_DIR/"
+          cp PROSPECTIVE_RUN_AUDIT.json "$STATE_DIR/"
+          (cd "$STATE_DIR" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf btc-only-v3-prospective-one-shot-v1.tar.gz "$STATE_DIR"
+          sha256sum btc-only-v3-prospective-one-shot-v1.tar.gz > btc-only-v3-prospective-one-shot-v1.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: btc-only-v3-prospective-one-shot-${{ github.run_id }}
+          path: |
+            ${{ env.STATE_DIR }}/
+            btc-only-v3-prospective-one-shot-v1.tar.gz
+            btc-only-v3-prospective-one-shot-v1.tar.gz.sha256
+          compression-level: 0
+          retention-days: 90
