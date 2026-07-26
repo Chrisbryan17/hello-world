@@ -1,0 +1,43 @@
+{
+  "btc_only_boundary": "BTC is positive in this inspected official transfer but its daily confidence interval crosses zero. Selecting BTC-only now is post-hoc and must be treated as a new prospective version, not inherited validation.",
+  "by_arrival_ask_bucket": [
+    {"arrival_ask_bucket": "(0.849, 0.89]", "fills": 142, "official_pnl_at_five_shares": -201.98393, "win_rate": 0.5915492957746479, "wins": 84},
+    {"arrival_ask_bucket": "(0.89, 0.92]", "fills": 62, "official_pnl_at_five_shares": -78.545885, "win_rate": 0.6612903225806451, "wins": 41},
+    {"arrival_ask_bucket": "(0.92, 0.95]", "fills": 86, "official_pnl_at_five_shares": -71.13024500000002, "win_rate": 0.7790697674418605, "wins": 67},
+    {"arrival_ask_bucket": "(0.95, 0.97]", "fills": 40, "official_pnl_at_five_shares": -43.70622499999999, "win_rate": 0.75, "wins": 30},
+    {"arrival_ask_bucket": "(0.97, 0.99]", "fills": 50, "official_pnl_at_five_shares": -56.321704999999994, "win_rate": 0.76, "wins": 38},
+    {"arrival_ask_bucket": "nan", "fills": 5, "official_pnl_at_five_shares": -21.2352, "win_rate": 0.0, "wins": 0}
+  ],
+  "by_asset": {
+    "btc": {"fills": 179, "first_market_start": "2026-03-25T04:20:00+00:00", "last_market_start": "2026-05-17T20:55:00+00:00", "mean_arrival_ask": 0.9121787709497207, "official_pnl_at_five_shares": -256.29615, "win_rate": 0.6312849162011173, "wins": 113},
+    "eth": {"fills": 206, "first_market_start": "2026-04-05T23:45:00+00:00", "last_market_start": "2026-05-18T09:30:00+00:00", "mean_arrival_ask": 0.9188349514563106, "official_pnl_at_five_shares": -216.62704000000002, "win_rate": 0.7135922330097088, "wins": 147}
+  },
+  "by_selected_side": {
+    "Down": {"fills": 189, "official_pnl_at_five_shares": -208.916355, "win_rate": 0.6984126984126984, "wins": 132},
+    "Up": {"fills": 196, "official_pnl_at_five_shares": -264.006835, "win_rate": 0.6530612244897959, "wins": 128}
+  },
+  "candidate": "late_favorite_btc_eth_v2_diagnostic",
+  "diagnosis": "Non-random label-availability bias: dataset outcomes inferred from final-book state exclude hard edge cases; official resolution restores them and reverses P&L.",
+  "fills": 9268,
+  "inferred_comparable_fills": 8883,
+  "inferred_comparable_pnl_at_five_shares": 428.92574600000006,
+  "inferred_labeled_mean_arrival_ask": 0.9425450861195542,
+  "label_disagreements": 9,
+  "live_submission": "physically_absent",
+  "official_comparable_pnl_at_five_shares": 413.9257460000008,
+  "official_coverage": 1.0,
+  "official_pnl_at_five_shares": -58.99744399999921,
+  "official_win_rate": 0.9438929650410013,
+  "pnl_change_from_nine_disagreements": -14.999999999999261,
+  "previously_unlabeled_fills": 385,
+  "previously_unlabeled_first_market_start": "2026-03-25T04:20:00+00:00",
+  "previously_unlabeled_last_market_start": "2026-05-18T09:30:00+00:00",
+  "previously_unlabeled_mean_arrival_ask": 0.9157402597402597,
+  "previously_unlabeled_official_losses": 125,
+  "previously_unlabeled_official_pnl_at_five_shares": -472.92319,
+  "previously_unlabeled_official_win_rate": 0.6753246753246753,
+  "previously_unlabeled_official_wins": 260,
+  "previously_unlabeled_share_of_all_losses": 0.2403846153846154,
+  "previously_unlabeled_share_of_fills": 0.04154078549848943,
+  "verdict": "Rejected / falsified on official outcomes"
+}

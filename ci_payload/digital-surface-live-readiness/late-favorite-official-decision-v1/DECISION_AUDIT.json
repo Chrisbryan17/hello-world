@@ -1,0 +1,87 @@
+{
+  "additional_cost_stress_at_five_shares": {
+    "0.0000": -58.99744399999921,
+    "0.0025": -174.84744399999923,
+    "0.0050": -290.6974439999992,
+    "0.0100": -522.3974439999993,
+    "0.0150": -754.0974439999992
+  },
+  "break_even_additional_cost_per_share": -0.00127314294346138,
+  "by_asset": {
+    "btc": {
+      "daily_bootstrap_mean_ci95": [-1.7190766216517774, 3.9265995022544726],
+      "daily_t_statistic": 0.7865088750981918,
+      "days": 56,
+      "fills": 4844,
+      "mean_pnl_per_share": 0.0026423640338563096,
+      "pnl_at_five_shares": 63.99805690000045,
+      "positive_day_rate": 0.5357142857142857,
+      "win_rate": 0.9469446738232865,
+      "wins": 4587
+    },
+    "eth": {
+      "daily_bootstrap_mean_ci95": [-5.903782505852264, 0.18052209448864426],
+      "daily_t_statistic": -1.7849776737948304,
+      "days": 44,
+      "fills": 4424,
+      "mean_pnl_per_share": -0.005560375266726951,
+      "pnl_at_five_shares": -122.99550089999961,
+      "positive_day_rate": 0.4318181818181818,
+      "win_rate": 0.9405515370705244,
+      "wins": 4161
+    }
+  },
+  "comparable_to_inferred": 8883,
+  "cross_asset": {
+    "btc_losses_in_simultaneous_windows": 92,
+    "eth_losses_in_simultaneous_windows": 96,
+    "eth_win_given_btc_loss": 0.44565217391304346,
+    "eth_win_given_btc_win": 0.9780166096726918,
+    "loss_correlation": 0.5216654451050746,
+    "simultaneous_official_windows": 2139
+  },
+  "daily": {
+    "best_day_pnl": 32.51204815000002,
+    "bootstrap_mean_ci95": [-5.1750155101785555, 3.0011215983259074],
+    "days": 56,
+    "mean_pnl": -1.05352578571427,
+    "median_pnl": -1.997734124999985,
+    "positive_day_rate": 0.48214285714285715,
+    "positive_days": 27,
+    "sign_flip_p_value_mc": 0.6905366189267621,
+    "t_statistic": -0.5012307613775938,
+    "top_two_day_concentration": null,
+    "worst_day_pnl": -36.45123499999998
+  },
+  "fills": 9268,
+  "inferred_comparable_pnl_at_five_shares": 428.92574600000006,
+  "official_classification_counts": {"terminal_confirmed_both": 5615, "terminal_gamma_only": 3653},
+  "official_comparable_pnl_at_five_shares": 413.9257460000008,
+  "official_coverage": 1.0,
+  "official_mean_pnl_per_share": -0.00127314294346138,
+  "official_pnl_at_five_shares": -58.99744399999921,
+  "official_usable": 9268,
+  "official_vs_inferred_agreement": 0.9989868287740629,
+  "official_vs_inferred_disagreements": 9,
+  "official_win_rate": 0.9438929650410013,
+  "official_wins": 8748,
+  "total_pnl_all_unavailable_losses": -58.99744399999921,
+  "total_pnl_all_unavailable_wins": -58.99744399999921,
+  "unavailable_fills": 0,
+  "weekly": {
+    "blocks": 9,
+    "pnl_by_week": [
+      {"fills": 374, "pnl": 12.639917150000034, "week": "2026-03-23/2026-03-29", "wins": 354},
+      {"fills": 624, "pnl": -7.385373599999932, "week": "2026-03-30/2026-04-05", "wins": 588},
+      {"fills": 1279, "pnl": 30.049487200000122, "week": "2026-04-06/2026-04-12", "wins": 1216},
+      {"fills": 1351, "pnl": -72.57941159999986, "week": "2026-04-13/2026-04-19", "wins": 1262},
+      {"fills": 1320, "pnl": -42.79659704999987, "week": "2026-04-20/2026-04-26", "wins": 1234},
+      {"fills": 1328, "pnl": 39.82094355000012, "week": "2026-04-27/2026-05-03", "wins": 1264},
+      {"fills": 1486, "pnl": -56.12428954999987, "week": "2026-05-04/2026-05-10", "wins": 1399},
+      {"fills": 1422, "pnl": 25.568809900000133, "week": "2026-05-11/2026-05-17", "wins": 1349},
+      {"fills": 84, "pnl": 11.809070000000007, "week": "2026-05-18/2026-05-24", "wins": 82}
+    ],
+    "positive_block_rate": 0.5555555555555556,
+    "positive_blocks": 5
+  }
+}
