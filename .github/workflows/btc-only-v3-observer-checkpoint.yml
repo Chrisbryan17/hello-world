@@ -2,12 +2,7 @@ name: BTC-Only v3 Observer Checkpoint
 
 on:
   push:
-    branches: [digital-surface-live-readiness-20260725]
-    paths:
-      - .github/workflows/btc-only-v3-observer-checkpoint.yml
-      - ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/**
-  pull_request:
-    branches: [digital-surface-ci-20260724]
+    branches: [btc-only-v3-prospective-20260726]
     paths:
       - .github/workflows/btc-only-v3-observer-checkpoint.yml
       - ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/**
