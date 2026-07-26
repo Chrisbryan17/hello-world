@@ -43,9 +43,10 @@ jobs:
           root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
           python -m py_compile \
             "$root/runner/observer_cli.py" \
-            "$root/runner/tests/test_observer_cli.py"
+            "$root/runner/tests/test_observer_cli.py" \
+            "$root/runner/tests/test_observer_block.py"
 
-      - name: Pass exactly 5 runner contracts
+      - name: Pass exactly 11 runner contracts
         shell: bash
         env:
           PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/runner
@@ -53,7 +54,7 @@ jobs:
           set -euo pipefail
           root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
           pytest --collect-only -q "$root/runner/tests" | tee /tmp/collect.txt
-          grep -Eq '^5 tests collected' /tmp/collect.txt
+          grep -Eq '^11 tests collected' /tmp/collect.txt
           pytest -q "$root/runner/tests"
 
       - name: Verify runtime loads frozen policies without network
@@ -68,7 +69,12 @@ jobs:
           import tempfile
           from pathlib import Path
 
-          from observer_cli import build_runtime, compute_combined_source_sha256, runtime_status
+          from observer_cli import (
+              MAX_BLOCK_MARKETS,
+              build_runtime,
+              compute_combined_source_sha256,
+              runtime_status,
+          )
 
           root = Path('ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3')
           relative_paths = (
@@ -86,6 +92,7 @@ jobs:
               independent.update(relative.encode('utf-8') + b'\0' + raw)
           source_sha256 = compute_combined_source_sha256(root)
           assert source_sha256 == independent.hexdigest()
+          assert MAX_BLOCK_MARKETS == 12
           with tempfile.TemporaryDirectory() as directory:
               runtime = build_runtime(root, directory, clock_ms=lambda: 1_900_000_000_000)
               status = runtime_status(runtime)
@@ -96,8 +103,10 @@ jobs:
               assert status['raw_evidence_head_sha256'] == '0' * 64
           verification = {
               'candidate': 'late_favorite_btc_only_v3_prospective_shadow',
-              'tests_collected': 5,
-              'runner_commands': ['collect-next', 'resolve', 'status'],
+              'tests_collected': 11,
+              'runner_commands': ['collect-next', 'collect-block', 'resolve', 'status'],
+              'maximum_block_markets': MAX_BLOCK_MARKETS,
+              'block_order': 'capture_all_then_resolve_queue',
               'combined_runtime_source_sha256': source_sha256,
               'source_files_sha256': source_hashes,
               'credentials_used': 0,
@@ -141,6 +150,7 @@ jobs:
           ):
               assert token not in lowered, token
           assert 'collect-next' in text
+          assert 'collect-block' in text
           assert 'resolve' in text
           assert 'status' in text
           assert 'submit-order' not in text
@@ -160,15 +170,15 @@ jobs:
           cp "$root/runner/RUNNER_VERIFICATION.json" btc-only-v3-runner-checkpoint/
           (cd btc-only-v3-runner-checkpoint && sha256sum * > SHA256SUMS)
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
-            -czf btc-only-v3-runner-checkpoint-v1.tar.gz btc-only-v3-runner-checkpoint
-          sha256sum btc-only-v3-runner-checkpoint-v1.tar.gz > btc-only-v3-runner-checkpoint-v1.tar.gz.sha256
+            -czf btc-only-v3-runner-checkpoint-v2.tar.gz btc-only-v3-runner-checkpoint
+          sha256sum btc-only-v3-runner-checkpoint-v2.tar.gz > btc-only-v3-runner-checkpoint-v2.tar.gz.sha256
 
       - uses: actions/upload-artifact@v4
         with:
-          name: btc-only-v3-runner-checkpoint-v1
+          name: btc-only-v3-runner-checkpoint-v2
           path: |
             btc-only-v3-runner-checkpoint/
-            btc-only-v3-runner-checkpoint-v1.tar.gz
-            btc-only-v3-runner-checkpoint-v1.tar.gz.sha256
+            btc-only-v3-runner-checkpoint-v2.tar.gz
+            btc-only-v3-runner-checkpoint-v2.tar.gz.sha256
           compression-level: 0
           retention-days: 30
