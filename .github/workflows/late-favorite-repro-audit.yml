@@ -43,6 +43,10 @@ jobs:
             hf_xet==1.1.5 \
             pytest==8.3.5
 
+      - name: Apply checksum-visible accounting patch
+        working-directory: ci_payload/digital-surface-live-readiness/late-favorite-repro-source
+        run: patch -p1 < unlabeled-accounting.patch
+
       - name: Compile source
         run: |
           python -m py_compile \
@@ -108,7 +112,12 @@ jobs:
           assert audit['markets'] > 0
           assert audit['signals'] > 0
           assert audit['hypothetical_fok_fills'] > 0
+          assert audit['labeled_fills'] + audit['unlabeled_fills'] == audit['hypothetical_fok_fills']
+          assert 0.0 <= audit['inferred_label_win_rate'] <= 1.0
           assert set(audit['by_asset']) == {'btc', 'eth'}
+          for asset in ('btc', 'eth'):
+              row = audit['by_asset'][asset]
+              assert row['labeled_fills'] + row['unlabeled_fills'] == row['hypothetical_fok_fills']
           assert len(audit['all_condition_ids_sha256']) == 64
           assert len(audit['filled_condition_ids_sha256']) == 64
           assert audit['split_reproduction'].startswith('not claimed')
@@ -118,21 +127,21 @@ jobs:
       - name: Build deterministic checkpoint archive
         run: |
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
-            -czf late-favorite-repro-audit-v1.tar.gz late-favorite-repro-results
-          sha256sum late-favorite-repro-audit-v1.tar.gz > late-favorite-repro-audit-v1.tar.gz.sha256
+            -czf late-favorite-repro-audit-v2.tar.gz late-favorite-repro-results
+          sha256sum late-favorite-repro-audit-v2.tar.gz > late-favorite-repro-audit-v2.tar.gz.sha256
           cat late-favorite-repro-results/REPORT.md
           cat late-favorite-repro-results/AUDIT.json
 
       - uses: actions/upload-artifact@v4
         with:
-          name: late-favorite-repro-audit-v1
+          name: late-favorite-repro-audit-v2
           path: |
             late-favorite-repro-results/AUDIT.json
             late-favorite-repro-results/REPORT.md
             late-favorite-repro-results/SHA256SUMS
             late-favorite-repro-results/market_ledger.csv.gz
             late-favorite-repro-results/eligible_trades.csv.gz
-            late-favorite-repro-audit-v1.tar.gz
-            late-favorite-repro-audit-v1.tar.gz.sha256
+            late-favorite-repro-audit-v2.tar.gz
+            late-favorite-repro-audit-v2.tar.gz.sha256
           compression-level: 0
           retention-days: 30
