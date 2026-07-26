@@ -22,13 +22,15 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.ref || github.ref }}
 
-      - name: Reconstruct and verify exact source bundle
+      - name: Reconstruct, verify, and apply tested patch
         run: |
           set -euxo pipefail
           cat robosuite_probe_payload/source.b64.part* | base64 --decode > robosuite-source.zip
           echo "d44576adcafafba05f6a1c702f3c2510fc31e455cf6b5b30cb0daeab0f938f61  robosuite-source.zip" | sha256sum --check -
           unzip -q robosuite-source.zip
           test -f robosuite-expert-demo-generator/scripts/integration_probe.py
+          cp robosuite_probe_payload/patches/robosuite_adapter.py \
+            robosuite-expert-demo-generator/src/expert_demos/robosuite_adapter.py
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
