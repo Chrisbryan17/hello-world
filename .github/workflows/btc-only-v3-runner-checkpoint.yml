@@ -1,0 +1,174 @@
+name: BTC-Only v3 Runner Checkpoint
+
+on:
+  push:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/btc-only-v3-runner-checkpoint.yml
+      - ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/runner/**
+  pull_request:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/btc-only-v3-runner-checkpoint.yml
+      - ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/runner/**
+  workflow_dispatch:
+
+concurrency:
+  group: btc-only-v3-runner-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  runner-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned test stack
+        run: python -m pip install requests==2.32.4 pytest==8.3.5
+
+      - name: Compile runner source and tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
+          python -m py_compile \
+            "$root/runner/observer_cli.py" \
+            "$root/runner/tests/test_observer_cli.py"
+
+      - name: Pass exactly 5 runner contracts
+        shell: bash
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/runner
+        run: |
+          set -euo pipefail
+          root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
+          pytest --collect-only -q "$root/runner/tests" | tee /tmp/collect.txt
+          grep -Eq '^5 tests collected' /tmp/collect.txt
+          pytest -q "$root/runner/tests"
+
+      - name: Verify runtime loads frozen policies without network
+        shell: bash
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/runner
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import tempfile
+          from pathlib import Path
+
+          from observer_cli import build_runtime, compute_combined_source_sha256, runtime_status
+
+          root = Path('ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3')
+          relative_paths = (
+              'source/late_favorite_v3.py',
+              'source/capture_policy.py',
+              'collector/public_collector.py',
+              'collector/resolution.py',
+              'runner/observer_cli.py',
+          )
+          independent = hashlib.sha256()
+          source_hashes = {}
+          for relative in relative_paths:
+              raw = (root / relative).read_bytes()
+              source_hashes[relative] = hashlib.sha256(raw).hexdigest()
+              independent.update(relative.encode('utf-8') + b'\0' + raw)
+          source_sha256 = compute_combined_source_sha256(root)
+          assert source_sha256 == independent.hexdigest()
+          with tempfile.TemporaryDirectory() as directory:
+              runtime = build_runtime(root, directory, clock_ms=lambda: 1_900_000_000_000)
+              status = runtime_status(runtime)
+              assert status['conditions_seen'] == 0
+              assert status['conditions_resolved'] == 0
+              assert status['source_sha256'] == source_sha256
+              assert status['lifecycle_head_sha256'] == '0' * 64
+              assert status['raw_evidence_head_sha256'] == '0' * 64
+          verification = {
+              'candidate': 'late_favorite_btc_only_v3_prospective_shadow',
+              'tests_collected': 5,
+              'runner_commands': ['collect-next', 'resolve', 'status'],
+              'combined_runtime_source_sha256': source_sha256,
+              'source_files_sha256': source_hashes,
+              'credentials_used': 0,
+              'authenticated_requests': 0,
+              'order_submissions': 0,
+              'live_submission': 'physically_absent',
+              'historical_admission_credit': 0,
+          }
+          out = root / 'runner/RUNNER_VERIFICATION.json'
+          out.write_text(json.dumps(verification, indent=2, sort_keys=True) + '\n')
+          print(json.dumps(verification, indent=2, sort_keys=True))
+          PY
+
+      - name: Verify runner has no privileged capability
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          path = Path('ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/runner/observer_cli.py')
+          text = path.read_text()
+          tree = ast.parse(text)
+          imports = set()
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Import):
+                  imports.update(alias.name.split('.')[0] for alias in node.names)
+              elif isinstance(node, ast.ImportFrom) and node.module:
+                  imports.add(node.module.split('.')[0])
+          forbidden_modules = {
+              'requests', 'urllib', 'httpx', 'aiohttp', 'web3',
+              'py_clob_client', 'eth_account', 'websocket', 'websockets',
+          }
+          assert not (imports & forbidden_modules), imports & forbidden_modules
+          lowered = text.lower()
+          for token in (
+              'create_order', 'post_order', 'submit_order', 'private_key',
+              'api_secret', 'sign_transaction', 'poly_api_key', 'poly_signature',
+              'poly_passphrase', 'poly_address',
+          ):
+              assert token not in lowered, token
+          assert 'collect-next' in text
+          assert 'resolve' in text
+          assert 'status' in text
+          assert 'submit-order' not in text
+          PY
+
+      - name: Build deterministic runner checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
+          mkdir -p btc-only-v3-runner-checkpoint
+          cp "$root/CANDIDATE_SPEC.json" btc-only-v3-runner-checkpoint/
+          cp "$root/FREEZE_MANIFEST.json" btc-only-v3-runner-checkpoint/
+          cp "$root/CAPTURE_POLICY.json" btc-only-v3-runner-checkpoint/
+          cp "$root/CAPTURE_FREEZE_MANIFEST.json" btc-only-v3-runner-checkpoint/
+          cp "$root/runner/observer_cli.py" btc-only-v3-runner-checkpoint/
+          cp "$root/runner/RUNNER_VERIFICATION.json" btc-only-v3-runner-checkpoint/
+          (cd btc-only-v3-runner-checkpoint && sha256sum * > SHA256SUMS)
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf btc-only-v3-runner-checkpoint-v1.tar.gz btc-only-v3-runner-checkpoint
+          sha256sum btc-only-v3-runner-checkpoint-v1.tar.gz > btc-only-v3-runner-checkpoint-v1.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: btc-only-v3-runner-checkpoint-v1
+          path: |
+            btc-only-v3-runner-checkpoint/
+            btc-only-v3-runner-checkpoint-v1.tar.gz
+            btc-only-v3-runner-checkpoint-v1.tar.gz.sha256
+          compression-level: 0
+          retention-days: 30
