@@ -60,26 +60,29 @@ jobs:
           set -euxo pipefail
           python -m compileall -q src scripts
 
-      - name: Generate, validate, physically replay, and diagnose
+      - name: One-demo deterministic acceptance probe
         shell: bash
         run: |
-          set -uo pipefail
+          set -euxo pipefail
           mkdir -p robosuite-expert-demo-generator/artifacts/real-physics
           export PYTHONPATH="$PWD/robosuite-expert-demo-generator/src"
           export PYTHONUNBUFFERED=1
-          set +e
           python robosuite-expert-demo-generator/scripts/integration_probe.py \
             --output robosuite-expert-demo-generator/artifacts/real-physics/probe-demo.hdf5 \
             2>&1 | tee robosuite-expert-demo-generator/artifacts/real-physics/probe.log
-          status=${PIPESTATUS[0]}
-          if test -f robosuite-expert-demo-generator/artifacts/real-physics/probe-demo.hdf5; then
-            python robosuite_probe_payload/replay_diagnostics.py \
-              2>&1 | tee robosuite-expert-demo-generator/artifacts/real-physics/replay-diagnostics.log
-          fi
-          set -e
-          printf '%s\n' "$status" > robosuite-expert-demo-generator/artifacts/real-physics/exit-code.txt
+          python robosuite_probe_payload/replay_diagnostics.py \
+            2>&1 | tee robosuite-expert-demo-generator/artifacts/real-physics/replay-diagnostics.log
+
+      - name: Twenty-five-demo multi-seed physics gate
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export PYTHONPATH="$PWD/robosuite-expert-demo-generator/src"
+          export PYTHONUNBUFFERED=1
+          python robosuite_probe_payload/scale_probe.py \
+            2>&1 | tee robosuite-expert-demo-generator/artifacts/real-physics/scale-probe.log
+          printf '0\n' > robosuite-expert-demo-generator/artifacts/real-physics/exit-code.txt
           python -m pip freeze > robosuite-expert-demo-generator/artifacts/real-physics/pip-freeze.txt
-          exit "$status"
 
       - name: Upload all probe evidence
         if: always()
