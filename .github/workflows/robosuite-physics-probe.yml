@@ -1,0 +1,86 @@
+name: robosuite real-physics probe
+
+on:
+  pull_request:
+    paths:
+      - "robosuite_probe_payload/**"
+      - ".github/workflows/robosuite-physics-probe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  physics-probe:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out probe branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref || github.ref }}
+
+      - name: Reconstruct and verify exact source bundle
+        run: |
+          set -euxo pipefail
+          cat robosuite_probe_payload/source.b64.part* | base64 --decode > robosuite-source.zip
+          echo "d44576adcafafba05f6a1c702f3c2510fc31e455cf6b5b30cb0daeab0f938f61  robosuite-source.zip" | sha256sum --check -
+          unzip -q robosuite-source.zip
+          test -f robosuite-expert-demo-generator/scripts/integration_probe.py
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned real-physics stack
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir \
+            "numpy>=1.24,<3" \
+            "h5py>=3.8,<4" \
+            "mujoco==3.3.7" \
+            "robosuite==1.5.2"
+          python - <<'PY'
+          import mujoco, robosuite
+          print("MuJoCo", mujoco.__version__)
+          print("robosuite", robosuite.__version__)
+          assert mujoco.__version__ == "3.3.7"
+          assert robosuite.__version__ == "1.5.2"
+          PY
+
+      - name: Compile source
+        working-directory: robosuite-expert-demo-generator
+        run: |
+          set -euxo pipefail
+          python -m compileall -q src scripts
+
+      - name: Generate, validate, and physically replay one demonstration
+        working-directory: robosuite-expert-demo-generator
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts/real-physics
+          export PYTHONPATH="$PWD/src"
+          export PYTHONUNBUFFERED=1
+          set +e
+          python scripts/integration_probe.py \
+            --output artifacts/real-physics/probe-demo.hdf5 \
+            2>&1 | tee artifacts/real-physics/probe.log
+          status=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$status" > artifacts/real-physics/exit-code.txt
+          python -m pip freeze > artifacts/real-physics/pip-freeze.txt
+          exit "$status"
+
+      - name: Upload all probe evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: robosuite-real-physics-${{ github.run_id }}
+          path: robosuite-expert-demo-generator/artifacts/real-physics/
+          if-no-files-found: warn
+          retention-days: 14
