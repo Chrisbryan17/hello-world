@@ -1,0 +1,157 @@
+name: UGMC Package PyBullet Local Runtime
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'UGMC_PYBULLET_BUILD_REQUEST*.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  package-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up CPython 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install runtime and local-build dependencies
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install \
+            'pybullet==3.2.7' \
+            'numpy==1.26.4' \
+            'pandas==2.2.3' \
+            'imageio==2.37.0' \
+            'pillow==11.3.0' \
+            'matplotlib==3.10.3' \
+            'pytest==8.4.1' \
+            'gin-config==0.5.0' \
+            'absl-py==2.3.1' \
+            'gym==0.25.2'
+
+      - name: Clone exact Bullet source revision
+        run: |
+          set -euxo pipefail
+          git clone --filter=blob:none https://github.com/bulletphysics/bullet3.git bullet3
+          git -C bullet3 checkout 63c4d67e337017f9d8b298c900e9aabdb69296e7
+          git -C bullet3 rev-parse HEAD | tee BULLET_COMMIT.txt
+          test "$(cat BULLET_COMMIT.txt)" = "63c4d67e337017f9d8b298c900e9aabdb69296e7"
+
+      - name: Run real-URDF smoke test
+        run: |
+          set -euxo pipefail
+          python - <<'PY'
+          import json
+          import pybullet as p
+          import pybullet_data
+          client = p.connect(p.DIRECT)
+          assert client >= 0
+          p.setAdditionalSearchPath(pybullet_data.getDataPath())
+          p.resetSimulation()
+          p.setGravity(0, 0, -9.81)
+          p.setTimeStep(1.0 / 240.0)
+          p.loadURDF('plane.urdf')
+          kuka = p.loadURDF('kuka_iiwa/model.urdf', [-1.5, 0, 0], useFixedBase=True)
+          husky = p.loadURDF('husky/husky.urdf', [0, -1.5, 0.25])
+          laikago = p.loadURDF('laikago/laikago_toes.urdf', [0, 1.5, 0.55], p.getQuaternionFromEuler([0, 0, 0]), flags=p.URDF_USE_SELF_COLLISION)
+          for _ in range(240):
+              p.stepSimulation()
+          view = p.computeViewMatrix([4, -6, 3], [0, 0, 0.6], [0, 0, 1])
+          projection = p.computeProjectionMatrixFOV(55, 640 / 480, 0.02, 30)
+          width, height, rgba, _, _ = p.getCameraImage(640, 480, viewMatrix=view, projectionMatrix=projection, renderer=p.ER_TINY_RENDERER)
+          result = {
+              'kuka_joints': p.getNumJoints(kuka),
+              'husky_joints': p.getNumJoints(husky),
+              'laikago_joints': p.getNumJoints(laikago),
+              'laikago_base_position': list(p.getBasePositionAndOrientation(laikago)[0]),
+              'render': [width, height, len(rgba)],
+          }
+          assert result['kuka_joints'] >= 7
+          assert result['husky_joints'] >= 4
+          assert result['laikago_joints'] >= 12
+          assert result['laikago_base_position'][2] > 0.15
+          assert width == 640 and height == 480
+          with open('PYBULLET_SMOKE_TEST.json', 'w', encoding='utf-8') as f:
+              json.dump(result, f, indent=2)
+          print(json.dumps(result, indent=2))
+          p.disconnect()
+          PY
+
+      - name: Copy and verify portable runtime
+        run: |
+          set -euxo pipefail
+          PY_PREFIX="$(python -c 'import sys; print(sys.prefix)')"
+          mkdir -p portable
+          cp -a "$PY_PREFIX" portable/python
+          portable/python/bin/python3.11 - <<'PY'
+          import pybullet as p
+          import pybullet_data
+          client = p.connect(p.DIRECT)
+          assert client >= 0
+          assert pybullet_data.getDataPath()
+          p.disconnect()
+          print('PORTABLE_RUNTIME_OK')
+          PY
+
+      - name: Create runtime manifest
+        run: |
+          python - <<'PY'
+          import json, platform
+          from pathlib import Path
+          manifest = {
+              'bullet_commit': Path('BULLET_COMMIT.txt').read_text().strip(),
+              'python': platform.python_version(),
+              'platform': platform.platform(),
+              'bootstrap_pybullet': '3.2.7',
+              'smoke_test': json.loads(Path('PYBULLET_SMOKE_TEST.json').read_text()),
+          }
+          Path('manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+          PY
+
+      - name: Package runtime and source
+        run: |
+          set -euxo pipefail
+          cp manifest.json portable/manifest.json
+          cp BULLET_COMMIT.txt portable/BULLET_COMMIT.txt
+          cp PYBULLET_SMOKE_TEST.json portable/PYBULLET_SMOKE_TEST.json
+          tar -C portable -czf pybullet-portable-python311-linux-x86_64.tar.gz .
+          git -C bullet3 archive --format=tar.gz --output=../bullet3-source-63c4d67e337017f9d8b298c900e9aabdb69296e7.tar.gz HEAD
+          sha256sum pybullet-portable-python311-linux-x86_64.tar.gz > RUNTIME_SHA256.txt
+          sha256sum bullet3-source-63c4d67e337017f9d8b298c900e9aabdb69296e7.tar.gz > SOURCE_SHA256.txt
+          ls -lh pybullet-portable-python311-linux-x86_64.tar.gz bullet3-source-*.tar.gz
+
+      - name: Upload portable runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: ugmc-pybullet-portable-runtime
+          path: |
+            pybullet-portable-python311-linux-x86_64.tar.gz
+            RUNTIME_SHA256.txt
+            manifest.json
+            BULLET_COMMIT.txt
+            PYBULLET_SMOKE_TEST.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload pinned Bullet source
+        uses: actions/upload-artifact@v4
+        with:
+          name: ugmc-bullet3-pinned-source
+          path: |
+            bullet3-source-63c4d67e337017f9d8b298c900e9aabdb69296e7.tar.gz
+            SOURCE_SHA256.txt
+            BULLET_COMMIT.txt
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
