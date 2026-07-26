@@ -34,9 +34,9 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install pinned test stack
-        run: python -m pip install pytest==8.3.5
+        run: python -m pip install requests==2.32.4 pytest==8.3.5
 
-      - name: Compile observer and capture sources
+      - name: Compile observer, capture, and public collector sources
         shell: bash
         run: |
           set -euo pipefail
@@ -44,27 +44,28 @@ jobs:
           python -m py_compile \
             "$root/source/late_favorite_v3.py" \
             "$root/source/capture_policy.py" \
+            "$root/collector/public_collector.py" \
             "$root/tests/test_late_favorite_v3.py" \
-            "$root/tests/test_capture_policy.py"
+            "$root/tests/test_capture_policy.py" \
+            "$root/tests/test_public_collector.py"
 
-      - name: Pass exactly 14 behavior contracts
+      - name: Pass exactly 19 behavior contracts
         shell: bash
         env:
-          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector
         run: |
           set -euo pipefail
           root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
           pytest --collect-only -q "$root/tests" | tee /tmp/collect.txt
-          grep -Eq '^14 tests collected' /tmp/collect.txt
+          grep -Eq '^19 tests collected' /tmp/collect.txt
           pytest -q "$root/tests"
 
       - name: Verify frozen policies and contamination cutoffs
         shell: bash
         env:
-          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector
         run: |
           set -euo pipefail
-          root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
           python - <<'PY'
           import hashlib
           import json
@@ -74,7 +75,11 @@ jobs:
           from late_favorite_v3 import load_frozen_policy
 
           root = Path('ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3')
-          source_paths = [root / 'source/late_favorite_v3.py', root / 'source/capture_policy.py']
+          source_paths = [
+              root / 'source/late_favorite_v3.py',
+              root / 'source/capture_policy.py',
+              root / 'collector/public_collector.py',
+          ]
           combined = hashlib.sha256()
           source_hashes = {}
           for path in source_paths:
@@ -104,13 +109,17 @@ jobs:
 
           verification = {
               'candidate': 'late_favorite_btc_only_v3_prospective_shadow',
-              'tests_collected': 14,
+              'tests_collected': 19,
               'candidate_policy_sha256': trading.policy_sha256,
               'capture_policy_sha256': capture.capture_policy_sha256,
               'candidate_cutoff_epoch_seconds': trading.valid_market_open_after_epoch_seconds,
               'capture_cutoff_epoch_seconds': capture.valid_market_open_after_epoch_seconds,
               'combined_source_sha256': combined_source_sha256,
               'source_files_sha256': source_hashes,
+              'public_endpoints': [
+                  'GET https://gamma-api.polymarket.com/markets/slug/{slug}',
+                  'POST https://clob.polymarket.com/books',
+              ],
               'credentials_used': 0,
               'authenticated_requests': 0,
               'order_submissions': 0,
@@ -123,7 +132,7 @@ jobs:
           print(json.dumps(verification, indent=2, sort_keys=True))
           PY
 
-      - name: Verify privileged capabilities remain absent
+      - name: Verify capability boundaries
         shell: bash
         run: |
           set -euo pipefail
@@ -131,16 +140,18 @@ jobs:
           import ast
           from pathlib import Path
 
-          root = Path('ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source')
-          forbidden_modules = {
+          root = Path('ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3')
+          core_forbidden = {
               'requests', 'urllib', 'httpx', 'aiohttp', 'web3',
               'py_clob_client', 'eth_account', 'websocket', 'websockets',
           }
+          privileged = {'web3', 'py_clob_client', 'eth_account', 'websocket', 'websockets'}
           forbidden_tokens = {
               'create_order', 'post_order', 'submit_order', 'private_key',
-              'api_secret', 'authorization', 'sign_transaction',
+              'api_secret', 'sign_transaction', 'poly_api_key', 'poly_signature',
+              'poly_passphrase', 'poly_address',
           }
-          for path in sorted(root.glob('*.py')):
+          for path in sorted((root / 'source').glob('*.py')):
               text = path.read_text()
               tree = ast.parse(text)
               imports = set()
@@ -149,10 +160,29 @@ jobs:
                       imports.update(alias.name.split('.')[0] for alias in node.names)
                   elif isinstance(node, ast.ImportFrom) and node.module:
                       imports.add(node.module.split('.')[0])
-              assert not (imports & forbidden_modules), (path, imports & forbidden_modules)
+              assert not (imports & core_forbidden), (path, imports & core_forbidden)
               lowered = text.lower()
               for token in forbidden_tokens:
                   assert token not in lowered, (path, token)
+
+          collector = root / 'collector/public_collector.py'
+          text = collector.read_text()
+          tree = ast.parse(text)
+          imports = set()
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Import):
+                  imports.update(alias.name.split('.')[0] for alias in node.names)
+              elif isinstance(node, ast.ImportFrom) and node.module:
+                  imports.add(node.module.split('.')[0])
+          assert imports & {'requests'}
+          assert not (imports & privileged), imports & privileged
+          lowered = text.lower()
+          for token in forbidden_tokens:
+              assert token not in lowered, token
+          assert 'https://gamma-api.polymarket.com' in text
+          assert 'https://clob.polymarket.com' in text
+          assert 'parsed.path == "/books"' in text
+          assert 'parsed.path.startswith("/markets/slug/")' in text
           PY
 
       - name: Build deterministic observer checkpoint
@@ -168,6 +198,7 @@ jobs:
           cp "$root/OBSERVER_VERIFICATION.json" btc-only-v3-observer-checkpoint/
           cp "$root/source/late_favorite_v3.py" btc-only-v3-observer-checkpoint/
           cp "$root/source/capture_policy.py" btc-only-v3-observer-checkpoint/
+          cp "$root/collector/public_collector.py" btc-only-v3-observer-checkpoint/
           (cd btc-only-v3-observer-checkpoint && sha256sum * > SHA256SUMS)
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
             -czf btc-only-v3-observer-checkpoint-v1.tar.gz btc-only-v3-observer-checkpoint
