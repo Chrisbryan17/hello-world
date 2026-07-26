@@ -1,0 +1,150 @@
+name: BTC-Only v3 Prospective Six-Market Block
+
+on:
+  push:
+    branches: [btc-only-v3-block-run-v2-20260726]
+    paths:
+      - .github/workflows/btc-only-v3-prospective-block-six.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: btc-only-v3-prospective-block-six-20260726
+  cancel-in-progress: true
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+  RUN_LABEL: second-six-market-prospective-block
+
+jobs:
+  collect-six-market-block:
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pinned public client
+        run: python -m pip install requests==2.32.4
+
+      - name: Collect six consecutive windows then resolve queue
+        id: block
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/runner
+        shell: bash
+        run: |
+          set +e
+          root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
+          mkdir -p prospective-block-data
+          python "$root/runner/observer_cli.py" \
+            --project-root "$root" \
+            --state-dir prospective-block-data \
+            collect-block \
+            --markets 6 \
+            --max-resolution-attempts 180 \
+            --retry-delay-ms 10000 | tee block-output.json
+          exit_code=${PIPESTATUS[0]}
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+          block_summary="$(find prospective-block-data/summaries -maxdepth 1 -type f -name 'block-*.json' -print -quit)"
+          test -n "$block_summary"
+          echo "block_summary=$block_summary" >> "$GITHUB_OUTPUT"
+          cat "$block_summary"
+          exit 0
+
+      - name: Verify block evidence and write checkpoint
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/runner
+          BLOCK_SUMMARY: ${{ steps.block.outputs.block_summary }}
+          BLOCK_EXIT_CODE: ${{ steps.block.outputs.exit_code }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from observer_cli import build_runtime, runtime_status
+
+          root = Path('ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3')
+          state = Path('prospective-block-data')
+          summary_path = Path(os.environ['BLOCK_SUMMARY'])
+          block = json.loads(summary_path.read_text())
+          runtime = build_runtime(root, state, clock_ms=lambda: 2_000_000_000_000)
+          status = runtime_status(runtime)
+
+          openings = block['market_open_epoch_seconds']
+          assert len(openings) == 6
+          assert openings == [openings[0] + 300 * index for index in range(6)]
+          assert block['markets_requested'] == 6
+          assert block['markets_collected'] == 6
+          assert len(block['condition_ids']) == 6
+          assert block['credentials_used'] == 0
+          assert block['authenticated_requests'] == 0
+          assert block['order_submissions'] == 0
+          assert block['live_submission'] == 'physically_absent'
+          assert block['policy_changes'] == 0
+          assert status['conditions_seen'] == 6
+          assert status['lifecycle_records'] == block['lifecycle_records']
+          assert status['raw_evidence_records'] == block['raw_evidence_records']
+          assert status['lifecycle_head_sha256'] == block['lifecycle_head_sha256']
+          assert status['raw_evidence_head_sha256'] == block['raw_evidence_head_sha256']
+
+          checkpoint = {
+              'candidate': 'late_favorite_btc_only_v3_prospective_shadow',
+              'run_label': os.environ.get('RUN_LABEL'),
+              'github_sha': os.environ.get('GITHUB_SHA'),
+              'block_exit_code': int(os.environ['BLOCK_EXIT_CODE']),
+              'block': block,
+              'runtime_status': status,
+              'credentials_used': 0,
+              'authenticated_requests': 0,
+              'order_submissions': 0,
+              'historical_admission_credit': 0,
+              'live_submission': 'physically_absent',
+          }
+          (state / 'PROSPECTIVE_BLOCK.json').write_text(
+              json.dumps(checkpoint, indent=2, sort_keys=True) + '\n'
+          )
+          print(json.dumps(checkpoint, indent=2, sort_keys=True))
+          PY
+
+      - name: Build deterministic block evidence archive
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d prospective-block-data
+          find prospective-block-data -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > prospective-block-data/SHA256SUMS
+          sha256sum -c prospective-block-data/SHA256SUMS
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf btc-only-v3-prospective-block-v2.tar.gz prospective-block-data
+          sha256sum btc-only-v3-prospective-block-v2.tar.gz > btc-only-v3-prospective-block-v2.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: btc-only-v3-prospective-block-v2
+          path: |
+            prospective-block-data/
+            btc-only-v3-prospective-block-v2.tar.gz
+            btc-only-v3-prospective-block-v2.tar.gz.sha256
+          compression-level: 0
+          retention-days: 30
+
+      - name: Require a fully resolved block for admission evidence
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = next(Path('prospective-block-data/summaries').glob('block-*.json'))
+          block = json.loads(path.read_text())
+          assert block['status'] == 'complete', block['status']
+          assert block['conditions_resolved'] == 6
+          assert block['unresolved_condition_ids'] == []
+          PY
