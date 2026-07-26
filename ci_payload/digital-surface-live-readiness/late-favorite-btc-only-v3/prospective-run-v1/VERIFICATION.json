@@ -1,0 +1,54 @@
+{
+  "artifact": {
+    "artifact_id": 8637040765,
+    "artifact_name": "btc-only-v3-prospective-run-v1",
+    "artifact_zip_sha256": "8d00c88d6046806a2abc07f43da8b2f0ab08449890ee8a7f9e1f7071b92c4e21",
+    "deterministic_tar_round_trip": "passed",
+    "internal_sha256sums": "passed",
+    "tar_sidecar": "passed"
+  },
+  "candidate_policy_sha256": "82b923b0d4034d801156b77a213db6084be719f27491478247e5354ea93e92ba",
+  "capture_policy_sha256": "888810ae61a0ab3e067c68850faeba5f2709a57bb69ef0c2ad708e128b311edc",
+  "integrity": {
+    "lifecycle_chain": "passed",
+    "lifecycle_event_types": [
+      "discovered",
+      "signal",
+      "arrival",
+      "resolution"
+    ],
+    "lifecycle_head_sha256": "a2c123f6ba2413d7dddee24ef20d75b096503e0d31a7b1051d8118cfd9911a1d",
+    "lifecycle_records": 4,
+    "raw_body_hashes": "passed",
+    "raw_evidence_chain": "passed",
+    "raw_evidence_head_sha256": "baa3454eab1f1d8417a0b494a34a0a5ab87a7b7a1ab0e96e058400fafab8d6e0",
+    "raw_evidence_records": 24
+  },
+  "resolution_poll_audit": {
+    "cache_bust_first": 3,
+    "cache_bust_last": 23,
+    "cache_bust_sequence_complete": true,
+    "nonterminal_polls": 20,
+    "resolution_polls": 21,
+    "terminal_closed": true,
+    "terminal_outcome_prices": [
+      "1",
+      "0"
+    ],
+    "terminal_payload_sha256": "aa55f228e06bcdbcfb71679b5d417e7571bd8e97bd35ef78fbaa3498e984df14",
+    "terminal_updated_at": "2026-07-26T21:06:32.32566Z"
+  },
+  "run": {
+    "github_actions_run_id": 30220121542,
+    "github_head_sha": "257e3b5f1bfa4118a4375fbbfc4693152a296c55",
+    "runtime_source_sha256": "ce477bf97589997899c91ad22af9025de521520f8ee7aa46a21b50a313958bd7"
+  },
+  "safety": {
+    "authenticated_requests": 0,
+    "credentials_used": 0,
+    "historical_admission_credit": 0,
+    "live_submission": "physically_absent",
+    "order_submissions": 0
+  },
+  "status": "valid_prospective_observation_not_admission"
+}
