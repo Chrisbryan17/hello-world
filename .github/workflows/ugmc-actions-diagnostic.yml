@@ -1,0 +1,27 @@
+name: UGMC Actions Diagnostic
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prove runner execution
+        run: |
+          set -euxo pipefail
+          uname -a
+          python3 --version
+          echo 'UGMC_ACTIONS_RUNNER_OK' | tee ugmc-actions-diagnostic.txt
+      - name: Upload diagnostic artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ugmc-actions-diagnostic
+          path: ugmc-actions-diagnostic.txt
+          if-no-files-found: error
+          retention-days: 1
