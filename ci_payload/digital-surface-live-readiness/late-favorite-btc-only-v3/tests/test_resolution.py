@@ -7,13 +7,8 @@ import pytest
 
 from capture_policy import CaptureBoundLifecycleLedger, CapturePolicy
 from late_favorite_v3 import FrozenPolicy
-from public_collector import (
-    PublicHttpClient,
-    RawEvidenceStore,
-    SingleMarketCollector,
-    SingleMarketResolver,
-    parse_terminal_outcome,
-)
+from public_collector import PublicHttpClient, RawEvidenceStore, SingleMarketCollector
+from resolution import SingleMarketResolver, parse_terminal_outcome
 
 
 class FakeResponse:
