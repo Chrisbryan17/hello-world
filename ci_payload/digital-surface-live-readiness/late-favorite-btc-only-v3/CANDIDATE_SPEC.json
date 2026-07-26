@@ -1,0 +1,78 @@
+{
+  "arrival": {
+    "cancel_if": "arrival best ask < signal ask - 0.01",
+    "fok_limit": "signal_ask",
+    "latency_seconds": 1,
+    "no_fill_if": [
+      "arrival best ask > signal ask",
+      "cumulative displayed ask size at prices <= signal ask is less than 5",
+      "arrival book missing, stale, invalid, or token-mismatched"
+    ],
+    "shares": "5"
+  },
+  "contamination_rule": "Only markets whose open time is strictly after the policy freeze commit may count. All previously inspected markets and any observation made before the freeze commit are diagnostic only.",
+  "economics": {
+    "additional_slippage_assumption": "0; FOK limit caps price, but prospective reporting must separately measure public-book crossability and hypothetical fill rate",
+    "fee_per_share": "0.07*p*(1-p)",
+    "hold": "settlement",
+    "pnl_per_share": "official_win - executable_arrival_price - fee_per_share"
+  },
+  "name": "late_favorite_btc_only_v3_prospective_shadow",
+  "observation_contract": {
+    "append_only_sha256_chain": true,
+    "arrival_evidence": [
+      "request start/end timestamps",
+      "server/book timestamp",
+      "full selected-token book",
+      "raw payload SHA-256",
+      "cumulative size through FOK limit"
+    ],
+    "credentials_used": 0,
+    "live_submission": "physically_absent",
+    "record_every_market": true,
+    "record_no_signal_and_no_fill": true,
+    "resolution": "authoritative Polymarket terminal outcome with raw response hash",
+    "signal_evidence": [
+      "request start/end timestamps",
+      "server/book timestamp",
+      "full Up and Down books",
+      "raw payload SHA-256"
+    ],
+    "unresolved_states_allowed": 0
+  },
+  "origin": {
+    "historical_admission_credit": 0,
+    "official_decision_commit": "cedd659e0b573d8479932c428cd2eaf472c6bf8f",
+    "official_transfer_filled_condition_set_sha256": "bf276fbce187d9651d56ecae976520d4251140c1d5b0d440696c5d077838a67a",
+    "selection": "post-hoc BTC subset from rejected late_favorite_btc_eth_v2_diagnostic official transfer"
+  },
+  "prospective_admission_gates": {
+    "maximum_top_two_day_pnl_concentration": 0.4,
+    "maximum_unresolved_order_or_outcome_states": 0,
+    "minimum_hypothetical_fok_fills": 100,
+    "minimum_observed_markets": 500,
+    "minimum_untouched_weekly_blocks": 4,
+    "official_outcome_coverage": 1.0,
+    "policy_changes_during_run": 0,
+    "positive_btc_performance": true,
+    "positive_day_block_bootstrap_lower_bound": true,
+    "positive_total_pnl_after_fees": true
+  },
+  "release_boundary": "An admissible shadow report cannot enable live trading. Any order submitter requires a separate reviewed release and explicit operator action.",
+  "signal": {
+    "entry_second": 210,
+    "favorite_selection": "higher executable ask between Up and Down; tied or invalid books fail closed",
+    "required_full_book": true,
+    "signal_ask_min": "0.85"
+  },
+  "status": "prospective_shadow_only",
+  "universe": {
+    "assets": [
+      "btc"
+    ],
+    "market_duration_seconds": 300,
+    "maximum_positions_per_asset_per_window": 1,
+    "maximum_total_positions_per_window": 1
+  },
+  "version": 3
+}
