@@ -35,19 +35,117 @@ jobs:
           python-version: '3.11'
       - name: Install pinned test stack
         run: python -m pip install pytest==8.3.5
+
       - name: Require and compile reporting source
         shell: bash
         run: |
+          set -euo pipefail
           root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
           test -f "$root/reporting/prospective_aggregate.py"
           python -m py_compile \
             "$root/reporting/prospective_aggregate.py" \
             "$root/reporting/tests/test_prospective_aggregate.py"
+
       - name: Pass exactly five reporting contracts
         env:
           PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/reporting
         run: |
+          set -euo pipefail
           root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
           pytest --collect-only -q "$root/reporting/tests" | tee /tmp/collect.txt
           grep -Eq '^5 tests collected' /tmp/collect.txt
           pytest -q "$root/reporting/tests"
+
+      - name: Recompute committed prospective evidence
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/reporting
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
+          mkdir -p btc-only-v3-reporting-checkpoint
+          python "$root/reporting/prospective_aggregate.py" \
+            --root "$root" \
+            --output btc-only-v3-reporting-checkpoint/AGGREGATE_REPORT.json
+          cp "$root/ADMISSION_LEDGER.json" btc-only-v3-reporting-checkpoint/
+          cp "$root/reporting/prospective_aggregate.py" btc-only-v3-reporting-checkpoint/
+
+      - name: Reconcile aggregate report with admission ledger
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          root = Path('btc-only-v3-reporting-checkpoint')
+          report = json.loads((root / 'AGGREGATE_REPORT.json').read_text())
+          ledger = json.loads((root / 'ADMISSION_LEDGER.json').read_text())
+          current = ledger['current']
+
+          assert report['candidate_policy_sha256'] == ledger['candidate_policy_sha256']
+          assert report['capture_policy_sha256'] == ledger['capture_policy_sha256']
+          assert report['prospective_markets_observed'] == current['prospective_markets_observed'] == 4
+          assert report['official_outcomes_available'] == current['official_outcome_coverage']['numerator'] == 4
+          assert current['official_outcome_coverage']['denominator'] == 4
+          assert report['official_outcome_coverage'] == 1.0
+          assert report['hypothetical_fok_fills'] == current['hypothetical_fok_fills'] == 0
+          assert report['prospective_pnl_total'] in {'0', '0.0', '0.00'}
+          assert current['prospective_pnl_total'] == '0.00'
+          assert report['unresolved_condition_ids'] == []
+          assert current['unresolved_states'] == 0
+          assert report['capture_decision_counts'] == {
+              'no_fill_ask_above_limit': 2,
+              'no_signal_below_threshold': 2,
+          }
+          assert report['official_outcome_counts'] == {'Down': 2, 'Up': 2}
+          assert report['runtime_source_epochs'] == {
+              '81a13d2aeb3df3c2088b8aa99272b10e217a392eabc839a01a8f2b71f570ecbb': 3,
+              'ce477bf97589997899c91ad22af9025de521520f8ee7aa46a21b50a313958bd7': 1,
+          }
+          assert report['safety'] == {
+              'authenticated_requests': 0,
+              'credentials_used': 0,
+              'historical_admission_credit': 0,
+              'order_submissions': 0,
+          }
+          verification = {
+              'tests_collected': 5,
+              'prospective_markets_observed': report['prospective_markets_observed'],
+              'official_outcomes_available': report['official_outcomes_available'],
+              'hypothetical_fok_fills': report['hypothetical_fok_fills'],
+              'prospective_pnl_total': report['prospective_pnl_total'],
+              'runtime_source_epochs': report['runtime_source_epochs'],
+              'report_sha256': hashlib.sha256((root / 'AGGREGATE_REPORT.json').read_bytes()).hexdigest(),
+              'reporter_sha256': hashlib.sha256((root / 'prospective_aggregate.py').read_bytes()).hexdigest(),
+              'credentials_used': 0,
+              'authenticated_requests': 0,
+              'order_submissions': 0,
+              'historical_admission_credit': 0,
+              'live_submission': 'physically_absent',
+          }
+          (root / 'REPORTING_VERIFICATION.json').write_text(
+              json.dumps(verification, indent=2, sort_keys=True) + '\n'
+          )
+          print(json.dumps(verification, indent=2, sort_keys=True))
+          PY
+
+      - name: Build deterministic reporting checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd btc-only-v3-reporting-checkpoint && sha256sum * > SHA256SUMS)
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf btc-only-v3-reporting-checkpoint-v1.tar.gz btc-only-v3-reporting-checkpoint
+          sha256sum btc-only-v3-reporting-checkpoint-v1.tar.gz > btc-only-v3-reporting-checkpoint-v1.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: btc-only-v3-reporting-checkpoint-v1
+          path: |
+            btc-only-v3-reporting-checkpoint/
+            btc-only-v3-reporting-checkpoint-v1.tar.gz
+            btc-only-v3-reporting-checkpoint-v1.tar.gz.sha256
+          compression-level: 0
+          retention-days: 30
