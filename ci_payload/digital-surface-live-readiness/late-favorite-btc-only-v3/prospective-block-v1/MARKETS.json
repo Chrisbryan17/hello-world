@@ -1,0 +1,80 @@
+[
+  {
+    "arrival": null,
+    "condition_id": "0x5452c4c60c9d3ed96739f7a46a58533244f2221ec504c352a808c7e3e90b379b",
+    "decision": "no_signal_below_threshold",
+    "market_open_epoch_seconds": 1785101400,
+    "official_outcome": "Up",
+    "pnl_total": null,
+    "resolution_payload_sha256": "52737e9eb6279c33689c1044cf9074dad2dd98511b6fcc8e48439f5dea81e8ae",
+    "resolution_polls": 1,
+    "selected_side": "Up",
+    "signal": {
+      "book_timestamp_ms": 1785101610256,
+      "request_completed_ts_ms": 1785101610323,
+      "request_duration_ms": 323,
+      "request_started_ts_ms": 1785101610000,
+      "signal_ask": "0.66"
+    },
+    "slug": "btc-updown-5m-1785101400",
+    "terminal_outcome_prices": [
+      "1",
+      "0"
+    ],
+    "terminal_updated_at": "2026-07-26T21:37:05.248916Z"
+  },
+  {
+    "arrival": null,
+    "condition_id": "0x7bd9fe5bfea03a72553b721d0824512a3e9dee6a0fec44992135d5cf08b3e352",
+    "decision": "no_signal_below_threshold",
+    "market_open_epoch_seconds": 1785101700,
+    "official_outcome": "Down",
+    "pnl_total": null,
+    "resolution_payload_sha256": "a6fe3e627f6ac977e727d5fceb9fa47fd1b6ac9d2e1fc98a61aea9eccfa5aa86",
+    "resolution_polls": 5,
+    "selected_side": "Down",
+    "signal": {
+      "book_timestamp_ms": 1785101910083,
+      "request_completed_ts_ms": 1785101910153,
+      "request_duration_ms": 152,
+      "request_started_ts_ms": 1785101910001,
+      "signal_ask": "0.76"
+    },
+    "slug": "btc-updown-5m-1785101700",
+    "terminal_outcome_prices": [
+      "0",
+      "1"
+    ],
+    "terminal_updated_at": "2026-07-26T21:43:14.819851Z"
+  },
+  {
+    "arrival": {
+      "best_ask": "0.98",
+      "book_timestamp_ms": 1785102211206,
+      "request_completed_ts_ms": 1785102211265,
+      "request_duration_ms": 265,
+      "request_started_ts_ms": 1785102211000
+    },
+    "condition_id": "0x1dcecaa2f4ee994fd4ab1b9f309bb18a56f24a5f9c84b82c290a7489d9cfd27d",
+    "decision": "no_fill_ask_above_limit",
+    "market_open_epoch_seconds": 1785102000,
+    "official_outcome": "Down",
+    "pnl_total": null,
+    "resolution_payload_sha256": "8693fbc94d74fbd218e18c3a8d65961efd2e997223509135b3b97395af6e89ca",
+    "resolution_polls": 31,
+    "selected_side": "Up",
+    "signal": {
+      "book_timestamp_ms": 1785102210112,
+      "request_completed_ts_ms": 1785102210170,
+      "request_duration_ms": 170,
+      "request_started_ts_ms": 1785102210000,
+      "signal_ask": "0.95"
+    },
+    "slug": "btc-updown-5m-1785102000",
+    "terminal_outcome_prices": [
+      "0",
+      "1"
+    ],
+    "terminal_updated_at": "2026-07-26T21:46:24.754458Z"
+  }
+]

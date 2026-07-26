@@ -1,0 +1,45 @@
+{
+  "authenticated_requests": 0,
+  "capture_decision_counts": {
+    "no_fill_ask_above_limit": 1,
+    "no_signal_below_threshold": 2
+  },
+  "command": "collect-block",
+  "condition_ids": [
+    "0x5452c4c60c9d3ed96739f7a46a58533244f2221ec504c352a808c7e3e90b379b",
+    "0x7bd9fe5bfea03a72553b721d0824512a3e9dee6a0fec44992135d5cf08b3e352",
+    "0x1dcecaa2f4ee994fd4ab1b9f309bb18a56f24a5f9c84b82c290a7489d9cfd27d"
+  ],
+  "conditions_resolved": 3,
+  "credentials_used": 0,
+  "first_market_open_epoch_seconds": 1785101400,
+  "hypothetical_fok_fills": 0,
+  "last_market_open_epoch_seconds": 1785102000,
+  "last_resolution_errors": {},
+  "lifecycle_head_sha256": "1f6f21cf25c1acd11ea5b06e4bd3dec617d69d84c8b25fb5471be22fc9430c11",
+  "lifecycle_records": 10,
+  "live_submission": "physically_absent",
+  "market_open_epoch_seconds": [
+    1785101400,
+    1785101700,
+    1785102000
+  ],
+  "markets_collected": 3,
+  "markets_requested": 3,
+  "order_submissions": 0,
+  "policy_changes": 0,
+  "prospective_pnl_total": "0",
+  "raw_evidence_head_sha256": "9b43483f4a310d1ad84a3b6f5a029dc772f2181cb06dce08db476aab00dc2cf0",
+  "raw_evidence_records": 44,
+  "resolution_attempts_by_condition": {
+    "0x1dcecaa2f4ee994fd4ab1b9f309bb18a56f24a5f9c84b82c290a7489d9cfd27d": 31,
+    "0x5452c4c60c9d3ed96739f7a46a58533244f2221ec504c352a808c7e3e90b379b": 1,
+    "0x7bd9fe5bfea03a72553b721d0824512a3e9dee6a0fec44992135d5cf08b3e352": 5
+  },
+  "resolution_decision_counts": {
+    "resolved_no_fill": 3
+  },
+  "source_sha256": "81a13d2aeb3df3c2088b8aa99272b10e217a392eabc839a01a8f2b71f570ecbb",
+  "status": "complete",
+  "unresolved_condition_ids": []
+}
