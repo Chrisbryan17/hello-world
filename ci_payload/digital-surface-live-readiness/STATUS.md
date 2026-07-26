@@ -6,8 +6,7 @@
 - Branch: `digital-surface-live-readiness-20260725`
 - Draft PR: #59
 - Official late-favorite decision commit: `cedd659e0b573d8479932c428cd2eaf472c6bf8f`
-- BTC-only v3 observer merge: `e88eada8589119baf755f0ab9f40d37160ff125a`
-- BTC-only v3 runner merge: `9e794700600ba8a9173040711d09b7feb4817ff9`
+- First BTC-only prospective checkpoint merge: `f76097ef513a2e70881e7624cd8d9a60d12a642b`
 - Real-money execution: **physically disabled**
 
 ## Historical research verdicts
@@ -32,7 +31,7 @@ Authoritative decision evidence:
 
 - `ci_payload/digital-surface-live-readiness/late-favorite-official-decision-v1/CHECKPOINT.md`
 - filled condition-set SHA-256: `bf276fbce187d9651d56ecae976520d4251140c1d5b0d440696c5d077838a67a`
-- full official evidence artifact SHA-256: `210984541bcd64597ca48d480ad59102427f56b4ac204ab1308adf8a4f93ce5`
+- full official evidence artifact SHA-256: `210984541bcd64597ca48d480ad59102427f56b4ac204ab1308ad8f8a4f93ce5`
 - compact derivative artifact SHA-256: `fb5dfb4621caa8b62ebaefc0b5c15d04619f773c3686cc4f088767ca023416b9`
 
 ## BTC-only v3 prospective shadow track
@@ -48,7 +47,7 @@ BTC-only is a **marginal post-hoc lead**, not a historical pass. It has zero inh
 - effective capture cutoff: `2026-07-26T19:35:21Z`
 - only markets opening strictly after the effective capture cutoff may count.
 
-### Observer, collector, and resolver
+### Observer, collector, resolver, and CLI
 
 The merged observer implements:
 
@@ -58,35 +57,41 @@ The merged observer implements:
 4. adverse-move, price-limit, depth, stale, timeout, token, and lifecycle fail-closed decisions;
 5. append-only candidate/capture/source-bound lifecycle records;
 6. content-addressed raw public evidence and a separate manifest hash chain;
-7. public Gamma market-by-slug discovery and terminal resolution;
+7. public Gamma discovery and cache-busted terminal resolution;
 8. public CLOB `POST /books` signal and arrival snapshots;
-9. official fill P&L and terminal no-fill closure.
+9. official fill P&L and terminal no-fill closure;
+10. one-shot `capture` and `resolve` command boundaries.
 
-Observer verification:
+Current observer verification:
 
-- 22/22 behavior contracts passed;
-- workflow run: `30217953678`;
-- artifact ID: `8636344655`;
-- artifact ZIP SHA-256: `667d7090ecfe3d174e5821af29a26fde2e18a87a50f7891cdcc49dff740f26af`;
-- combined source SHA-256: `f2e086bb5e74f0343a4ea29f46ea2bf8e23062952b456303e204c6b5469b6126`.
+- 25/25 behavior contracts passed;
+- workflow run: `30220717065`;
+- artifact ID: `8637116192`;
+- artifact ZIP SHA-256: `172ef7213e7860a8bee00db5e0a79d66495d31199cde85d39dcfef201f14de86`;
+- combined frozen source SHA-256: `ce477bf97589997899c91ad22af9025de521520f8ee7aa46a21b50a313958bd7`;
+- resolver source SHA-256: `90c417be653f5f0fdf22dfc7d4e20168869594a021fc3229d87b7f203bc9dc77`.
 
-### One-shot runner
+### First complete prospective observation
 
-The merged runner exposes only:
+Checkpoint:
 
-- `collect-next`;
-- `resolve --condition-id`;
-- `status`.
+- `ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/prospective-run-v1/CHECKPOINT.md`
+- workflow run: `30220121542`;
+- evidence artifact ID: `8637040765`;
+- evidence ZIP SHA-256: `8d00c88d6046806a2abc07f43da8b2f0ab08449890ee8a7f9e1f7071b92c4e21`.
 
-Runner verification:
+Result:
 
-- 5/5 runner contracts passed;
-- workflow run: `30218421705`;
-- artifact ID: `8636471934`;
-- artifact ZIP SHA-256: `762294c4141c25d6dd0a1f6678e2f90795bfbecf909deaf130d3001358ca7b88`;
-- combined runtime source SHA-256: `b398e7b9893170cb47ea17923448a87a10b017249a950ca670f9b09081b0d845`.
+- market: `btc-updown-5m-1785099600`, 2026-07-26 21:00–21:05 UTC;
+- selected side: Up;
+- signal ask: $0.98;
+- arrival best ask: $0.99;
+- frozen decision: `no_fill_ask_above_limit`;
+- official outcome: Up;
+- hypothetical fill: no;
+- P&L: not applicable.
 
-The known-fee field is now recorded for hypothetical fills even when diagnostic inferred outcomes are null. This audit correction does not change the official rejection result.
+The complete lifecycle and raw-evidence chains were independently verified. Twenty non-terminal Gamma payloads were followed by one terminal `[1,0]` payload. The one-cent adverse price move was correctly rejected rather than chased.
 
 ## Safety and admission boundary
 
@@ -95,15 +100,17 @@ The known-fee field is now recorded for hypothetical fills even when diagnostic 
 - order submissions: **0**;
 - live submission: **physically absent**;
 - historical admission credit: **0**;
-- prospective markets collected so far: **0**.
+- prospective markets observed: **1 / 500 minimum**;
+- hypothetical FOK fills: **0 / 100 minimum**;
+- complete untouched weekly blocks: **0 / 4 minimum**.
 
-No historical result is admissible. Even a future admissible shadow report cannot enable live trading; any order submitter requires a separate reviewed release and explicit operator action.
+No historical result is admissible. This single no-fill observation is valid prospective evidence but cannot support admission. Even a future admissible shadow report cannot enable live trading; any order submitter requires a separate reviewed release and explicit operator action.
 
 ## Next work
 
-1. execute one credential-free `collect-next` run on a genuinely new post-cutoff BTC window;
-2. preserve its append-only lifecycle, raw evidence, summaries, policy hashes, source hash, and artifact digest;
-3. resolve the condition from authoritative terminal outcomes after closure;
-4. repeat without policy changes for at least four untouched weekly blocks;
+1. continue credential-free collection of every eligible BTC five-minute market, including no-signal and no-fill cases;
+2. preserve append-only lifecycle and raw evidence with authoritative terminal outcomes;
+3. make no threshold or policy changes during the prospective block;
+4. accumulate at least 500 observed markets, 100 hypothetical FOK fills, and four untouched weekly blocks;
 5. require measured fill evidence, acceptable concentration, zero unresolved states, and a positive lower confidence bound after fees and execution costs;
 6. keep real-money execution physically disabled.
