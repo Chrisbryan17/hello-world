@@ -109,15 +109,15 @@ def evaluate_market(
 
     result["hypothetical_fok_fill"] = True
     result["decision"] = "hypothetical_fok_fill"
+    fee = fee_per_share(arrival_ask)
+    result["fee_per_share"] = fee
     normalized_outcome = str(outcome).title() if outcome is not None else None
     if normalized_outcome in {"Up", "Down"}:
         won = selected_side == normalized_outcome
-        fee = fee_per_share(arrival_ask)
         pnl_per_share = float(won) - arrival_ask - fee
         result.update(
             {
                 "won": won,
-                "fee_per_share": fee,
                 "pnl_per_share": pnl_per_share,
                 "pnl_at_five_shares": pnl_per_share * POLICY["shares"],
             }
