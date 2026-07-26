@@ -182,3 +182,17 @@ jobs:
             late-favorite-official-transfer-v1.tar.gz.sha256
           compression-level: 0
           retention-days: 30
+
+      - name: Upload compact decision evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: late-favorite-official-transfer-summary-v1
+          path: |
+            late-favorite-official-transfer-results/AUDIT.json
+            late-favorite-official-transfer-results/REPORT.md
+            late-favorite-official-transfer-results/SHA256SUMS
+            late-favorite-official-transfer-results/official_transfer_ledger.csv.gz
+            late-favorite-official-transfer-results/raw_response_manifest.jsonl.gz
+            late-favorite-official-transfer-v1.tar.gz.sha256
+          compression-level: 0
+          retention-days: 30
