@@ -1,0 +1,146 @@
+name: BTC-Only v3 Prospective Block v3
+
+on:
+  pull_request:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/BLOCK_V3_TRIGGER.txt
+  workflow_dispatch:
+
+concurrency:
+  group: btc-only-v3-prospective-block-v3
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+  ROOT: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
+  STATE: btc-only-v3-prospective-block-v3
+
+jobs:
+  capture-resolve-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pinned public and test clients
+        run: python -m pip install requests==2.32.4 pytest==8.3.5
+
+      - name: Verify committed runner and frozen boundaries
+        shell: bash
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/runner
+        run: |
+          set -euo pipefail
+          python -m py_compile "$ROOT/runner/observer_cli.py" "$ROOT/runner/tests/test_observer_block.py"
+          pytest -q "$ROOT/runner/tests/test_observer_block.py"
+          python - <<'PY'
+          from pathlib import Path
+          from capture_policy import load_capture_policy
+          from late_favorite_v3 import load_frozen_policy
+          from observer_cli import compute_combined_source_sha256
+
+          root = Path('ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3')
+          source_sha = compute_combined_source_sha256(root)
+          trading = load_frozen_policy(root / 'CANDIDATE_SPEC.json', root / 'FREEZE_MANIFEST.json', source_sha256=source_sha)
+          capture = load_capture_policy(root / 'CAPTURE_POLICY.json', root / 'CAPTURE_FREEZE_MANIFEST.json')
+          assert trading.policy_sha256 == '82b923b0d4034d801156b77a213db6084be719f27491478247e5354ea93e92ba'
+          assert capture.capture_policy_sha256 == '888810ae61a0ab3e067c68850faeba5f2709a57bb69ef0c2ad708e128b311edc'
+          assert capture.valid_market_open_after_epoch_seconds == 1785094521
+          print(source_sha)
+          PY
+
+      - name: Capture three consecutive markets, then resolve the queue
+        shell: bash
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/runner
+        run: |
+          set -euo pipefail
+          python "$ROOT/runner/observer_cli.py" \
+            --project-root "$ROOT" \
+            --state-dir "$STATE" \
+            collect-block \
+            --markets 3 \
+            --max-resolution-attempts 120 \
+            --retry-delay-ms 10000 | tee block-v3-output.json
+
+      - name: Verify complete block evidence and write summary
+        shell: bash
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/source:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/collector:ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/runner
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from capture_policy import CaptureBoundLifecycleLedger, load_capture_policy
+          from late_favorite_v3 import load_frozen_policy
+          from observer_cli import compute_combined_source_sha256
+          from public_collector import RawEvidenceStore
+
+          root = Path('ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3')
+          state = Path('btc-only-v3-prospective-block-v3')
+          source_sha = compute_combined_source_sha256(root)
+          trading = load_frozen_policy(root / 'CANDIDATE_SPEC.json', root / 'FREEZE_MANIFEST.json', source_sha256=source_sha)
+          capture = load_capture_policy(root / 'CAPTURE_POLICY.json', root / 'CAPTURE_FREEZE_MANIFEST.json')
+          ledger = CaptureBoundLifecycleLedger(state / 'lifecycle.jsonl', trading, capture)
+          evidence = RawEvidenceStore(state / 'raw_evidence')
+          block_paths = sorted((state / 'summaries').glob('block-*.json'))
+          assert len(block_paths) == 1, block_paths
+          block = json.loads(block_paths[0].read_text())
+          assert block['status'] == 'complete'
+          assert block['markets_requested'] == 3
+          assert block['markets_collected'] == 3
+          assert block['conditions_resolved'] == 3
+          assert block['unresolved_condition_ids'] == []
+          assert len(block['condition_ids']) == 3
+          assert len(set(block['condition_ids'])) == 3
+          assert all(int(row['market_open_epoch_seconds']) > capture.valid_market_open_after_epoch_seconds for row in ledger.records)
+          assert sum(1 for row in ledger.records if row['event_type'] == 'discovered') == 3
+          assert sum(1 for row in ledger.records if row['event_type'] == 'signal') == 3
+          assert sum(1 for row in ledger.records if row['event_type'] == 'resolution') == 3
+          summary = {
+              **block,
+              'candidate_policy_sha256': trading.policy_sha256,
+              'capture_policy_sha256': capture.capture_policy_sha256,
+              'runtime_source_sha256': source_sha,
+              'lifecycle_head_sha256': ledger.head_hash,
+              'raw_evidence_head_sha256': evidence.head_hash,
+              'lifecycle_records': len(ledger.records),
+              'raw_evidence_records': len(evidence.records),
+              'historical_admission_credit': 0,
+              'credentials_used': 0,
+              'authenticated_requests': 0,
+              'order_submissions': 0,
+              'live_submission': 'physically_absent',
+          }
+          (state / 'BLOCK_V3_SUMMARY.json').write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Build deterministic block artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd "$STATE" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+          (cd "$STATE" && sha256sum -c SHA256SUMS)
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf btc-only-v3-prospective-block-v3.tar.gz "$STATE"
+          sha256sum btc-only-v3-prospective-block-v3.tar.gz > btc-only-v3-prospective-block-v3.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: btc-only-v3-prospective-block-v3
+          path: |
+            btc-only-v3-prospective-block-v3/
+            btc-only-v3-prospective-block-v3.tar.gz
+            btc-only-v3-prospective-block-v3.tar.gz.sha256
+          compression-level: 0
+          retention-days: 30
