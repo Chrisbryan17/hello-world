@@ -1,0 +1,31 @@
+{
+  "artifact_id": 8639355447,
+  "artifact_zip_sha256": "b30e9e10de839070ad1ae88f98c952ff2d8d4378ab828bed1533cff0e588cc0e",
+  "authenticated_requests": 0,
+  "candidate_policy_sha256": "82b923b0d4034d801156b77a213db6084be719f27491478247e5354ea93e92ba",
+  "capture_policy_sha256": "888810ae61a0ab3e067c68850faeba5f2709a57bb69ef0c2ad708e128b311edc",
+  "credentials_used": 0,
+  "deterministic_tar_sha256": "5af345750399cde55f782140c8ba0427b74d39c113ce864e7a045c3f246cc6ee",
+  "historical_admission_credit": 0,
+  "hypothetical_fok_fills": 1,
+  "internal_sha256sums_verified": true,
+  "lifecycle_chain_verified": true,
+  "lifecycle_head_sha256": "fa080692b88dbfea6233fb6d2dc0f510008c7ff3c10342aec0b476afdb2f7579",
+  "lifecycle_records": 10,
+  "live_submission": "physically_absent",
+  "markets": 3,
+  "official_outcomes": {
+    "denominator": 3,
+    "numerator": 3
+  },
+  "order_submissions": 0,
+  "prospective_pnl_total": "0.610415",
+  "raw_evidence_chain_and_bodies_verified": true,
+  "raw_evidence_head_sha256": "5b24cf59091c974219c7d38abe776743b25fe445b41ecd00aa8812d47977ff26",
+  "raw_evidence_records": 44,
+  "runtime_source_sha256": "81a13d2aeb3df3c2088b8aa99272b10e217a392eabc839a01a8f2b71f570ecbb",
+  "tar_round_trip_verified": true,
+  "unresolved_states": 0,
+  "workflow_head_sha": "e5463d3ecb2b150de857ac73bf31e08d3317cd2f",
+  "workflow_run_id": 30228071397
+}
