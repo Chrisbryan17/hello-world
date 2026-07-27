@@ -83,30 +83,34 @@ Runner checkpoint:
 
 ### Prospective block v1
 
-Checkpoint:
-
-- `ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/prospective-block-v1/CHECKPOINT.md`
+- checkpoint: `ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/prospective-block-v1/CHECKPOINT.md`
 - workflow run: `30221188931`;
 - artifact ID: `8637433570`;
-- artifact ZIP SHA-256: `222d8261ea92dfdfcd3fbb9ccb12dbf6948d03f6bed1e7558f3d9e4bdc6a5580`.
-
-Three consecutive markets were collected from 21:30–21:45 UTC:
-
-1. Up at $0.66: below threshold; official Up.
-2. Down at $0.76: below threshold; official Down.
-3. Up at $0.95: arrival ask $0.98, so no fill above the frozen limit; official Down.
-
-Block result:
-
+- artifact ZIP SHA-256: `222d8261ea92dfdfcd3fbb9ccb12dbf6948d03f6bed1e7558f3d9e4bdc6a5580`;
 - markets: 3;
 - official outcomes: 3/3;
 - hypothetical fills: 0;
 - P&L: $0.00;
+- unresolved conditions: 0.
+
+The block contained two below-threshold no-signals and one no-fill above the frozen FOK limit. The no-fill avoided a loss when the market later resolved against the selected favorite.
+
+### Prospective block v2
+
+- checkpoint: `ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/prospective-block-v2/CHECKPOINT.md`
+- workflow run: `30226869672`;
+- artifact ID: `8638983600`;
+- artifact ZIP SHA-256: `69ee1bb111f8aec0b52f982f305136a5e835ca2b2e50f4b66a129d3370b5ac58`;
+- deterministic TAR SHA-256: `4fc0e0b68e7261899e133e1ba9af05939a72303d26609f73391967b5251c73cc`;
+- markets: 3;
+- official outcomes: 3/3;
+- hypothetical fills: 1;
+- P&L: **+$0.233375**;
 - unresolved conditions: 0;
 - lifecycle records: 10, chain verified;
 - raw evidence records: 44, chain and bodies verified.
 
-The third decision avoided a loss: the observer refused to chase Up from 95 cents to 98 cents, and the market resolved Down.
+The filled market selected Down at a 95-cent signal ask, executed five shares at 95 cents one second later, paid $0.003325/share in fees, officially resolved Down, and earned $0.046675/share or $0.233375 total.
 
 ## Safety and admission boundary
 
@@ -115,13 +119,14 @@ The third decision avoided a loss: the observer refused to chase Up from 95 cent
 - order submissions: **0**;
 - live submission: **physically absent**;
 - historical admission credit: **0**;
-- prospective markets observed: **4 / 500 minimum**;
-- official outcome coverage: **4 / 4**;
-- hypothetical FOK fills: **0 / 100 minimum**;
-- prospective P&L: **$0.00**;
+- prospective markets observed: **7 / 500 minimum**;
+- official outcome coverage: **7 / 7**;
+- hypothetical FOK fills: **1 / 100 minimum**;
+- prospective P&L: **+$0.233375**;
+- unresolved states: **0**;
 - complete untouched weekly blocks: **0 / 4 minimum**.
 
-No historical result is admissible. These four markets are valid prospective evidence but cannot support admission. Even a future admissible shadow report cannot enable live trading; any order submitter requires a separate reviewed release and explicit operator action.
+One winning fill is not statistical validation. These seven markets are valid prospective evidence but cannot support admission, a confidence bound, a concentration pass, or live release. Even a future admissible shadow report cannot enable trading; any order submitter requires a separate reviewed release and explicit operator action.
 
 ## Next work
 
