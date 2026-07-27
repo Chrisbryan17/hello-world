@@ -1,0 +1,201 @@
+name: BTC-Only v3 First Prospective Observation
+
+on:
+  push:
+    branches: [btc-only-v3-first-prospective-20260727]
+    paths:
+      - ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/FIRST_PROSPECTIVE_TRIGGER.txt
+  workflow_dispatch:
+
+concurrency:
+  group: btc-only-v3-first-prospective
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+  ROOT: ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3
+  OUT: btc-only-v3-first-prospective
+
+jobs:
+  capture-and-resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pinned public client
+        run: python -m pip install requests==2.32.4
+
+      - name: Verify observer source and frozen policy bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$ROOT/source:$ROOT/collector"
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          from capture_policy import load_capture_policy
+          from late_favorite_v3 import load_frozen_policy
+
+          root = Path('ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3')
+          source_paths = [
+              root / 'source/late_favorite_v3.py',
+              root / 'source/capture_policy.py',
+              root / 'collector/public_collector.py',
+              root / 'collector/resolution.py',
+          ]
+          combined = hashlib.sha256()
+          for path in source_paths:
+              raw = path.read_bytes()
+              combined.update(path.name.encode() + b'\0' + raw)
+          source_sha = combined.hexdigest()
+          trading = load_frozen_policy(root / 'CANDIDATE_SPEC.json', root / 'FREEZE_MANIFEST.json', source_sha256=source_sha)
+          capture = load_capture_policy(root / 'CAPTURE_POLICY.json', root / 'CAPTURE_FREEZE_MANIFEST.json')
+          assert trading.policy_sha256 == '82b923b0d4034d801156b77a213db6084be719f27491478247e5354ea93e92ba'
+          assert capture.capture_policy_sha256 == '888810ae61a0ab3e067c68850faeba5f2709a57bb69ef0c2ad708e128b311edc'
+          assert source_sha == 'f2e086bb5e74f0343a4ea29f46ea2bf8e23062952b456303e204c6b5469b6126'
+          PY
+
+      - name: Capture next eligible post-cutoff BTC market
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$ROOT/source:$ROOT/collector"
+          python "$ROOT/collector/cli.py" --output-dir "$OUT" capture | tee capture.stdout.json
+
+      - name: Derive immutable market identity
+        id: market
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          payload = json.loads(Path('btc-only-v3-first-prospective/last_capture.json').read_text())
+          condition = str(payload['condition_id'])
+          opening = int(payload['market_open_epoch_seconds'])
+          assert opening > 1785094521
+          assert condition
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f'condition_id={condition}\n')
+              handle.write(f'opening={opening}\n')
+          print(json.dumps({'condition_id': condition, 'opening': opening, 'capture_decision': payload['decision']}, indent=2))
+          PY
+
+      - name: Wait for terminal resolution window
+        shell: bash
+        env:
+          OPENING: ${{ steps.market.outputs.opening }}
+        run: |
+          set -euo pipefail
+          target=$((OPENING + 330))
+          now=$(date +%s)
+          delay=$((target - now))
+          if [ "$delay" -gt 0 ]; then
+            sleep "$delay"
+          fi
+
+      - name: Resolve from authoritative Gamma terminal prices
+        shell: bash
+        env:
+          CONDITION_ID: ${{ steps.market.outputs.condition_id }}
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$ROOT/source:$ROOT/collector"
+          success=0
+          for attempt in $(seq 1 40); do
+            if python "$ROOT/collector/cli.py" --output-dir "$OUT" resolve --condition-id "$CONDITION_ID" | tee resolve.stdout.json; then
+              success=1
+              break
+            fi
+            echo "resolution not terminal on attempt $attempt"
+            sleep 15
+          done
+          test "$success" -eq 1
+
+      - name: Verify complete append-only evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$ROOT/source:$ROOT/collector"
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          from capture_policy import CaptureBoundLifecycleLedger, load_capture_policy
+          from late_favorite_v3 import load_frozen_policy
+          from public_collector import RawEvidenceStore
+
+          root = Path('ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3')
+          out = Path('btc-only-v3-first-prospective')
+          source_paths = [root / 'source/late_favorite_v3.py', root / 'source/capture_policy.py', root / 'collector/public_collector.py', root / 'collector/resolution.py']
+          combined = hashlib.sha256()
+          for path in source_paths:
+              raw = path.read_bytes()
+              combined.update(path.name.encode() + b'\0' + raw)
+          trading = load_frozen_policy(root / 'CANDIDATE_SPEC.json', root / 'FREEZE_MANIFEST.json', source_sha256=combined.hexdigest())
+          capture = load_capture_policy(root / 'CAPTURE_POLICY.json', root / 'CAPTURE_FREEZE_MANIFEST.json')
+          ledger = CaptureBoundLifecycleLedger(out / 'lifecycle.jsonl', trading, capture)
+          evidence = RawEvidenceStore(out / 'raw')
+          assert ledger.records[-1]['event_type'] == 'resolution'
+          conditions = {row['condition_id'] for row in ledger.records}
+          assert len(conditions) == 1
+          assert all(int(row['market_open_epoch_seconds']) > capture.valid_market_open_after_epoch_seconds for row in ledger.records)
+          allowed = {
+              ('GET', 'gamma-api.polymarket.com'),
+              ('POST', 'clob.polymarket.com'),
+          }
+          from urllib.parse import urlparse
+          for row in evidence.records:
+              parsed = urlparse(row['url'])
+              assert (row['method'], parsed.netloc) in allowed
+              assert parsed.path.startswith('/markets/slug/') or parsed.path == '/books'
+          resolution = json.loads((out / 'last_resolution.json').read_text())
+          summary = {
+              'condition_id': next(iter(conditions)),
+              'market_open_epoch_seconds': ledger.records[0]['market_open_epoch_seconds'],
+              'capture_decision': json.loads((out / 'last_capture.json').read_text())['decision'],
+              'resolution_decision': resolution['decision'],
+              'official_outcome': resolution['official_outcome'],
+              'official_won': resolution.get('official_won'),
+              'pnl_total': resolution.get('pnl_total'),
+              'lifecycle_records': len(ledger.records),
+              'raw_responses': len(evidence.records),
+              'lifecycle_head_sha256': ledger.head_hash,
+              'evidence_head_sha256': evidence.head_hash,
+              'candidate_policy_sha256': trading.policy_sha256,
+              'capture_policy_sha256': capture.capture_policy_sha256,
+              'historical_admission_credit': 0,
+              'live_submission': 'physically_absent',
+          }
+          (out / 'PROSPECTIVE_SUMMARY.json').write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Build deterministic prospective artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd "$OUT" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf btc-only-v3-first-prospective-v1.tar.gz "$OUT"
+          sha256sum btc-only-v3-first-prospective-v1.tar.gz > btc-only-v3-first-prospective-v1.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: btc-only-v3-first-prospective-v1
+          path: |
+            btc-only-v3-first-prospective/
+            btc-only-v3-first-prospective-v1.tar.gz
+            btc-only-v3-first-prospective-v1.tar.gz.sha256
+          compression-level: 0
+          retention-days: 30
