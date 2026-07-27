@@ -1,0 +1,117 @@
+[
+  {
+    "arrival": null,
+    "condition_id": "0x9e511bc8afffe4491ac7d943976763e9edcc6acac5c7fdf2de6ddccf9729536d",
+    "decision": "no_signal_below_threshold",
+    "jamaica_window": "2026-07-26 07:40–07:45 PM Jamaica",
+    "market_open_epoch_seconds": 1785112800,
+    "official_outcome": "Up",
+    "official_won": null,
+    "pnl_per_share": null,
+    "pnl_total": null,
+    "resolution_payload_sha256": "51fd814498aae2f743d5b6354eba77461066c333042c8a6614b263df0a85c8aa",
+    "resolution_polls": 1,
+    "selected_side": "Up",
+    "signal": {
+      "book_timestamps_ms": [
+        1785113010110,
+        1785113010110
+      ],
+      "request_completed_ts_ms": 1785113010183,
+      "request_duration_ms": 183,
+      "request_started_ts_ms": 1785113010000,
+      "target_ts_ms": 1785113010000
+    },
+    "signal_ask": "0.64",
+    "slug": "btc-updown-5m-1785112800",
+    "terminal_outcome_prices": [
+      "1",
+      "0"
+    ],
+    "terminal_updated_at": "2026-07-27T00:51:14.942925Z",
+    "utc_window": "2026-07-27 00:40–00:45 UTC"
+  },
+  {
+    "arrival": null,
+    "condition_id": "0xe7ac80be371db56b3a8c1a682427f2cc3b887f4bdccb7b9b0f2f4933b4147f8e",
+    "decision": "no_signal_below_threshold",
+    "jamaica_window": "2026-07-26 07:45–07:50 PM Jamaica",
+    "market_open_epoch_seconds": 1785113100,
+    "official_outcome": "Up",
+    "official_won": null,
+    "pnl_per_share": null,
+    "pnl_total": null,
+    "resolution_payload_sha256": "dbdcd84b4eb322624a45ae22543ed369be91021958779f9a52ca16c45e2d3423",
+    "resolution_polls": 1,
+    "selected_side": "Down",
+    "signal": {
+      "book_timestamps_ms": [
+        1785113310110,
+        1785113310109
+      ],
+      "request_completed_ts_ms": 1785113310187,
+      "request_duration_ms": 187,
+      "request_started_ts_ms": 1785113310000,
+      "target_ts_ms": 1785113310000
+    },
+    "signal_ask": "0.6",
+    "slug": "btc-updown-5m-1785113100",
+    "terminal_outcome_prices": [
+      "1",
+      "0"
+    ],
+    "terminal_updated_at": "2026-07-27T00:51:35.707758Z",
+    "utc_window": "2026-07-27 00:45–00:50 UTC"
+  },
+  {
+    "arrival": {
+      "all_in_cost_per_share": "0.877917",
+      "best_ask": "0.87",
+      "book_timestamps_ms": [
+        1785113611088
+      ],
+      "execution_levels": [
+        {
+          "price": "0.87",
+          "size": "5"
+        }
+      ],
+      "execution_vwap": "0.87",
+      "fee_per_share": "0.007917",
+      "filled_shares": "5",
+      "request_completed_ts_ms": 1785113611163,
+      "request_duration_ms": 163,
+      "request_started_ts_ms": 1785113611000,
+      "target_ts_ms": 1785113611000
+    },
+    "condition_id": "0xf739b004a67e777b0ef3de33bfa417782e70c81595bd707ad7fcdf26a40eaaa8",
+    "decision": "hypothetical_fok_fill",
+    "jamaica_window": "2026-07-26 07:50–07:55 PM Jamaica",
+    "market_open_epoch_seconds": 1785113400,
+    "official_outcome": "Down",
+    "official_won": true,
+    "pnl_per_share": "0.122083",
+    "pnl_total": "0.610415",
+    "resolution_payload_sha256": "c37484c919bf833195bad9c90ecf508eafeda0cfc7af7560f6aff21fb465992a",
+    "resolution_polls": 35,
+    "selected_side": "Down",
+    "signal": {
+      "book_timestamps_ms": [
+        1785113610122,
+        1785113610122
+      ],
+      "request_completed_ts_ms": 1785113610199,
+      "request_duration_ms": 198,
+      "request_started_ts_ms": 1785113610001,
+      "target_ts_ms": 1785113610000
+    },
+    "signal_ask": "0.88",
+    "slug": "btc-updown-5m-1785113400",
+    "terminal_outcome_prices": [
+      "0",
+      "1"
+    ],
+    "terminal_updated_at": "2026-07-27T00:56:26.240184Z",
+    "utc_window": "2026-07-27 00:50–00:55 UTC"
+  }
+]

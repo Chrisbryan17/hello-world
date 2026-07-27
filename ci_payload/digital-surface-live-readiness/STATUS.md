@@ -112,6 +112,23 @@ The block contained two below-threshold no-signals and one no-fill above the fro
 
 The filled market selected Down at a 95-cent signal ask, executed five shares at 95 cents one second later, paid $0.003325/share in fees, officially resolved Down, and earned $0.046675/share or $0.233375 total.
 
+### Prospective block v3
+
+- checkpoint: `ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/prospective-block-v3/CHECKPOINT.md`
+- workflow run: `30228071397`;
+- artifact ID: `8639355447`;
+- artifact ZIP SHA-256: `b30e9e10de839070ad1ae88f98c952ff2d8d4378ab828bed1533cff0e588cc0e`;
+- deterministic TAR SHA-256: `5af345750399cde55f782140c8ba0427b74d39c113ce864e7a045c3f246cc6ee`;
+- markets: 3;
+- official outcomes: 3/3;
+- hypothetical fills: 1;
+- P&L: **+$0.610415**;
+- unresolved conditions: 0;
+- lifecycle records: 10, chain verified;
+- raw evidence records: 44, chain and bodies verified.
+
+The filled market selected Down at an 88-cent signal ask. The arrival best ask improved to 87 cents, remained eligible under the frozen one-cent adverse-move rule, executed five shares at 87 cents, officially resolved Down, and earned $0.122083/share or $0.610415 total.
+
 ## Safety and admission boundary
 
 - credentials used: **0**;
@@ -119,14 +136,14 @@ The filled market selected Down at a 95-cent signal ask, executed five shares at
 - order submissions: **0**;
 - live submission: **physically absent**;
 - historical admission credit: **0**;
-- prospective markets observed: **7 / 500 minimum**;
-- official outcome coverage: **7 / 7**;
-- hypothetical FOK fills: **1 / 100 minimum**;
-- prospective P&L: **+$0.233375**;
+- prospective markets observed: **10 / 500 minimum**;
+- official outcome coverage: **10 / 10**;
+- hypothetical FOK fills: **2 / 100 minimum**;
+- prospective P&L: **+$0.843790**;
 - unresolved states: **0**;
 - complete untouched weekly blocks: **0 / 4 minimum**.
 
-One winning fill is not statistical validation. These seven markets are valid prospective evidence but cannot support admission, a confidence bound, a concentration pass, or live release. Even a future admissible shadow report cannot enable trading; any order submitter requires a separate reviewed release and explicit operator action.
+Two winning fills are not statistical validation. These ten markets are valid prospective evidence but cannot support admission, a confidence bound, a concentration pass, or live release. Even a future admissible shadow report cannot enable trading; any order submitter requires a separate reviewed release and explicit operator action.
 
 ## Next work
 
