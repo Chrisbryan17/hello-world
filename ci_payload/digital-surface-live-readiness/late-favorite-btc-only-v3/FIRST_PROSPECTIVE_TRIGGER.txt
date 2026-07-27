@@ -1,0 +1,1 @@
+Trigger the first post-cutoff BTC-only v3 prospective capture and authoritative resolution.
