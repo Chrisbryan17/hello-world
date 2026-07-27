@@ -5,6 +5,10 @@ on:
     branches: [btc-only-v3-first-prospective-20260727]
     paths:
       - ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/FIRST_PROSPECTIVE_TRIGGER.txt
+  pull_request:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/FIRST_PROSPECTIVE_TRIGGER.txt
   workflow_dispatch:
 
 concurrency:
