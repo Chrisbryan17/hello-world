@@ -1,0 +1,23 @@
+{
+  "arrival_adverse_move_cancel": {
+    "max_price_improvement": 0.01,
+    "rule": "cancel if execution_ask < signal_ask - 0.01"
+  },
+  "assets": [
+    "btc",
+    "eth"
+  ],
+  "entry_second": 210,
+  "fee_per_share": "0.07*p*(1-p)",
+  "fok_limit": "signal_ask",
+  "hold": "settlement",
+  "latency_seconds": 1,
+  "live_submission": "disabled",
+  "max_positions_per_asset_per_window": 1,
+  "max_total_positions_per_window": 2,
+  "name": "late_favorite_btc_eth_v2_diagnostic",
+  "shares": 5,
+  "signal_ask_min": 0.85,
+  "source_artifact": "polymarket-5m-favorite-walkforward-v1",
+  "status": "diagnostic; prospective validation required"
+}

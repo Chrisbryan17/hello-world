@@ -1,0 +1,36 @@
+{
+  "book_freshness": {
+    "max_book_age_at_request_completion_ms": 2000,
+    "max_book_future_skew_ms": 1000,
+    "missing_or_unparseable_book_timestamp": "fail_closed"
+  },
+  "event_time": {
+    "arrival_target_basis": "market_open_not_signal_completion",
+    "arrival_target_offset_ms": 211000,
+    "signal_target_offset_ms": 210000
+  },
+  "name": "late_favorite_btc_only_v3_capture_policy",
+  "recording": {
+    "book_timestamp_ms": true,
+    "full_book": true,
+    "missed_window_decision": "record_and_fail_closed",
+    "raw_payload_sha256": true,
+    "request_completed_ts_ms": true,
+    "request_started_ts_ms": true,
+    "target_ts_ms": true
+  },
+  "request_windows": {
+    "max_request_duration_ms": 1000,
+    "max_request_start_lateness_ms": 250,
+    "request_may_start_before_target": false
+  },
+  "status": "frozen_before_prospective_collection",
+  "transport": {
+    "arrival_request": "single public CLOB /books request for selected token ID",
+    "authenticated_requests": 0,
+    "credentials_used": 0,
+    "order_submissions": 0,
+    "signal_request": "single public CLOB /books batch for Up and Down token IDs"
+  },
+  "version": 1
+}

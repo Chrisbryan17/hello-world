@@ -1,0 +1,14 @@
+{
+  "candidate_policy_sha256": "82b923b0d4034d801156b77a213db6084be719f27491478247e5354ea93e92ba",
+  "capture_policy_blob_sha": "9b089d3d0f82b3d7baa499aed897a07fdbdc1f7d",
+  "capture_policy_commit_sha": "ac6a1a267c958ac8fd327b11b7f72719627bd459",
+  "capture_policy_path": "ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/CAPTURE_POLICY.json",
+  "capture_policy_sha256": "888810ae61a0ab3e067c68850faeba5f2709a57bb69ef0c2ad708e128b311edc",
+  "frozen_at_utc": "2026-07-26T19:35:21Z",
+  "historical_admission_credit": 0,
+  "live_submission": "physically_absent",
+  "rule": "Only markets opening strictly after this capture-policy freeze may count toward prospective admission.",
+  "status": "frozen_before_prospective_collection",
+  "valid_market_open_after_utc": "2026-07-26T19:35:21Z",
+  "version": 1
+}

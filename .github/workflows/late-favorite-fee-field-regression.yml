@@ -1,0 +1,58 @@
+name: Late Favorite Fee-Field Regression
+
+on:
+  push:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/late-favorite-fee-field-regression.yml
+      - ci_payload/digital-surface-live-readiness/late-favorite-repro-source/late_favorite_transfer.py
+      - ci_payload/digital-surface-live-readiness/late-favorite-repro-source/test_late_favorite_transfer.py
+      - ci_payload/digital-surface-live-readiness/late-favorite-repro-source/test_fee_field_regression.py
+  pull_request:
+    branches: [digital-surface-ci-20260724]
+    paths:
+      - .github/workflows/late-favorite-fee-field-regression.yml
+      - ci_payload/digital-surface-live-readiness/late-favorite-repro-source/late_favorite_transfer.py
+      - ci_payload/digital-surface-live-readiness/late-favorite-repro-source/test_late_favorite_transfer.py
+      - ci_payload/digital-surface-live-readiness/late-favorite-repro-source/test_fee_field_regression.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fee-field-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install minimal pinned stack
+        run: python -m pip install pandas==2.2.3 huggingface_hub==0.33.4 pytest==8.3.5
+      - name: Compile source and regression tests
+        run: |
+          python -m py_compile \
+            ci_payload/digital-surface-live-readiness/late-favorite-repro-source/late_favorite_transfer.py \
+            ci_payload/digital-surface-live-readiness/late-favorite-repro-source/test_late_favorite_transfer.py \
+            ci_payload/digital-surface-live-readiness/late-favorite-repro-source/test_fee_field_regression.py
+      - name: Verify fee is recorded before label-dependent PnL
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          text = Path('ci_payload/digital-surface-live-readiness/late-favorite-repro-source/late_favorite_transfer.py').read_text()
+          fee_assignment = '    result["fee_per_share"] = fee\n'
+          label_branch = '    if normalized_outcome in {"Up", "Down"}:\n'
+          assert text.count(fee_assignment) == 1
+          assert text.count(label_branch) == 1
+          assert text.index(fee_assignment) < text.index(label_branch)
+          PY
+      - name: Run focused behavior suite
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-repro-source
+        run: |
+          pytest -q \
+            ci_payload/digital-surface-live-readiness/late-favorite-repro-source/test_late_favorite_transfer.py \
+            ci_payload/digital-surface-live-readiness/late-favorite-repro-source/test_fee_field_regression.py

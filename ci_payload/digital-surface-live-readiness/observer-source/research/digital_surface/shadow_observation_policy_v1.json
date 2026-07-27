@@ -1,0 +1,11 @@
+{
+  "authenticated_requests": false,
+  "market_endpoint": "https://gamma-api.polymarket.com/markets",
+  "mode": "observation_only",
+  "order_submission": false,
+  "target_slugs": [
+    "btc-updown-5m-<unix_epoch>",
+    "btc-updown-15m-<unix_epoch>"
+  ],
+  "version": 1
+}

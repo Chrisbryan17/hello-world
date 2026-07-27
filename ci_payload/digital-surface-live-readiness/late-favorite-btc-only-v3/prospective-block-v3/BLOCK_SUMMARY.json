@@ -1,0 +1,50 @@
+{
+  "authenticated_requests": 0,
+  "candidate_policy_sha256": "82b923b0d4034d801156b77a213db6084be719f27491478247e5354ea93e92ba",
+  "capture_decision_counts": {
+    "hypothetical_fok_fill": 1,
+    "no_signal_below_threshold": 2
+  },
+  "capture_policy_sha256": "888810ae61a0ab3e067c68850faeba5f2709a57bb69ef0c2ad708e128b311edc",
+  "command": "collect-block",
+  "condition_ids": [
+    "0x9e511bc8afffe4491ac7d943976763e9edcc6acac5c7fdf2de6ddccf9729536d",
+    "0xe7ac80be371db56b3a8c1a682427f2cc3b887f4bdccb7b9b0f2f4933b4147f8e",
+    "0xf739b004a67e777b0ef3de33bfa417782e70c81595bd707ad7fcdf26a40eaaa8"
+  ],
+  "conditions_resolved": 3,
+  "credentials_used": 0,
+  "first_market_open_epoch_seconds": 1785112800,
+  "historical_admission_credit": 0,
+  "hypothetical_fok_fills": 1,
+  "last_market_open_epoch_seconds": 1785113400,
+  "last_resolution_errors": {},
+  "lifecycle_head_sha256": "fa080692b88dbfea6233fb6d2dc0f510008c7ff3c10342aec0b476afdb2f7579",
+  "lifecycle_records": 10,
+  "live_submission": "physically_absent",
+  "market_open_epoch_seconds": [
+    1785112800,
+    1785113100,
+    1785113400
+  ],
+  "markets_collected": 3,
+  "markets_requested": 3,
+  "order_submissions": 0,
+  "policy_changes": 0,
+  "prospective_pnl_total": "0.610415",
+  "raw_evidence_head_sha256": "5b24cf59091c974219c7d38abe776743b25fe445b41ecd00aa8812d47977ff26",
+  "raw_evidence_records": 44,
+  "resolution_attempts_by_condition": {
+    "0x9e511bc8afffe4491ac7d943976763e9edcc6acac5c7fdf2de6ddccf9729536d": 1,
+    "0xe7ac80be371db56b3a8c1a682427f2cc3b887f4bdccb7b9b0f2f4933b4147f8e": 1,
+    "0xf739b004a67e777b0ef3de33bfa417782e70c81595bd707ad7fcdf26a40eaaa8": 35
+  },
+  "resolution_decision_counts": {
+    "resolved_fill": 1,
+    "resolved_no_fill": 2
+  },
+  "runtime_source_sha256": "81a13d2aeb3df3c2088b8aa99272b10e217a392eabc839a01a8f2b71f570ecbb",
+  "source_sha256": "81a13d2aeb3df3c2088b8aa99272b10e217a392eabc839a01a8f2b71f570ecbb",
+  "status": "complete",
+  "unresolved_condition_ids": []
+}

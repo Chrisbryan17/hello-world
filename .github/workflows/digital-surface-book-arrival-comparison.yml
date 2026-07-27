@@ -1,0 +1,170 @@
+name: Digital Surface Book-Arrival Comparison
+
+on:
+  push:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/digital-surface-book-arrival-comparison.yml
+      - ci_payload/digital-surface-live-readiness/book-arrival-model.patch
+  pull_request:
+    branches: [digital-surface-ci-20260724]
+    paths:
+      - .github/workflows/digital-surface-book-arrival-comparison.yml
+      - ci_payload/digital-surface-live-readiness/book-arrival-model.patch
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  compare-fill-models:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Reconstruct checksum-pinned source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat ci_payload/digital-surface/chunk-* > base.b64
+          base64 --decode base.b64 > base.tar.gz
+          echo 'e2a181ac3966e7bb1f786c4fab854294ae96449dc19c7a51bb83814728ec1330  base.tar.gz' | sha256sum -c -
+          mkdir source && tar -xzf base.tar.gz -C source
+          cat ci_payload/digital-surface-final-recovered/chunk-* > recovered.b64
+          base64 --decode recovered.b64 > recovered.tar.gz
+          echo 'ac3cf5f39d71facc9a1e4bc39a9ab05c64ae5ae5137889b74cab64bb540f9a15  recovered.tar.gz' | sha256sum -c -
+          tar -xzf recovered.tar.gz -C source
+          cp -a ci_payload/digital-surface-official-resolution-patch/. source/
+          for patch_file in timestamp-unit-fix.patch full-universe-gate-fix.patch resolved-universe-fix.patch asset-merge-fix.patch; do
+            patch -d source -p1 < "ci_payload/digital-surface-official-resolution-patch/${patch_file}"
+          done
+          echo 'f71f3a653ca58b4bf98609fc29d8ab16f9d031c9ed14906ebe5159f2b0de8eab  ci_payload/digital-surface-live-readiness/execution-diagnostics.patch' | sha256sum -c -
+          patch -d source -p1 < ci_payload/digital-surface-live-readiness/execution-diagnostics.patch
+          echo '8606cc925aa3b3a6417abb1fba9a11df916cc2b281880978fb6229aa25875be9  ci_payload/digital-surface-live-readiness/book-arrival-model.patch' | sha256sum -c -
+          patch -d source -p1 < ci_payload/digital-surface-live-readiness/book-arrival-model.patch
+          cat > /tmp/source.sha256 <<'EOF'
+          0e858f150d858f9b9ea2e6a4509d74eed7c27d9e864ac6e2bba7d89756102599  source/research/digital_surface/diagnostics.py
+          15171104e206f58587ceeff169bf6f9fdf014bfacee4c271217f2f4bc68effd8  source/research/digital_surface/execution.py
+          ae0dd4e5943ae1c3fd1ea6baf741fe182cba4a3e36d47ecde73c9fb630aa57f4  source/research/digital_surface/run_research.py
+          b5daad831aadfb67c9fd51182d0ff23add6a560e14ffcb90bca4d395cf730da6  source/tests/digital_surface/test_diagnostics.py
+          c2d7a06e349ea26ebb1ba540d47974fa7741b1ab85e65d02b3d0a6948a9c26fa  source/tests/digital_surface/test_execution.py
+          5a1825a337daba295b32fd2a942f6a5a7e14a6061cd5eb33f68a4b241551b6a5  source/tests/digital_surface/test_integration.py
+          EOF
+          sed -i 's/^          //' /tmp/source.sha256
+          sha256sum -c /tmp/source.sha256
+          cp /tmp/source.sha256 source/BOOK_ARRIVAL_COMPARISON_SOURCE_SHA256.txt
+
+      - uses: actions/cache@v4
+        with:
+          path: source/.cache/digital-surface
+          key: digital-surface-official-resolution-obadiaha-11793901-kinzik-eb4e9fc7-v5
+
+      - name: Install pinned stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy==2.2.6 pandas==2.2.3 scipy==1.15.3 scikit-learn==1.6.1 pyarrow==19.0.1 requests==2.32.3 pytest==8.3.5 tabulate==0.9.0
+
+      - name: Pass exactly 32 tests
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q research/digital_surface tests/digital_surface
+          PYTHONPATH=. pytest --collect-only -q tests/digital_surface | tee /tmp/collect.txt
+          grep -Eq '^32 tests collected' /tmp/collect.txt
+          PYTHONPATH=. pytest tests/digital_surface -q
+
+      - name: Replay both fill models
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=. python -m research.digital_surface.run_research \
+            --cache-dir .cache/digital-surface \
+            --output-dir artifacts/digital-surface-book-arrival-comparison \
+            2>&1 | tee digital-surface-book-arrival-comparison.log
+
+      - name: Verify comparison
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          import pandas as pd
+          root = Path('artifacts/digital-surface-book-arrival-comparison')
+          assert hashlib.sha256((root/'fold_results.csv').read_bytes()).hexdigest() == 'c4e51189ee942929c9764012501da9580de2fa8b4f983c38cee593707df5c0d7'
+          assert hashlib.sha256((root/'admission.json').read_bytes()).hexdigest() == '9912874614b9558eefc48e1a69507b6bad14a4e13004134d7f785f239907371a'
+          tape = pd.read_parquet(root/'execution_ledger.parquet')
+          book = pd.read_parquet(root/'book_execution_ledger.parquet')
+          folds = pd.read_csv(root/'book_fold_results.csv').sort_values('fold_id')
+          expected = [11, 17, 29, 5]
+          assert folds['atomic_count'].astype(int).tolist() == expected, folds
+          assert int(tape['atomic'].astype(bool).sum()) == 8
+          assert int(book['atomic'].astype(bool).sum()) == 62
+          assert set(tape['fill_model']) == {'tape_confirmed'}
+          assert set(book['fill_model']) == {'book_arrival'}
+          admission = json.loads((root/'admission.json').read_text())
+          assert admission['classification'] == 'Rejected'
+          internal = json.loads((root/'SHA256SUMS.json').read_text())
+          for name, wanted in internal.items():
+              got = hashlib.sha256((root/name).read_bytes()).hexdigest()
+              assert got == wanted, (name, got, wanted)
+          result = {
+              'admission_model': 'tape_confirmed',
+              'admission_classification': admission['classification'],
+              'tape_confirmed_atomic': 8,
+              'book_arrival_atomic': 62,
+              'book_arrival_atomic_by_fold': expected,
+              'book_arrival_fold_results': folds.to_dict('records'),
+              'book_arrival_is_diagnostic_only': True,
+              'prospective_shadow_calibration_required': True,
+              'live_mode': 'disabled',
+              'internal_checksums_verified': len(internal),
+          }
+          (root/'BOOK_ARRIVAL_COMPARISON_VERIFICATION.json').write_text(json.dumps(result, indent=2, sort_keys=True))
+          print(json.dumps(result, indent=2))
+          PY
+
+      - name: Build deterministic archive
+        if: always()
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -d artifacts/digital-surface-book-arrival-comparison; then
+            tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+              -czf digital-surface-book-arrival-comparison-v1.tar.gz \
+              -C artifacts digital-surface-book-arrival-comparison
+            sha256sum digital-surface-book-arrival-comparison-v1.tar.gz > digital-surface-book-arrival-comparison-v1.tar.gz.sha256
+          fi
+
+      - name: Show comparison
+        if: always()
+        working-directory: source
+        run: |
+          cat artifacts/digital-surface-book-arrival-comparison/BOOK_ARRIVAL_COMPARISON_VERIFICATION.json || true
+          cat artifacts/digital-surface-book-arrival-comparison/book_fold_results.csv || true
+          tail -200 digital-surface-book-arrival-comparison.log || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-book-arrival-comparison-v1
+          path: |
+            source/artifacts/digital-surface-book-arrival-comparison/
+            source/digital-surface-book-arrival-comparison.log
+            source/digital-surface-book-arrival-comparison-v1.tar.gz
+            source/digital-surface-book-arrival-comparison-v1.tar.gz.sha256
+            source/BOOK_ARRIVAL_COMPARISON_SOURCE_SHA256.txt
+          if-no-files-found: warn
+          retention-days: 30

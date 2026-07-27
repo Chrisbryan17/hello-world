@@ -1,0 +1,194 @@
+name: Digital Surface Shadow Report Chain Checkpoint
+
+on:
+  push:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/digital-surface-shadow-report-chain-checkpoint.yml
+      - ci_payload/digital-surface-live-readiness/shadow-source/**
+      - ci_payload/digital-surface-live-readiness/prospective-source/**
+  pull_request:
+    branches: [digital-surface-ci-20260724]
+    paths:
+      - .github/workflows/digital-surface-shadow-report-chain-checkpoint.yml
+      - ci_payload/digital-surface-live-readiness/shadow-source/**
+      - ci_payload/digital-surface-live-readiness/prospective-source/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  verify-shadow-report-chain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Reconstruct checksum-pinned source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat ci_payload/digital-surface/chunk-* > base.b64
+          base64 --decode base.b64 > base.tar.gz
+          echo 'e2a181ac3966e7bb1f786c4fab854294ae96449dc19c7a51bb83814728ec1330  base.tar.gz' | sha256sum -c -
+          mkdir source && tar -xzf base.tar.gz -C source
+          cat ci_payload/digital-surface-final-recovered/chunk-* > recovered.b64
+          base64 --decode recovered.b64 > recovered.tar.gz
+          echo 'ac3cf5f39d71facc9a1e4bc39a9ab05c64ae5ae5137889b74cab64bb540f9a15  recovered.tar.gz' | sha256sum -c -
+          tar -xzf recovered.tar.gz -C source
+          cp -a ci_payload/digital-surface-official-resolution-patch/. source/
+          for patch_file in timestamp-unit-fix.patch full-universe-gate-fix.patch resolved-universe-fix.patch asset-merge-fix.patch; do
+            patch -d source -p1 < "ci_payload/digital-surface-official-resolution-patch/${patch_file}"
+          done
+          echo 'f71f3a653ca58b4bf98609fc29d8ab16f9d031c9ed14906ebe5159f2b0de8eab  ci_payload/digital-surface-live-readiness/execution-diagnostics.patch' | sha256sum -c -
+          patch -d source -p1 < ci_payload/digital-surface-live-readiness/execution-diagnostics.patch
+          echo '8606cc925aa3b3a6417abb1fba9a11df916cc2b281880978fb6229aa25875be9  ci_payload/digital-surface-live-readiness/book-arrival-model.patch' | sha256sum -c -
+          patch -d source -p1 < ci_payload/digital-surface-live-readiness/book-arrival-model.patch
+          cp -a ci_payload/digital-surface-live-readiness/shadow-source/. source/
+          cp -a ci_payload/digital-surface-live-readiness/prospective-source/. source/
+
+          cat > /tmp/checkpoint.sha256 <<'EOF'
+          6aa02760d4d038098a6a69a99d9349bb5c6fef8d4593fa4c4cf0574971828fb2  source/research/digital_surface/live/__init__.py
+          9c5c9bcbd39e1262ac468024f5a96fb0667c0c95fc2879d846f7ca2066c38b5f  source/research/digital_surface/live/config.py
+          9e6dff73a17227f907dce4bf56cfd54921f4eb677280b1774d1a73c979b9065a  source/research/digital_surface/live/gateway.py
+          3be74a910e787a3f9e0f3548691e63ed93d78eeb3328fd9538e3a0e643b57d1c  source/research/digital_surface/live/report.py
+          b0ca12139437c004ec88e41902796cdd540f7e45c1b27c3aba96e3695d2267a1  source/research/digital_surface/live/report_chain.py
+          f9197d38fd8dcfcc073d83028ac498fd9ff07619fea2b2b6a90de9ab470a86e2  source/research/digital_surface/live/risk.py
+          50f32b2e400767702073b97ba4fd77a7e8c26f5fd4c7d6f7d9aafe282d6258f0  source/research/digital_surface/live/types.py
+          10d833f89194246ea2fe5dec8bb2fc4388c8509a4d8276c7fcdc0a2b1a13e76c  source/tests/digital_surface/live/test_report.py
+          a09860af2f96e950884e1a2d37d0dfe59c41d869f3cb183ef839bbec2896db4a  source/tests/digital_surface/live/test_report_chain.py
+          be1f59a4ae742f062b419ad7f7fb974eadf9bd076cb2ecdabcd0063eedf1df6d  source/tests/digital_surface/live/test_shadow_gateway.py
+          f219222d7b89c5ab4ef0619da9163a77b79ba7f2a9fe611c4072746771e2fa41  source/research/digital_surface/prospective.py
+          9ed734554e0296e94212cac3911466ac230241efdd4ab911e9adc74e41ef05b2  source/tests/digital_surface/test_prospective.py
+          EOF
+          sed -i 's/^          //' /tmp/checkpoint.sha256
+          sha256sum -c /tmp/checkpoint.sha256
+          cp /tmp/checkpoint.sha256 source/SHADOW_REPORT_CHAIN_SOURCE_SHA256.txt
+
+      - name: Install pinned test stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy==2.2.6 pandas==2.2.3 scipy==1.15.3 scikit-learn==1.6.1 pyarrow==19.0.1 requests==2.32.3 pytest==8.3.5 tabulate==0.9.0
+
+      - name: Compile and pass exactly 45 tests
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q research/digital_surface tests/digital_surface
+          PYTHONPATH=. pytest --collect-only -q tests/digital_surface | tee /tmp/collect.txt
+          grep -Eq '^45 tests collected' /tmp/collect.txt
+          PYTHONPATH=. pytest tests/digital_surface -q
+
+      - name: Verify chained reports and physical live disable
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ast
+          import hashlib
+          import json
+          import tempfile
+          from pathlib import Path
+
+          from research.digital_surface.live import (
+              LiveTradingDisabledError,
+              ShadowCanaryMetrics,
+              ShadowReportLedger,
+              load_config,
+          )
+          from research.digital_surface.prospective import ProspectiveLedger
+
+          try:
+              load_config({'TRADING_MODE': 'live', 'LIVE_ARM_TOKEN': 'present'})
+          except LiveTradingDisabledError:
+              pass
+          else:
+              raise AssertionError('live mode unexpectedly armed')
+
+          forbidden = {'requests', 'httpx', 'aiohttp', 'websocket', 'websockets', 'socket'}
+          imports = set()
+          for path in Path('research/digital_surface/live').glob('*.py'):
+              tree = ast.parse(path.read_text(), filename=str(path))
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      imports.update(alias.name.split('.')[0] for alias in node.names)
+                  elif isinstance(node, ast.ImportFrom) and node.module:
+                      imports.add(node.module.split('.')[0])
+          assert not imports.intersection(forbidden), imports.intersection(forbidden)
+
+          with tempfile.TemporaryDirectory() as directory:
+              directory = Path(directory)
+              prospective = ProspectiveLedger(directory/'prospective.jsonl', diagnostic_market_ids={'old'})
+              observed = prospective.append_observation(
+                  market_id='fresh', first_seen_ts_ms=1,
+                  policy_sha256='1'*64, source_sha256='2'*64,
+              )
+              reports = ShadowReportLedger(directory/'reports.jsonl')
+              report = reports.append(
+                  generated_ts_ms=2,
+                  metrics=ShadowCanaryMetrics(
+                      markets_observed=650,
+                      qualified_portfolios=120,
+                      simulated_atomic=116,
+                      orphaned=4,
+                      unresolved_order_states=0,
+                      feed_outages=1,
+                      weekly_passes=4,
+                  ),
+                  policy_sha256='1'*64,
+                  source_sha256='2'*64,
+                  prospective_head_sha256=observed['record_hash'],
+              )
+              assert report['decision']['classification'] == 'Admissible'
+              assert report['decision']['live_mode'] == 'disabled_pending_operator_release'
+              assert ShadowReportLedger(reports.path).head_hash == report['report_hash']
+
+          files = {}
+          for line in Path('SHADOW_REPORT_CHAIN_SOURCE_SHA256.txt').read_text().splitlines():
+              wanted, name = line.split(maxsplit=1)
+              got = hashlib.sha256(Path(name).read_bytes()).hexdigest()
+              assert got == wanted
+              files[name] = got
+          result = {
+              'tests_collected': 45,
+              'live_mode': 'physically_disabled',
+              'network_capable_imports': [],
+              'prospective_hash_chain_verified': True,
+              'shadow_report_hash_chain_verified': True,
+              'report_bound_to_policy_source_and_prospective_head': True,
+              'admissible_report_still_requires_separate_operator_release': True,
+              'source_files_verified': files,
+          }
+          Path('SHADOW_REPORT_CHAIN_VERIFICATION.json').write_text(json.dumps(result, indent=2, sort_keys=True))
+          print(json.dumps(result, indent=2))
+          PY
+
+      - name: Build deterministic source checkpoint
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf digital-surface-shadow-report-chain-source-v1.tar.gz \
+            research tests SHADOW_REPORT_CHAIN_SOURCE_SHA256.txt SHADOW_REPORT_CHAIN_VERIFICATION.json
+          sha256sum digital-surface-shadow-report-chain-source-v1.tar.gz > digital-surface-shadow-report-chain-source-v1.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digital-surface-shadow-report-chain-checkpoint-v1
+          path: |
+            source/SHADOW_REPORT_CHAIN_SOURCE_SHA256.txt
+            source/SHADOW_REPORT_CHAIN_VERIFICATION.json
+            source/digital-surface-shadow-report-chain-source-v1.tar.gz
+            source/digital-surface-shadow-report-chain-source-v1.tar.gz.sha256
+          retention-days: 30

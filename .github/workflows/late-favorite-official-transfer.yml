@@ -1,0 +1,198 @@
+name: Late Favorite Official Outcome Transfer
+
+on:
+  push:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/late-favorite-official-transfer.yml
+      - ci_payload/digital-surface-live-readiness/late-favorite-official-transfer-source/**
+      - ci_payload/digital-surface-live-readiness/late-favorite-repro-source/**
+      - ci_payload/digital-surface-live-readiness/deep-favorite-eda-v2/CANDIDATE_SPEC.json
+  pull_request:
+    branches: [digital-surface-ci-20260724]
+    paths:
+      - .github/workflows/late-favorite-official-transfer.yml
+      - ci_payload/digital-surface-live-readiness/late-favorite-official-transfer-source/**
+      - ci_payload/digital-surface-live-readiness/late-favorite-repro-source/**
+      - ci_payload/digital-surface-live-readiness/deep-favorite-eda-v2/CANDIDATE_SPEC.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  transfer-official-outcomes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pinned research stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            numpy==2.2.6 \
+            pandas==2.2.3 \
+            pyarrow==19.0.1 \
+            requests==2.32.4 \
+            huggingface_hub==0.33.4 \
+            hf_xet==1.1.5 \
+            pytest==8.3.5
+
+      - name: Compile transfer and reproducer sources
+        run: |
+          python -m py_compile \
+            ci_payload/digital-surface-live-readiness/late-favorite-official-transfer-source/official_transfer.py \
+            ci_payload/digital-surface-live-readiness/late-favorite-official-transfer-source/test_official_transfer.py \
+            ci_payload/digital-surface-live-readiness/late-favorite-repro-source/late_favorite_transfer.py
+
+      - name: Pass fail-closed official parser tests
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-official-transfer-source
+        run: |
+          pytest -q ci_payload/digital-surface-live-readiness/late-favorite-official-transfer-source/test_official_transfer.py
+
+      - name: Verify live submission and credentials remain physically absent
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          paths = [
+              Path('ci_payload/digital-surface-live-readiness/late-favorite-official-transfer-source/official_transfer.py'),
+              Path('ci_payload/digital-surface-live-readiness/late-favorite-repro-source/late_favorite_transfer.py'),
+          ]
+          forbidden_imports = {'web3', 'py_clob_client', 'eth_account'}
+          forbidden_tokens = ('create_order', 'post_order', 'submit_order', 'private_key', 'api_secret')
+          for path in paths:
+              text = path.read_text()
+              tree = ast.parse(text)
+              imports = {
+                  node.names[0].name
+                  for node in ast.walk(tree)
+                  if isinstance(node, ast.Import) and node.names
+              }
+              imported_from = {
+                  node.module
+                  for node in ast.walk(tree)
+                  if isinstance(node, ast.ImportFrom)
+              }
+              assert not (forbidden_imports & imports), (path, imports)
+              assert not (forbidden_imports & imported_from), (path, imported_from)
+              lowered = text.lower()
+              for token in forbidden_tokens:
+                  assert token not in lowered, (path, token)
+          PY
+
+      - name: Rebuild exact frozen eligible condition set
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-repro-source
+          HF_XET_HIGH_PERFORMANCE: '1'
+        run: |
+          python ci_payload/digital-surface-live-readiness/late-favorite-repro-source/late_favorite_transfer.py \
+            --candidate-spec ci_payload/digital-surface-live-readiness/deep-favorite-eda-v2/CANDIDATE_SPEC.json \
+            --out-dir late-favorite-repro-results \
+            --cache-dir .cache/late-favorite-data
+
+      - name: Assert immutable filled condition-set identity
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          audit = json.loads(Path('late-favorite-repro-results/AUDIT.json').read_text())
+          assert audit['hypothetical_fok_fills'] == 9268
+          assert audit['filled_condition_ids_sha256'] == 'bf276fbce187d9651d56ecae976520d4251140c1d5b0d440696c5d077838a67a'
+          assert audit['live_submission'] == 'physically_absent'
+          PY
+
+      - name: Transfer official Gamma outcomes and CLOB corroboration
+        env:
+          PYTHONPATH: ci_payload/digital-surface-live-readiness/late-favorite-official-transfer-source
+        run: |
+          python ci_payload/digital-surface-live-readiness/late-favorite-official-transfer-source/official_transfer.py \
+            --eligible-trades late-favorite-repro-results/eligible_trades.csv.gz \
+            --out-dir late-favorite-official-transfer-results \
+            --batch-size 25 \
+            --clob-max-pages 1000
+
+      - name: Verify transfer evidence and classification contract
+        run: |
+          python - <<'PY'
+          import gzip
+          import hashlib
+          import json
+          from pathlib import Path
+
+          out = Path('late-favorite-official-transfer-results')
+          required = {
+              'AUDIT.json',
+              'REPORT.md',
+              'SHA256SUMS',
+              'official_transfer_ledger.csv.gz',
+              'raw_response_manifest.jsonl.gz',
+          }
+          assert required <= {path.name for path in out.iterdir() if path.is_file()}
+          audit = json.loads((out / 'AUDIT.json').read_text())
+          assert audit['candidate'] == 'late_favorite_btc_eth_v2_diagnostic'
+          assert audit['fills'] == 9268
+          assert audit['filled_condition_set_sha256'] == 'bf276fbce187d9651d56ecae976520d4251140c1d5b0d440696c5d077838a67a'
+          assert audit['live_submission'] == 'physically_absent'
+          assert audit['credentials_used'] == 0
+          assert audit['thresholds_changed'] == 0
+          assert audit['raw_responses'] > 0
+          assert sum(audit['classification_counts'].values()) == audit['fills']
+          assert 0 <= audit['official_usable'] <= audit['fills']
+          assert audit['gamma_payloads'] + audit['gamma_failures'] <= audit['fills']
+
+          manifest_path = out / 'raw_response_manifest.jsonl.gz'
+          with gzip.open(manifest_path, 'rt', encoding='utf-8') as handle:
+              records = [json.loads(line) for line in handle if line.strip()]
+          assert len(records) == audit['raw_responses']
+          for record in records:
+              if record.get('body_path') is None:
+                  continue
+              body = out / record['body_path']
+              assert body.is_file(), body
+              assert hashlib.sha256(body.read_bytes()).hexdigest() == record['body_sha256']
+          PY
+          (cd late-favorite-official-transfer-results && sha256sum -c SHA256SUMS)
+
+      - name: Build evidence archive
+        run: |
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf late-favorite-official-transfer-v1.tar.gz late-favorite-official-transfer-results
+          sha256sum late-favorite-official-transfer-v1.tar.gz > late-favorite-official-transfer-v1.tar.gz.sha256
+          cat late-favorite-official-transfer-results/REPORT.md
+          cat late-favorite-official-transfer-results/AUDIT.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: late-favorite-official-transfer-v1
+          path: |
+            late-favorite-official-transfer-results/
+            late-favorite-official-transfer-v1.tar.gz
+            late-favorite-official-transfer-v1.tar.gz.sha256
+          compression-level: 0
+          retention-days: 30
+
+      - name: Upload compact decision evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: late-favorite-official-transfer-summary-v1
+          path: |
+            late-favorite-official-transfer-results/AUDIT.json
+            late-favorite-official-transfer-results/REPORT.md
+            late-favorite-official-transfer-results/SHA256SUMS
+            late-favorite-official-transfer-results/official_transfer_ledger.csv.gz
+            late-favorite-official-transfer-results/raw_response_manifest.jsonl.gz
+            late-favorite-official-transfer-v1.tar.gz.sha256
+          compression-level: 0
+          retention-days: 30

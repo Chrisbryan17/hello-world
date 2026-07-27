@@ -1,0 +1,50 @@
+diff --git a/research/digital_surface/official_resolution.py b/research/digital_surface/official_resolution.py
+index 3536d29..1b180fc 100644
+--- a/research/digital_surface/official_resolution.py
++++ b/research/digital_surface/official_resolution.py
+@@ -101,6 +101,22 @@ def install(data_module: ModuleType) -> None:
+     original_normalize = data_module.normalize_obadiaha_source
+     original_load_validation = data_module._load_obadiaha_validation
+ 
++    def _timestamp_seconds(series: pd.Series) -> pd.Series:
++        values = pd.to_datetime(series, utc=True)
++        nanoseconds = values.dt.as_unit("ns").astype("int64")
++        return (nanoseconds // 1_000_000_000).astype("int64")
++
++    def _timestamp_milliseconds(series: pd.Series) -> pd.Series:
++        values = pd.to_datetime(series, utc=True)
++        nanoseconds = values.dt.as_unit("ns").astype("int64")
++        return (nanoseconds // 1_000_000).astype("int64")
++
++    # Parquet preserves datetime64[us]. The recovered adapter divided the raw
++    # physical integers as though they were nanoseconds, emptying every as-of
++    # join. Normalize to nanoseconds explicitly before epoch conversion.
++    data_module._timestamp_seconds = _timestamp_seconds
++    data_module._timestamp_milliseconds = _timestamp_milliseconds
++
+     def normalize_obadiaha_source(
+         markets: pd.DataFrame,
+         resolutions: pd.DataFrame,
+diff --git a/tests/digital_surface/test_data_adapter.py b/tests/digital_surface/test_data_adapter.py
+index 3a9cd8c..4042b1d 100644
+--- a/tests/digital_surface/test_data_adapter.py
++++ b/tests/digital_surface/test_data_adapter.py
+@@ -210,6 +210,18 @@ def test_normalize_obadiaha_uses_official_token_order_and_causal_open_strike():
+         {"condition_id": "c15", "official_outcome": "Down", "url": "https://gamma.example/c15", "payload_sha256": "2" * 64},
+     ])
+ 
++    # The immutable parquet corpus stores timestamps at microsecond resolution.
++    # The adapter must normalize the physical unit before converting to epoch
++    # seconds/milliseconds; treating these integers as nanoseconds empties the panel.
++    for frame, columns in (
++        (markets, ("start_time", "end_time")),
++        (spot, ("timestamp",)),
++        (raw_books, ("timestamp",)),
++        (raw_trades, ("timestamp",)),
++    ):
++        for column in columns:
++            frame[column] = frame[column].dt.tz_localize(None).astype("datetime64[us]")
++
+     slots, books, trades, audit = normalize_obadiaha_source(
+         markets, resolutions, gamma, spot, raw_books, raw_trades, official_resolutions=official
+     )

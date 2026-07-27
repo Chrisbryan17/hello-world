@@ -1,0 +1,197 @@
+name: Digital Surface Execution Diagnostics
+
+on:
+  push:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/digital-surface-execution-diagnostics.yml
+      - ci_payload/digital-surface-live-readiness/**
+  pull_request:
+    branches: [digital-surface-ci-20260724]
+    paths:
+      - .github/workflows/digital-surface-execution-diagnostics.yml
+      - ci_payload/digital-surface-live-readiness/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  diagnose-execution:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Reconstruct checksum-pinned v5 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat ci_payload/digital-surface/chunk-* > base.b64
+          base64 --decode base.b64 > base.tar.gz
+          echo 'e2a181ac3966e7bb1f786c4fab854294ae96449dc19c7a51bb83814728ec1330  base.tar.gz' | sha256sum -c -
+          mkdir source
+          tar -xzf base.tar.gz -C source
+
+          cat ci_payload/digital-surface-final-recovered/chunk-* > recovered.b64
+          base64 --decode recovered.b64 > recovered.tar.gz
+          echo 'ac3cf5f39d71facc9a1e4bc39a9ab05c64ae5ae5137889b74cab64bb540f9a15  recovered.tar.gz' | sha256sum -c -
+          tar -xzf recovered.tar.gz -C source
+          cp -a ci_payload/digital-surface-official-resolution-patch/. source/
+          patch -d source -p1 < ci_payload/digital-surface-official-resolution-patch/timestamp-unit-fix.patch
+          patch -d source -p1 < ci_payload/digital-surface-official-resolution-patch/full-universe-gate-fix.patch
+          patch -d source -p1 < ci_payload/digital-surface-official-resolution-patch/resolved-universe-fix.patch
+          patch -d source -p1 < ci_payload/digital-surface-official-resolution-patch/asset-merge-fix.patch
+
+          echo 'f71f3a653ca58b4bf98609fc29d8ab16f9d031c9ed14906ebe5159f2b0de8eab  ci_payload/digital-surface-live-readiness/execution-diagnostics.patch' | sha256sum -c -
+          patch -d source -p1 < ci_payload/digital-surface-live-readiness/execution-diagnostics.patch
+
+          cat > /tmp/diagnostics-source.sha256 <<'EOF'
+          0e858f150d858f9b9ea2e6a4509d74eed7c27d9e864ac6e2bba7d89756102599  source/research/digital_surface/diagnostics.py
+          5343101ab3f3a097f86b3edc3c3e8a4ce340feeb3eb1c5d810ec98dbd4cf9f72  source/research/digital_surface/run_research.py
+          b5daad831aadfb67c9fd51182d0ff23add6a560e14ffcb90bca4d395cf730da6  source/tests/digital_surface/test_diagnostics.py
+          c25a78f5d3a34977e1bbf21a6a3c883bcd1ec543cde5ae94104e292f4266244a  source/tests/digital_surface/test_integration.py
+          EOF
+          sed -i 's/^          //' /tmp/diagnostics-source.sha256
+          sha256sum -c /tmp/diagnostics-source.sha256
+          cp /tmp/diagnostics-source.sha256 source/EXECUTION_DIAGNOSTICS_SOURCE_SHA256.txt
+
+      - name: Cache immutable source payloads
+        uses: actions/cache@v4
+        with:
+          path: source/.cache/digital-surface
+          key: digital-surface-official-resolution-obadiaha-11793901-kinzik-eb4e9fc7-v5
+
+      - name: Install pinned research stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy==2.2.6 pandas==2.2.3 scipy==1.15.3 scikit-learn==1.6.1 pyarrow==19.0.1 requests==2.32.3 pytest==8.3.5 tabulate==0.9.0
+
+      - name: Compile and pass exactly 30 tests
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q research/digital_surface tests/digital_surface
+          PYTHONPATH=. pytest --collect-only -q tests/digital_surface | tee /tmp/collect.txt
+          grep -Eq '^30 tests collected' /tmp/collect.txt
+          PYTHONPATH=. pytest tests/digital_surface -q
+
+      - name: Replay immutable corpus with attribution only
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=. python -m research.digital_surface.run_research \
+            --cache-dir .cache/digital-surface \
+            --output-dir artifacts/digital-surface-execution-diagnostics \
+            2>&1 | tee digital-surface-execution-diagnostics.log
+
+      - name: Verify complete attribution and unchanged strategy outputs
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import pandas as pd
+
+          root = Path('artifacts/digital-surface-execution-diagnostics')
+          candidates = pd.read_parquet(root / 'candidate_ledger.parquet')
+          executions = pd.read_parquet(root / 'execution_ledger.parquet')
+          attribution = pd.read_csv(root / 'execution_failure_attribution.csv')
+          summary = json.loads((root / 'EXECUTION_DIAGNOSTICS.json').read_text())
+
+          assert len(candidates) == len(executions), (len(candidates), len(executions))
+          assert len(attribution) == 2 * len(candidates), (len(attribution), len(candidates))
+          assert attribution['candidate_id'].value_counts().eq(2).all()
+          assert set(attribution['candidate_id']) == set(candidates['candidate_id'].astype(str))
+          allowed = {
+              'missing_post_arrival_book',
+              'ask_above_limit',
+              'insufficient_displayed_depth',
+              'insufficient_post_arrival_tape',
+              'filled',
+          }
+          assert set(attribution['reason']).issubset(allowed), set(attribution['reason'])
+          assert summary['complete_attribution'] is True, summary
+          assert summary['candidates_attributed'] == len(candidates), summary
+          assert summary['legs_attributed'] == len(attribution), summary
+
+          unchanged = {
+              'candidate_ledger.parquet': 'e9eecb4f9f2ba56d1ccec915d44ccf4eb73dde50495729e69cf79658176c434a',
+              'execution_ledger.parquet': 'cf6733acd95cf3e474724258c88bd4fa2e8987c203e3f5a81f6c9ab268601ae0',
+              'fold_results.csv': 'c4e51189ee942929c9764012501da9580de2fa8b4f983c38cee593707df5c0d7',
+              'admission.json': '9912874614b9558eefc48e1a69507b6bad14a4e13004134d7f785f239907371a',
+          }
+          for name, want in unchanged.items():
+              got = hashlib.sha256((root / name).read_bytes()).hexdigest()
+              assert got == want, (name, got, want)
+
+          folds = pd.read_csv(root / 'fold_results.csv')
+          admission = json.loads((root / 'admission.json').read_text())
+          assert len(folds) == 4
+          assert admission['classification'] == 'Rejected'
+
+          reason_totals = attribution.groupby(['leg', 'reason']).size().rename('count').reset_index()
+          reason_totals.to_csv(root / 'execution_reason_totals.csv', index=False)
+          diagnostic = {
+              'classification_unchanged': admission['classification'],
+              'candidate_count': int(len(candidates)),
+              'leg_count': int(len(attribution)),
+              'atomic_count': int(executions['atomic'].astype(bool).sum()),
+              'reason_totals': reason_totals.to_dict('records'),
+          }
+          (root / 'EXECUTION_DIAGNOSTIC_VERIFICATION.json').write_text(
+              json.dumps(diagnostic, indent=2, sort_keys=True)
+          )
+          print(json.dumps(diagnostic, indent=2))
+
+          expected = json.loads((root / 'SHA256SUMS.json').read_text())
+          for name, want in expected.items():
+              got = hashlib.sha256((root / name).read_bytes()).hexdigest()
+              assert got == want, (name, got, want)
+          PY
+
+      - name: Build deterministic diagnostics archive
+        if: always()
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -d artifacts/digital-surface-execution-diagnostics; then
+            tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+              -czf digital-surface-execution-diagnostics-v1.tar.gz \
+              -C artifacts digital-surface-execution-diagnostics
+            sha256sum digital-surface-execution-diagnostics-v1.tar.gz > digital-surface-execution-diagnostics-v1.tar.gz.sha256
+          fi
+
+      - name: Show attribution summary
+        if: always()
+        working-directory: source
+        run: |
+          cat artifacts/digital-surface-execution-diagnostics/EXECUTION_DIAGNOSTIC_VERIFICATION.json || true
+          cat artifacts/digital-surface-execution-diagnostics/EXECUTION_DIAGNOSTICS.json || true
+          tail -200 digital-surface-execution-diagnostics.log || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digital-surface-execution-diagnostics-v1
+          path: |
+            source/artifacts/digital-surface-execution-diagnostics/
+            source/digital-surface-execution-diagnostics.log
+            source/digital-surface-execution-diagnostics-v1.tar.gz
+            source/digital-surface-execution-diagnostics-v1.tar.gz.sha256
+            source/EXECUTION_DIAGNOSTICS_SOURCE_SHA256.txt
+          if-no-files-found: warn
+          retention-days: 30

@@ -1,0 +1,39 @@
+diff --git a/research/digital_surface/causal.py b/research/digital_surface/causal.py
+--- a/research/digital_surface/causal.py
++++ b/research/digital_surface/causal.py
+@@ -137,7 +137,22 @@
+     if state.empty:
+         raise ValueError("book filter produced zero rows")
+     state = state.drop_duplicates(["condition_id", "ts_ms"], keep="last")
+-    state = state.merge(registry, on="condition_id", how="inner", validate="many_to_one")
++    registry_for_merge = registry.copy()
++    has_book_asset = "asset" in state.columns
++    has_registry_asset = "asset" in registry_for_merge.columns
++    if has_book_asset and has_registry_asset:
++        state = state.rename(columns={"asset": "book_asset"})
++    state = state.merge(registry_for_merge, on="condition_id", how="inner", validate="many_to_one")
++    if has_book_asset and has_registry_asset:
++        book_asset = state["book_asset"].astype(str).str.lower()
++        registry_asset = state["asset"].astype(str).str.lower()
++        mismatch = book_asset.ne(registry_asset)
++        if mismatch.any():
++            examples = state.loc[mismatch, ["condition_id", "book_asset", "asset"]].head(10).to_dict("records")
++            raise ValueError(f"book asset disagrees with registry asset; examples: {examples}")
++        state = state.drop(columns="book_asset")
++    if "asset" not in state.columns:
++        raise ValueError("registry and books do not provide an asset column")
+     state["close_ts_ms"] = state["close_ts"].astype("int64") * 1000
+     state["open_ts_ms"] = state["open_ts"].astype("int64") * 1000
+     state["tau_s"] = (state["close_ts_ms"] - state["ts_ms"]) / 1000.0
+diff --git a/tests/digital_surface/test_causal.py b/tests/digital_surface/test_causal.py
+--- a/tests/digital_surface/test_causal.py
++++ b/tests/digital_surface/test_causal.py
+@@ -28,7 +28,7 @@
+     for ts in range(350_000, 381_000, 1000):
+         spot = 100 + (ts - 350_000) / 100_000
+         for cid in ("c5", "c15"):
+-            rows.append({"condition_id": cid, "ts_ms": ts, "yes_bid": .45, "yes_ask": .47, "yes_bid_size": 20, "yes_ask_size": 20, "no_bid": .52, "no_ask": .54, "no_bid_size": 20, "no_ask_size": 20, "spot": spot})
++            rows.append({"condition_id": cid, "asset": "btc", "ts_ms": ts, "yes_bid": .45, "yes_ask": .47, "yes_bid_size": 20, "yes_ask_size": 20, "no_bid": .52, "no_ask": .54, "no_bid_size": 20, "no_ask_size": 20, "spot": spot})
+     return registry, pd.DataFrame(rows)
+ 
+ 

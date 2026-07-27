@@ -1,0 +1,18 @@
+{
+  "candidate_name": "late_favorite_btc_only_v3_prospective_shadow",
+  "contamination_boundary": {
+    "historical_admission_credit": 0,
+    "rule": "Only BTC 5-minute markets with open_epoch_seconds strictly greater than the freeze timestamp may count toward prospective admission.",
+    "valid_market_open_after_utc": "2026-07-26T19:11:11Z"
+  },
+  "freeze_commit_sha": "bb3a818dc017f18927e6e48b38e1078acb23aaa0",
+  "frozen_at_utc": "2026-07-26T19:11:11Z",
+  "live_submission": "physically_absent",
+  "official_decision_commit": "cedd659e0b573d8479932c428cd2eaf472c6bf8f",
+  "policy_path": "ci_payload/digital-surface-live-readiness/late-favorite-btc-only-v3/CANDIDATE_SPEC.json",
+  "policy_sha256": "82b923b0d4034d801156b77a213db6084be719f27491478247e5354ea93e92ba",
+  "policy_blob_sha": "8e32c00919c77c20dc0d5f0f36bfe04c464d0918",
+  "release_boundary": "Shadow evidence cannot enable live trading; a separate reviewed and explicitly armed release is required.",
+  "status": "frozen_for_prospective_shadow_collection",
+  "version": 1
+}

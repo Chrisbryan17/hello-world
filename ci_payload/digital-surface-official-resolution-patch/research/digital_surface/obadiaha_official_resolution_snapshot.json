@@ -1,0 +1,12 @@
+{
+  "agreement": 1.0,
+  "canonical_labels_sha256": "fadc6558cf546e158eb7b4d806452a7864649446300178f5f5cf7e6cd72f1665",
+  "condition_ids_sha256": "ca8bd425d9766abda4a2858c41dca1de0ac70e57f00c174a4b1578f1f376e0f1",
+  "contracts": 5228,
+  "coverage": 1.0,
+  "encoding": "MSB-first outcome bitset; 1=Up, 0=Down; ordered by lexicographically sorted condition_id",
+  "full_evidence_snapshot_sha256": "bada3fc328d150390220f3b5e6440a21b399f21b3cb376e93682bbdb340884aa",
+  "outcome_bits_base64": "AZs9yM5vsi9cDpXrFbDJFqrexAcU5BwDIodD91+RpZdAWhO3GmseEe4aNZK2dTKdyJH5r3Va6EsL3jb7DWESzDaHqe3mtzbYNc6e1w042YmQ+1b2BrJ0q5z/GlO2JFqCItWI32BQLGPDlRZeb8gJVxpG/sYmmARa/KZN64oBjbtAsKLqdo9fqjz+GYFJhaHx9SbGIw7xdEYC+2do3J00cGKu3NpqgQ/TPRjKFwtnlv63MRaram1E7zP0BjN0ATrZWZv+Y6ffZP+FFKSBFsVaSoCGgesEqThvkGhzy0f5/fbW9GAcZUYvvbZNxN2ARNonz2BWgWmrj2Hm1+xnANqPFGao3bbjcVH7sFRDyLSq1vty30SyasAxXminU02XvglKIQ52/cNASbC1tpZ0FhtdgbNhpVTHQK+TE//din21xcRqvERjjmE6jpzNJx7olwSlWpbcOKc5gMAbGMs7l6NKFnHqFPdPEYgaxyA9uTr6lz/Z7EC5+e8cPzmEPUr7WVWS6BPpViOdCNyZpP2OdKivkIpUsdT2qXVfBUtx9Jlp9r1Al7Wm1ORVX0kgDdvJWWDeOI0upVawV5neaDdcHm4RGHNTtkzKgsVGBY71TD/aAvf0Ox5QDLFY/KmLKbtyGekSSM1Sajtr6+hPxdBzuTIO3lOxWBG9x+LRZEpIaMZY+SK+iRYamMiau88yTiQTR4Y9CLhNyMuIvVKNzHLNSa2aEHGKssvF3AxMzD9a4lvMfdxkFNGRRt0Gd4RjDHU+DGszcy1YSCUnPo9ByBMNZtzqfSYI1q/hrewC7SNkqraixDhLGOx4pb3tHFkKv/T1Ccpr2wpQ4QESNlb3VltU25rY7FZJVmt6Zh2yucZE3bog",
+  "source": "official Polymarket Gamma event terminal outcomes",
+  "upstream_full_audit_artifact_sha256": "3b86cebd50910e76e1e3d222e4ded9cfe5fd8df9dcd4c929fcb5a34c53a44723"
+}

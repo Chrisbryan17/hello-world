@@ -1,0 +1,169 @@
+name: Digital Surface Shadow Fill Simulation Checkpoint
+
+on:
+  push:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/digital-surface-shadow-fill-simulation-checkpoint.yml
+      - ci_payload/digital-surface-live-readiness/simulation-source/**
+  pull_request:
+    branches: [digital-surface-ci-20260724]
+    paths:
+      - .github/workflows/digital-surface-shadow-fill-simulation-checkpoint.yml
+      - ci_payload/digital-surface-live-readiness/simulation-source/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  verify-shadow-fill-simulation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Reconstruct checksum-pinned source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat ci_payload/digital-surface/chunk-* > base.b64
+          base64 --decode base.b64 > base.tar.gz
+          echo 'e2a181ac3966e7bb1f786c4fab854294ae96449dc19c7a51bb83814728ec1330  base.tar.gz' | sha256sum -c -
+          mkdir source && tar -xzf base.tar.gz -C source
+          cat ci_payload/digital-surface-final-recovered/chunk-* > recovered.b64
+          base64 --decode recovered.b64 > recovered.tar.gz
+          echo 'ac3cf5f39d71facc9a1e4bc39a9ab05c64ae5ae5137889b74cab64bb540f9a15  recovered.tar.gz' | sha256sum -c -
+          tar -xzf recovered.tar.gz -C source
+          cp -a ci_payload/digital-surface-official-resolution-patch/. source/
+          for patch_file in timestamp-unit-fix.patch full-universe-gate-fix.patch resolved-universe-fix.patch asset-merge-fix.patch; do
+            patch -d source -p1 < "ci_payload/digital-surface-official-resolution-patch/${patch_file}"
+          done
+          echo 'f71f3a653ca58b4bf98609fc29d8ab16f9d031c9ed14906ebe5159f2b0de8eab  ci_payload/digital-surface-live-readiness/execution-diagnostics.patch' | sha256sum -c -
+          patch -d source -p1 < ci_payload/digital-surface-live-readiness/execution-diagnostics.patch
+          echo '8606cc925aa3b3a6417abb1fba9a11df916cc2b281880978fb6229aa25875be9  ci_payload/digital-surface-live-readiness/book-arrival-model.patch' | sha256sum -c -
+          patch -d source -p1 < ci_payload/digital-surface-live-readiness/book-arrival-model.patch
+          cp -a ci_payload/digital-surface-live-readiness/shadow-source/. source/
+          cp -a ci_payload/digital-surface-live-readiness/prospective-source/. source/
+          cp -a ci_payload/digital-surface-live-readiness/observer-source/. source/
+          cp -a ci_payload/digital-surface-live-readiness/simulation-source/. source/
+
+          cat > /tmp/simulation-source.sha256 <<'EOF'
+          0808805ad3dcbb1c74ef437dddd33fc71b0800b4fd8ecf5daef5967de08bafe5  source/research/digital_surface/shadow_fill.py
+          d2fe18723b9b7780d3db82cef22f4d45c70c6e1f38e5fd5bcbaf72907eb6fb61  source/tests/digital_surface/test_shadow_fill.py
+          EOF
+          sed -i 's/^          //' /tmp/simulation-source.sha256
+          sha256sum -c /tmp/simulation-source.sha256
+          cp /tmp/simulation-source.sha256 source/SHADOW_FILL_SIMULATION_SOURCE_SHA256.txt
+
+      - name: Install pinned test stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy==2.2.6 pandas==2.2.3 scipy==1.15.3 scikit-learn==1.6.1 pyarrow==19.0.1 requests==2.32.3 pytest==8.3.5 tabulate==0.9.0
+
+      - name: Compile and pass exactly 64 tests
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q research/digital_surface tests/digital_surface
+          PYTHONPATH=. pytest --collect-only -q tests/digital_surface | tee /tmp/collect.txt
+          grep -Eq '^64 tests collected' /tmp/collect.txt
+          PYTHONPATH=. pytest tests/digital_surface -q
+
+      - name: Verify non-atomic paired FOK semantics
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          from decimal import Decimal
+          from pathlib import Path
+
+          from research.digital_surface.public_books import parse_public_order_book
+          from research.digital_surface.shadow_fill import estimate_paired_fok
+
+          def book(token, condition, asks):
+              return parse_public_order_book({
+                  'market': condition,
+                  'asset_id': token,
+                  'timestamp': '1',
+                  'hash': 'h-' + token,
+                  'bids': [],
+                  'asks': [{'price': price, 'size': size} for price, size in asks],
+                  'min_order_size': '1',
+                  'tick_size': '0.01',
+                  'neg_risk': False,
+              })
+
+          paired = estimate_paired_fok(
+              book('yes-low', 'low', [('0.50', '2'), ('0.51', '3')]),
+              book('no-high', 'high', [('0.48', '5')]),
+              shares=Decimal('5'),
+              low_max_price=Decimal('0.51'),
+              high_max_price=Decimal('0.49'),
+          )
+          assert paired.paired_crossable is True
+          assert paired.transactionally_atomic is False
+          assert paired.orphanable_leg is None
+          assert paired.low.average_price == Decimal('0.506')
+          assert paired.high.average_price == Decimal('0.48')
+
+          orphanable = estimate_paired_fok(
+              book('yes-low', 'low', [('0.50', '5')]),
+              book('no-high', 'high', [('0.60', '5')]),
+              shares=Decimal('5'),
+              low_max_price=Decimal('0.51'),
+              high_max_price=Decimal('0.49'),
+          )
+          assert orphanable.paired_crossable is False
+          assert orphanable.orphanable_leg == 'low_yes'
+          assert orphanable.transactionally_atomic is False
+
+          verified = {}
+          for line in Path('SHADOW_FILL_SIMULATION_SOURCE_SHA256.txt').read_text().splitlines():
+              wanted, name = line.split(maxsplit=1)
+              got = hashlib.sha256(Path(name).read_bytes()).hexdigest()
+              assert got == wanted
+              verified[name] = got
+          result = {
+              'tests_collected': 64,
+              'paired_crossable_is_not_atomic': True,
+              'partial_fok_counted_as_unfilled': True,
+              'causal_digest_binding_required': True,
+              'order_submissions': 0,
+              'live_mode': 'physically_disabled',
+              'source_files_verified': verified,
+          }
+          Path('SHADOW_FILL_SIMULATION_VERIFICATION.json').write_text(json.dumps(result, indent=2, sort_keys=True))
+          print(json.dumps(result, indent=2))
+          PY
+
+      - name: Build deterministic source checkpoint
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf digital-surface-shadow-fill-simulation-source-v1.tar.gz \
+            research tests SHADOW_FILL_SIMULATION_SOURCE_SHA256.txt SHADOW_FILL_SIMULATION_VERIFICATION.json
+          sha256sum digital-surface-shadow-fill-simulation-source-v1.tar.gz > digital-surface-shadow-fill-simulation-source-v1.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digital-surface-shadow-fill-simulation-checkpoint-v1
+          path: |
+            source/SHADOW_FILL_SIMULATION_SOURCE_SHA256.txt
+            source/SHADOW_FILL_SIMULATION_VERIFICATION.json
+            source/digital-surface-shadow-fill-simulation-source-v1.tar.gz
+            source/digital-surface-shadow-fill-simulation-source-v1.tar.gz.sha256
+          retention-days: 30

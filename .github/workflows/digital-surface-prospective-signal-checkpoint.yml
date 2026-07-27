@@ -1,0 +1,181 @@
+name: Digital Surface Prospective Signal Checkpoint
+
+on:
+  push:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/digital-surface-prospective-signal-checkpoint.yml
+      - ci_payload/digital-surface-live-readiness/prospective-signal-source/**
+  pull_request:
+    branches: [digital-surface-ci-20260724]
+    paths:
+      - .github/workflows/digital-surface-prospective-signal-checkpoint.yml
+      - ci_payload/digital-surface-live-readiness/prospective-signal-source/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: '17'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  verify-prospective-signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Reconstruct checksum-pinned source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat ci_payload/digital-surface/chunk-* > base.b64
+          base64 --decode base.b64 > base.tar.gz
+          echo 'e2a181ac3966e7bb1f786c4fab854294ae96449dc19c7a51bb83814728ec1330  base.tar.gz' | sha256sum -c -
+          mkdir source && tar -xzf base.tar.gz -C source
+          cat ci_payload/digital-surface-final-recovered/chunk-* > recovered.b64
+          base64 --decode recovered.b64 > recovered.tar.gz
+          echo 'ac3cf5f39d71facc9a1e4bc39a9ab05c64ae5ae5137889b74cab64bb540f9a15  recovered.tar.gz' | sha256sum -c -
+          tar -xzf recovered.tar.gz -C source
+          cp -a ci_payload/digital-surface-official-resolution-patch/. source/
+          for patch_file in timestamp-unit-fix.patch full-universe-gate-fix.patch resolved-universe-fix.patch asset-merge-fix.patch; do
+            patch -d source -p1 < "ci_payload/digital-surface-official-resolution-patch/${patch_file}"
+          done
+          echo 'f71f3a653ca58b4bf98609fc29d8ab16f9d031c9ed14906ebe5159f2b0de8eab  ci_payload/digital-surface-live-readiness/execution-diagnostics.patch' | sha256sum -c -
+          patch -d source -p1 < ci_payload/digital-surface-live-readiness/execution-diagnostics.patch
+          echo '8606cc925aa3b3a6417abb1fba9a11df916cc2b281880978fb6229aa25875be9  ci_payload/digital-surface-live-readiness/book-arrival-model.patch' | sha256sum -c -
+          patch -d source -p1 < ci_payload/digital-surface-live-readiness/book-arrival-model.patch
+          cp -a ci_payload/digital-surface-live-readiness/shadow-source/. source/
+          cp -a ci_payload/digital-surface-live-readiness/prospective-source/. source/
+          cp -a ci_payload/digital-surface-live-readiness/observer-source/. source/
+          cp -a ci_payload/digital-surface-live-readiness/simulation-source/. source/
+          cp -a ci_payload/digital-surface-live-readiness/market-state-source/. source/
+          cp -a ci_payload/digital-surface-live-readiness/market-state-observer-source/. source/
+          cp -a ci_payload/digital-surface-live-readiness/prospective-signal-source/. source/
+
+          cat > /tmp/prospective-signal.sha256 <<'EOF'
+          c147efb911b0f6f049902fdf037f5aef8f044bc944a5aac9e298f93283c38996  source/research/digital_surface/prospective_signal.py
+          e2c21e61bd450343bc2271db83cd9b27cd316e5c50d3f9ac1128f3f38be998ed  source/tests/digital_surface/test_prospective_signal.py
+          EOF
+          sed -i 's/^          //' /tmp/prospective-signal.sha256
+          sha256sum -c /tmp/prospective-signal.sha256
+          cp /tmp/prospective-signal.sha256 source/PROSPECTIVE_SIGNAL_SOURCE_SHA256.txt
+
+      - name: Install pinned test stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy==2.2.6 pandas==2.2.3 scipy==1.15.3 scikit-learn==1.6.1 pyarrow==19.0.1 requests==2.32.3 pytest==8.3.5 tabulate==0.9.0
+
+      - name: Compile and pass exactly 76 tests
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q research/digital_surface tests/digital_surface
+          PYTHONPATH=. pytest --collect-only -q tests/digital_surface | tee /tmp/collect.txt
+          grep -Eq '^76 tests collected' /tmp/collect.txt
+          PYTHONPATH=. pytest tests/digital_surface -q
+
+      - name: Verify frozen causal signal semantics
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          from decimal import Decimal
+          from pathlib import Path
+
+          from research.digital_surface.binance_public import BTCMarketState
+          from research.digital_surface.market_discovery import GammaMarketRecord
+          from research.digital_surface.prospective_signal import FrozenSurfacePolicy, generate_prospective_candidates
+          from research.digital_surface.public_books import parse_public_order_book
+
+          payload = {
+              'version': 1,
+              'model': {'coefficients': [0.0, 1.0, 0.0, 0.0], 'training_rows': 1000, 'training_contracts': 500},
+              'candidate': {
+                  'min_edge': 0.02, 'max_total_cost': 1.25, 'min_tau_s': 3.0, 'max_tau_s': 60.0,
+                  'decision_cadence_s': 5, 'pair_gap_ms': 2000, 'slippage': 0.01, 'uncertainty_penalty': 0.0,
+              },
+              'selection': 'first_trigger_per_expiry',
+              'flow_assumption': 'zero_without_public_causal_trade_flow',
+          }
+          policy = FrozenSurfacePolicy.from_payload(payload, policy_sha256='1'*64)
+          markets = [
+              GammaMarketRecord('five', 'btc-updown-5m-1000', 'Bitcoin Up or Down', 'yes-five', 'no-five', 300, 1000, '', Decimal('0.01')),
+              GammaMarketRecord('fifteen', 'btc-updown-15m-400', 'Bitcoin Up or Down', 'yes-fifteen', 'no-fifteen', 900, 400, '', Decimal('0.01')),
+          ]
+          def book(token, condition):
+              return parse_public_order_book({
+                  'market': condition, 'asset_id': token, 'timestamp': '1250000', 'hash': 'h-'+token,
+                  'bids': [{'price': '0.40', 'size': '10'}], 'asks': [{'price': '0.45', 'size': '10'}],
+                  'min_order_size': '1', 'tick_size': '0.01', 'neg_risk': False,
+              })
+          books = {token: book(token, market.condition_id) for market in markets for token in (market.yes_token_id, market.no_token_id)}
+          state = BTCMarketState(
+              symbol='BTCUSDT', server_time_ms=1_250_000, observed_ts_ms=1_250_000,
+              spot=Decimal('100'), vol_30s=0.001, vol_120s=0.0015,
+              strikes={1_000_000: Decimal('99'), 400_000: Decimal('101')}, closed_one_second_bars=121,
+              raw_response_sha256={'server_time': 'a'*64, 'one_second_klines': 'b'*64, 'strike:1000000': 'c'*64, 'strike:400000': 'd'*64},
+          )
+          candidates, summary = generate_prospective_candidates(
+              markets, books, state, book_observed_ts_ms=1_250_000, policy=policy,
+              prospective_head_sha256='2'*64, book_ledger_head_sha256='3'*64, spot_state_head_sha256='4'*64,
+          )
+          assert len(candidates) == 1
+          row = candidates.iloc[0]
+          assert row['low_condition_id'] == 'five'
+          assert row['high_condition_id'] == 'fifteen'
+          assert row['low_yes_token_id'] == 'yes-five'
+          assert row['high_no_token_id'] == 'no-fifteen'
+          assert summary['future_outcomes_used'] == 0
+          assert bool(row['transactionally_atomic']) is False
+          assert row['fill_model'] == 'public_book_arrival_shadow'
+
+          verified = {}
+          for line in Path('PROSPECTIVE_SIGNAL_SOURCE_SHA256.txt').read_text().splitlines():
+              wanted, name = line.split(maxsplit=1)
+              got = hashlib.sha256(Path(name).read_bytes()).hexdigest()
+              assert got == wanted
+              verified[name] = got
+          result = {
+              'tests_collected': 76,
+              'same_expiry_pairing': True,
+              'lower_strike_yes_higher_strike_no': True,
+              'first_trigger_selection': True,
+              'future_outcomes_used': 0,
+              'transactionally_atomic': False,
+              'order_submissions': 0,
+              'live_mode': 'physically_disabled',
+              'source_files_verified': verified,
+          }
+          Path('PROSPECTIVE_SIGNAL_VERIFICATION.json').write_text(json.dumps(result, indent=2, sort_keys=True))
+          print(json.dumps(result, indent=2))
+          PY
+
+      - name: Build deterministic source checkpoint
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf digital-surface-prospective-signal-source-v1.tar.gz \
+            research tests PROSPECTIVE_SIGNAL_SOURCE_SHA256.txt PROSPECTIVE_SIGNAL_VERIFICATION.json
+          sha256sum digital-surface-prospective-signal-source-v1.tar.gz > digital-surface-prospective-signal-source-v1.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digital-surface-prospective-signal-checkpoint-v1
+          path: |
+            source/PROSPECTIVE_SIGNAL_SOURCE_SHA256.txt
+            source/PROSPECTIVE_SIGNAL_VERIFICATION.json
+            source/digital-surface-prospective-signal-source-v1.tar.gz
+            source/digital-surface-prospective-signal-source-v1.tar.gz.sha256
+          retention-days: 30

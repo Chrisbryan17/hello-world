@@ -1,0 +1,143 @@
+name: Verify Digital Surface Execution Diagnostics
+
+on:
+  push:
+    branches: [digital-surface-live-readiness-20260725]
+    paths:
+      - .github/workflows/digital-surface-execution-diagnostics-verify.yml
+      - ci_payload/digital-surface-live-readiness/DIAGNOSTIC_FINDINGS.md
+  pull_request:
+    branches: [digital-surface-ci-20260724]
+    paths:
+      - .github/workflows/digital-surface-execution-diagnostics-verify.yml
+      - ci_payload/digital-surface-live-readiness/DIAGNOSTIC_FINDINGS.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  BASELINE_ARTIFACT_ID: '8615107471'
+  DIAGNOSTIC_ARTIFACT_ID: '8617727219'
+  BASELINE_ZIP_SHA256: '479a25e235841d94077b3d2df070c8ed46bb736c7ebd8f9f1bde8016198a9c39'
+  DIAGNOSTIC_ZIP_SHA256: '80a442cded15e26703c401e197a53db28ae59b61efa6dcb808a0d65ead961293'
+
+jobs:
+  verify-artifacts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pinned readers
+        run: python -m pip install pandas==2.2.3 pyarrow==19.0.1
+
+      - name: Download immutable baseline and diagnostic artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for pair in "baseline:${BASELINE_ARTIFACT_ID}" "diagnostic:${DIAGNOSTIC_ARTIFACT_ID}"; do
+            name=${pair%%:*}
+            id=${pair##*:}
+            curl --fail --location --silent --show-error \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}/zip" \
+              -o "${name}.zip"
+            mkdir "${name}"
+            unzip -q "${name}.zip" -d "${name}"
+          done
+          echo "${BASELINE_ZIP_SHA256}  baseline.zip" | sha256sum -c -
+          echo "${DIAGNOSTIC_ZIP_SHA256}  diagnostic.zip" | sha256sum -c -
+
+      - name: Verify semantic identity and execution attribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import csv
+          import hashlib
+          import json
+          from collections import Counter
+          from pathlib import Path
+
+          import pandas as pd
+
+          baseline = Path('baseline/artifacts/digital-surface-arbitrage')
+          current = Path('diagnostic/artifacts/digital-surface-execution-diagnostics')
+
+          baseline_candidates = pd.read_parquet(baseline / 'candidate_ledger.parquet')
+          current_candidates = pd.read_parquet(current / 'candidate_ledger.parquet')
+          pd.testing.assert_frame_equal(
+              baseline_candidates,
+              current_candidates,
+              check_exact=True,
+              check_dtype=True,
+              check_like=False,
+          )
+
+          exact_files = {
+              'execution_ledger.parquet': 'cf6733acd95cf3e474724258c88bd4fa2e8987c203e3f5a81f6c9ab268601ae0',
+              'fold_results.csv': 'c4e51189ee942929c9764012501da9580de2fa8b4f983c38cee593707df5c0d7',
+              'admission.json': '9912874614b9558eefc48e1a69507b6bad14a4e13004134d7f785f239907371a',
+          }
+          for name, expected in exact_files.items():
+              actual = hashlib.sha256((current / name).read_bytes()).hexdigest()
+              assert actual == expected, (name, actual, expected)
+              assert (current / name).read_bytes() == (baseline / name).read_bytes(), name
+
+          rows = list(csv.DictReader((current / 'execution_failure_attribution.csv').open()))
+          candidate_ids = {str(value) for value in current_candidates['candidate_id']}
+          assert len(rows) == 2 * len(candidate_ids) == 448
+          assert Counter(row['candidate_id'] for row in rows) == Counter({value: 2 for value in candidate_ids})
+
+          reasons = Counter(row['reason'] for row in rows)
+          expected_reasons = {
+              'insufficient_post_arrival_tape': 186,
+              'ask_above_limit': 114,
+              'missing_post_arrival_book': 110,
+              'filled': 34,
+              'insufficient_displayed_depth': 4,
+          }
+          assert dict(reasons) == expected_reasons, (reasons, expected_reasons)
+
+          summary = json.loads((current / 'EXECUTION_DIAGNOSTICS.json').read_text())
+          assert summary['complete_attribution'] is True
+          assert summary['candidates_attributed'] == 224
+          assert summary['legs_attributed'] == 448
+
+          internal = json.loads((current / 'SHA256SUMS.json').read_text())
+          for name, expected in internal.items():
+              actual = hashlib.sha256((current / name).read_bytes()).hexdigest()
+              assert actual == expected, (name, actual, expected)
+
+          sidecar = Path('diagnostic/digital-surface-execution-diagnostics-v1.tar.gz.sha256').read_text().split()[0]
+          tar_digest = hashlib.sha256(Path('diagnostic/digital-surface-execution-diagnostics-v1.tar.gz').read_bytes()).hexdigest()
+          assert tar_digest == sidecar, (tar_digest, sidecar)
+
+          result = {
+              'baseline_candidates_semantically_identical': True,
+              'exact_downstream_outputs_identical': sorted(exact_files),
+              'candidates_attributed': 224,
+              'legs_attributed': 448,
+              'reason_counts': expected_reasons,
+              'internal_checksums_verified': len(internal),
+              'diagnostic_tar_sha256': tar_digest,
+              'live_mode': 'disabled',
+          }
+          Path('DIAGNOSTIC_ARTIFACT_VERIFICATION.json').write_text(json.dumps(result, indent=2, sort_keys=True))
+          print(json.dumps(result, indent=2))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digital-surface-execution-diagnostic-verification
+          path: DIAGNOSTIC_ARTIFACT_VERIFICATION.json
+          retention-days: 30

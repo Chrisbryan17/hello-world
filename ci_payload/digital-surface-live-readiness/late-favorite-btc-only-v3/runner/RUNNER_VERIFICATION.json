@@ -1,0 +1,22 @@
+{
+  "authenticated_requests": 0,
+  "candidate": "late_favorite_btc_only_v3_prospective_shadow",
+  "combined_runtime_source_sha256": "b398e7b9893170cb47ea17923448a87a10b017249a950ca670f9b09081b0d845",
+  "credentials_used": 0,
+  "historical_admission_credit": 0,
+  "live_submission": "physically_absent",
+  "order_submissions": 0,
+  "runner_commands": [
+    "collect-next",
+    "resolve",
+    "status"
+  ],
+  "source_files_sha256": {
+    "collector/public_collector.py": "85c16a1e9805b89a234139f15140c4f0f39658887419d70c2caf4c238dd5cc6b",
+    "collector/resolution.py": "bb4a643d4618e78442c11ef21ac15483c048a89e5bc7e900500af661f6a8c91c",
+    "runner/observer_cli.py": "07025cd07f79787c69d6ff6cd189f01c846e5b8c824a727cea63fe1e288125e7",
+    "source/capture_policy.py": "bda91808405d5b9e6ee6a09bd464cecd751c23573584bc2624891f5bf091e955",
+    "source/late_favorite_v3.py": "190ad8d358229f448b42a4dd8dc0e25532b440ce88a8e897fb9cb3c835cc42ee"
+  },
+  "tests_collected": 5
+}
