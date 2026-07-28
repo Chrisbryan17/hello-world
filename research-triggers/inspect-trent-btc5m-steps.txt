@@ -1,0 +1,1 @@
+Inspect the full Trent BTC5m steps manifest and three representative step files before compacting the pre-March-24 independent corpus.
