@@ -1,0 +1,111 @@
+name: NDO2 signed-codeload encrypted bridge v3
+
+on:
+  push:
+    branches:
+      - ndo2-private-bridge-20260828
+    paths:
+      - .github/workflows/ndo2-private-bridge-v3.yml
+      - .bridge/start-v3
+
+permissions:
+  contents: write
+
+env:
+  BRIDGE_BRANCH: ndo2-private-bridge-20260828
+
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout public bridge branch
+        uses: actions/checkout@v4
+        with:
+          ref: ndo2-private-bridge-20260828
+
+      - name: Publish ephemeral RSA public key
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$RUNNER_TEMP/private-v3.pem" >/dev/null 2>&1
+          openssl pkey -in "$RUNNER_TEMP/private-v3.pem" -pubout -out .bridge/public-v3.pem >/dev/null 2>&1
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .bridge/public-v3.pem
+          git commit -m 'bridge: publish v3 ephemeral public key' >/dev/null
+          git push origin HEAD:${BRIDGE_BRANCH} >/dev/null
+
+      - name: Receive payload and build verified encrypted source archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          payload_api="repos/${GITHUB_REPOSITORY}/contents/.bridge/payload-v3.bin?ref=${BRIDGE_BRANCH}"
+          found=0
+          for _ in $(seq 1 120); do
+            if gh api "$payload_api" --jq .content > "$RUNNER_TEMP/payload.b64" 2>/dev/null; then
+              tr -d '\n' < "$RUNNER_TEMP/payload.b64" | base64 -d > "$RUNNER_TEMP/payload.bin"
+              if [ -s "$RUNNER_TEMP/payload.bin" ]; then found=1; break; fi
+            fi
+            sleep 3
+          done
+          test "$found" = 1
+          openssl pkeyutl -decrypt -inkey "$RUNNER_TEMP/private-v3.pem" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -in "$RUNNER_TEMP/payload.bin" -out "$RUNNER_TEMP/payload.json"
+
+          eval "$(python3 - "$RUNNER_TEMP/payload.json" <<'PY'
+          import json, shlex, sys
+          p=json.load(open(sys.argv[1], encoding='utf-8'))
+          for k in ('raw_token','archive_password','commit','tree'):
+              if not p.get(k): raise SystemExit('missing '+k)
+          print('RAW_TOKEN='+shlex.quote(str(p['raw_token'])))
+          print('ARCHIVE_PASSWORD='+shlex.quote(str(p['archive_password'])))
+          print('TARGET_COMMIT='+shlex.quote(str(p['commit'])))
+          print('TARGET_TREE='+shlex.quote(str(p['tree'])))
+          PY
+          )"
+          echo "::add-mask::$RAW_TOKEN"
+          echo "::add-mask::$ARCHIVE_PASSWORD"
+
+          url="https://codeload.github.com/Chrisbryan17/NDO2/legacy.tar.gz/${TARGET_COMMIT}?token=${RAW_TOKEN}"
+          http_code="$(curl -L -sS -o "$RUNNER_TEMP/source.tgz" -w '%{http_code}' "$url" || true)"
+          if [ "$http_code" != 200 ] || [ ! -s "$RUNNER_TEMP/source.tgz" ]; then
+            echo "codeload_status=$http_code" >&2
+            exit 31
+          fi
+
+          mkdir -p "$RUNNER_TEMP/extracted"
+          tar -xzf "$RUNNER_TEMP/source.tgz" -C "$RUNNER_TEMP/extracted"
+          root="$(find "$RUNNER_TEMP/extracted" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$root"
+          cd "$root"
+          git init -q
+          git add -f -A
+          actual_tree="$(git write-tree)"
+          if [ "$actual_tree" != "$TARGET_TREE" ]; then
+            echo "tree_mismatch expected=$TARGET_TREE actual=$actual_tree" >&2
+            exit 32
+          fi
+
+          plain_sha="$(sha256sum "$RUNNER_TEMP/source.tgz" | awk '{print $1}')"
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+            -pass env:ARCHIVE_PASSWORD \
+            -in "$RUNNER_TEMP/source.tgz" \
+            -out "$RUNNER_TEMP/ndo2-source.tgz.enc"
+          enc_sha="$(sha256sum "$RUNNER_TEMP/ndo2-source.tgz.enc" | awk '{print $1}')"
+          printf 'verified_commit=%s\nverified_tree=%s\nplain_sha256=%s\nencrypted_sha256=%s\n' \
+            "$TARGET_COMMIT" "$actual_tree" "$plain_sha" "$enc_sha" > "$RUNNER_TEMP/bridge-manifest.txt"
+          rm -rf "$RUNNER_TEMP/source.tgz" "$RUNNER_TEMP/extracted" "$RUNNER_TEMP/payload.json" "$RUNNER_TEMP/private-v3.pem"
+
+      - name: Upload encrypted exact source
+        uses: actions/upload-artifact@v4
+        with:
+          name: ndo2-source-encrypted-421a1543-v3
+          path: |
+            ${{ runner.temp }}/ndo2-source.tgz.enc
+            ${{ runner.temp }}/bridge-manifest.txt
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
