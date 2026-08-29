@@ -1,0 +1,116 @@
+name: NDO2 private encrypted transport bridge
+
+on:
+  push:
+    branches:
+      - ndo2-private-bridge-20260828
+    paths:
+      - .github/workflows/ndo2-private-bridge.yml
+      - .bridge/start
+
+permissions:
+  contents: read
+
+env:
+  BRIDGE_BRANCH: ndo2-private-bridge-20260828
+
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Generate ephemeral RSA key and publish public half
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$RUNNER_TEMP/bridge-private.pem" >/dev/null 2>&1
+          openssl pkey -in "$RUNNER_TEMP/bridge-private.pem" -pubout -out "$RUNNER_TEMP/bridge-public.pem" >/dev/null 2>&1
+          echo 'NDO2_BRIDGE_PUBLIC_KEY_B64_BEGIN'
+          base64 -w0 "$RUNNER_TEMP/bridge-public.pem"
+          echo
+          echo 'NDO2_BRIDGE_PUBLIC_KEY_B64_END'
+
+      - name: Wait for encrypted payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${BRIDGE_BRANCH}/.bridge/payload.bin"
+          found=0
+          for _ in $(seq 1 120); do
+            code="$(curl -L -sS -o "$RUNNER_TEMP/payload.bin" -w '%{http_code}' "$URL" || true)"
+            if [ "$code" = 200 ] && [ -s "$RUNNER_TEMP/payload.bin" ]; then
+              found=1
+              break
+            fi
+            sleep 5
+          done
+          if [ "$found" != 1 ]; then
+            echo 'encrypted bridge payload did not arrive' >&2
+            exit 20
+          fi
+          openssl pkeyutl -decrypt -inkey "$RUNNER_TEMP/bridge-private.pem" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -in "$RUNNER_TEMP/payload.bin" -out "$RUNNER_TEMP/payload.json"
+          chmod 600 "$RUNNER_TEMP/payload.json"
+
+      - name: Fetch exact private NDO2 commit and verify Git identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$RUNNER_TEMP/payload.json" "$GITHUB_ENV" <<'PY'
+          import json, sys
+          p=json.load(open(sys.argv[1], encoding='utf-8'))
+          required=('raw_token','archive_password','commit','tree')
+          if any(not p.get(k) for k in required):
+              raise SystemExit('payload missing required field')
+          with open(sys.argv[2], 'a', encoding='utf-8') as f:
+              for key, envname in [('raw_token','NDO2_TOKEN'),('archive_password','ARCHIVE_PASSWORD'),('commit','TARGET_COMMIT'),('tree','TARGET_TREE')]:
+                  value=str(p[key]).replace('\n','')
+                  print(f'{envname}<<NDO2EOF', file=f)
+                  print(value, file=f)
+                  print('NDO2EOF', file=f)
+          PY
+          echo "::add-mask::$NDO2_TOKEN"
+          echo "::add-mask::$ARCHIVE_PASSWORD"
+          mkdir -p "$RUNNER_TEMP/ndo2"
+          cd "$RUNNER_TEMP/ndo2"
+          git init -q
+          git remote add origin https://github.com/Chrisbryan17/NDO2.git
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: bearer $NDO2_TOKEN"
+          git fetch -q --depth=1 origin "$TARGET_COMMIT"
+          git checkout -q --detach FETCH_HEAD
+          actual_commit="$(git rev-parse HEAD)"
+          actual_tree="$(git rev-parse 'HEAD^{tree}')"
+          test "$actual_commit" = "$TARGET_COMMIT"
+          test "$actual_tree" = "$TARGET_TREE"
+          printf 'verified_commit=%s\nverified_tree=%s\n' "$actual_commit" "$actual_tree" > "$RUNNER_TEMP/identity.txt"
+
+      - name: Create deterministic source tar and encrypt it
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/ndo2"
+          git archive --format=tar --prefix=NDO2/ "$TARGET_COMMIT" > "$RUNNER_TEMP/ndo2-source.tar"
+          plain_sha="$(sha256sum "$RUNNER_TEMP/ndo2-source.tar" | awk '{print $1}')"
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+            -pass env:ARCHIVE_PASSWORD \
+            -in "$RUNNER_TEMP/ndo2-source.tar" \
+            -out "$RUNNER_TEMP/ndo2-source.tar.enc"
+          enc_sha="$(sha256sum "$RUNNER_TEMP/ndo2-source.tar.enc" | awk '{print $1}')"
+          {
+            cat "$RUNNER_TEMP/identity.txt"
+            printf 'plain_sha256=%s\nencrypted_sha256=%s\n' "$plain_sha" "$enc_sha"
+          } > "$RUNNER_TEMP/bridge-manifest.txt"
+          rm -f "$RUNNER_TEMP/ndo2-source.tar" "$RUNNER_TEMP/payload.json" "$RUNNER_TEMP/bridge-private.pem"
+
+      - name: Upload encrypted source transport
+        uses: actions/upload-artifact@v4
+        with:
+          name: ndo2-source-encrypted-421a1543
+          path: |
+            ${{ runner.temp }}/ndo2-source.tar.enc
+            ${{ runner.temp }}/bridge-manifest.txt
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
