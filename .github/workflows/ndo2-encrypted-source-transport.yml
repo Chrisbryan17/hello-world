@@ -18,9 +18,9 @@ env:
 jobs:
   bridge:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      - name: Establish encrypted mailbox and transfer exact source
+      - name: Establish encrypted mailbox and reconstruct exact source
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -31,39 +31,36 @@ jobs:
           work="$(mktemp -d)"
           trap 'rm -rf "$work"' EXIT
 
+          post_comment() {
+            local body="$1"
+            jq -nc --arg body "$body" '{body:$body}' > "$work/comment.json"
+            curl -fsS -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${MAILBOX_ISSUE}/comments" \
+              --data-binary @"$work/comment.json" >/dev/null
+          }
+
           openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$work/private.pem" >/dev/null 2>&1
           openssl pkey -in "$work/private.pem" -pubout -out "$work/public.pem"
           public_key_b64="$(base64 -w0 "$work/public.pem")"
           key_prefix="NDO2_BRIDGE_PUBKEY:${GITHUB_RUN_ID}:"
           payload_prefix="NDO2_BRIDGE_PAYLOAD:${GITHUB_RUN_ID}:"
-
-          jq -nc --arg body "${key_prefix}${public_key_b64}" '{body:$body}' > "$work/comment.json"
-          curl -fsS \
-            -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${MAILBOX_ISSUE}/comments" \
-            --data-binary @"$work/comment.json" >/dev/null
+          post_comment "${key_prefix}${public_key_b64}"
 
           payload=""
-          for _ in $(seq 1 180); do
+          for _ in $(seq 1 240); do
             comments="$(curl -fsS \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
               "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${MAILBOX_ISSUE}/comments?per_page=100")"
             payload="$(jq -r --arg p "$payload_prefix" '[.[] | .body | select(startswith($p))] | last // empty' <<<"$comments")"
-            if [[ -n "$payload" ]]; then
-              break
-            fi
+            [[ -n "$payload" ]] && break
             sleep 2
           done
-
-          if [[ -z "$payload" ]]; then
-            echo "Encrypted payload was not received before timeout." >&2
-            exit 20
-          fi
+          [[ -n "$payload" ]] || { echo "Encrypted payload timeout" >&2; exit 20; }
 
           printf '%s' "${payload#${payload_prefix}}" | base64 -d > "$work/payload.bin"
           openssl pkeyutl -decrypt \
@@ -77,66 +74,128 @@ jobs:
           archive_password="$(jq -er '.archive_password' "$work/payload.json")"
           commit="$(jq -er '.commit' "$work/payload.json")"
           tree="$(jq -er '.tree' "$work/payload.json")"
+          [[ "$commit" == "$TARGET_COMMIT" ]] || exit 21
+          [[ "$tree" == "$TARGET_TREE" ]] || exit 22
 
-          [[ "$commit" == "$TARGET_COMMIT" ]] || { echo "Commit identity mismatch" >&2; exit 21; }
-          [[ "$tree" == "$TARGET_TREE" ]] || { echo "Tree identity mismatch" >&2; exit 22; }
+          # Prove the credential still works for raw private files.
+          raw_code="$(curl -sS -o "$work/readme" -w '%{http_code}' \
+            "https://raw.githubusercontent.com/${TARGET_REPO}/${TARGET_COMMIT}/README.md?token=${raw_token}")"
+          [[ "$raw_code" == "200" ]] || { post_comment "NDO2_BRIDGE_PROBE:${GITHUB_RUN_ID}:raw=${raw_code}:api=not-tested"; exit 23; }
 
-          archive="$work/source.tar.gz"
-          ok=0
-          candidates=(
-            "https://codeload.github.com/${TARGET_REPO}/tar.gz/${TARGET_COMMIT}?token=${raw_token}"
-            "https://github.com/${TARGET_REPO}/archive/${TARGET_COMMIT}.tar.gz?token=${raw_token}"
-            "https://api.github.com/repos/${TARGET_REPO}/tarball/${TARGET_COMMIT}?token=${raw_token}"
-          )
-
-          for candidate in "${candidates[@]}"; do
-            rm -f "$archive"
-            if curl -fLsS --retry 1 --connect-timeout 20 --max-time 180 "$candidate" -o "$archive" \
-              && tar -tzf "$archive" >/dev/null 2>&1; then
-              ok=1
-              break
+          # Determine whether the temporary raw credential is also accepted by a private Git-tree endpoint.
+          manifest="$work/tree.json"
+          api_mode=""
+          query_code="$(curl -sS -o "$manifest" -w '%{http_code}' \
+            "https://api.github.com/repos/${TARGET_REPO}/git/trees/${TARGET_TREE}?recursive=1&token=${raw_token}")"
+          if [[ "$query_code" == "200" ]] && jq -e '.tree' "$manifest" >/dev/null 2>&1; then
+            api_mode="query"
+          else
+            bearer_code="$(curl -sS -o "$manifest" -w '%{http_code}' \
+              -H "Authorization: Bearer ${raw_token}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${TARGET_REPO}/git/trees/${TARGET_TREE}?recursive=1")"
+            if [[ "$bearer_code" == "200" ]] && jq -e '.tree' "$manifest" >/dev/null 2>&1; then
+              api_mode="bearer"
+            else
+              token_code="$(curl -sS -o "$manifest" -w '%{http_code}' \
+                -H "Authorization: token ${raw_token}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${TARGET_REPO}/git/trees/${TARGET_TREE}?recursive=1")"
+              if [[ "$token_code" == "200" ]] && jq -e '.tree' "$manifest" >/dev/null 2>&1; then
+                api_mode="token-header"
+              fi
             fi
-          done
-
-          if [[ "$ok" -ne 1 ]]; then
-            echo "Temporary raw token did not authorize a commit archive on tested GitHub archive endpoints." >&2
-            exit 23
           fi
 
+          bearer_code="${bearer_code:-not-tested}"
+          token_code="${token_code:-not-tested}"
+          if [[ -z "$api_mode" ]]; then
+            post_comment "NDO2_BRIDGE_PROBE:${GITHUB_RUN_ID}:raw=${raw_code}:query=${query_code}:bearer=${bearer_code}:token=${token_code}"
+            echo "Temporary raw credential is not accepted by GitHub private Git-tree API." >&2
+            exit 25
+          fi
+
+          truncated="$(jq -r '.truncated // false' "$manifest")"
+          [[ "$truncated" == "false" ]] || { post_comment "NDO2_BRIDGE_MANIFEST:${GITHUB_RUN_ID}:truncated=true"; exit 26; }
+          blob_count="$(jq '[.tree[] | select(.type=="blob")] | length' "$manifest")"
+          gitlink_count="$(jq '[.tree[] | select(.mode=="160000")] | length' "$manifest")"
+          [[ "$gitlink_count" == "0" ]] || { post_comment "NDO2_BRIDGE_MANIFEST:${GITHUB_RUN_ID}:gitlinks=${gitlink_count}"; exit 27; }
+          post_comment "NDO2_BRIDGE_MANIFEST:${GITHUB_RUN_ID}:api=${api_mode}:blobs=${blob_count}:gitlinks=0"
+
           mkdir "$work/src"
-          tar -xzf "$archive" -C "$work/src" --strip-components=1
+          TARGET_REPO="$TARGET_REPO" TARGET_COMMIT="$TARGET_COMMIT" RAW_TOKEN="$raw_token" \
+          MANIFEST="$manifest" DEST="$work/src" python3 - <<'PY'
+          import concurrent.futures, json, os, pathlib, stat, urllib.parse, urllib.request
+
+          repo = os.environ['TARGET_REPO']
+          commit = os.environ['TARGET_COMMIT']
+          token = os.environ['RAW_TOKEN']
+          manifest = json.load(open(os.environ['MANIFEST'], 'r', encoding='utf-8'))
+          dest = pathlib.Path(os.environ['DEST'])
+          blobs = [e for e in manifest['tree'] if e.get('type') == 'blob']
+
+          def fetch(entry):
+              rel = entry['path']
+              quoted = urllib.parse.quote(rel, safe='/')
+              url = f"https://raw.githubusercontent.com/{repo}/{commit}/{quoted}?token={urllib.parse.quote(token, safe='')}"
+              req = urllib.request.Request(url, headers={'User-Agent': 'ndo2-encrypted-source-transport'})
+              with urllib.request.urlopen(req, timeout=90) as r:
+                  data = r.read()
+              p = dest / rel
+              p.parent.mkdir(parents=True, exist_ok=True)
+              mode = entry.get('mode')
+              if mode == '120000':
+                  target = data.decode('utf-8')
+                  try:
+                      p.unlink()
+                  except FileNotFoundError:
+                      pass
+                  os.symlink(target, p)
+              else:
+                  p.write_bytes(data)
+                  p.chmod(0o755 if mode == '100755' else 0o644)
+              return rel
+
+          errors = []
+          with concurrent.futures.ThreadPoolExecutor(max_workers=24) as ex:
+              futures = {ex.submit(fetch, e): e['path'] for e in blobs}
+              for f in concurrent.futures.as_completed(futures):
+                  try:
+                      f.result()
+                  except Exception as exc:
+                      errors.append((futures[f], repr(exc)))
+                      if len(errors) >= 20:
+                          break
+          if errors:
+              raise SystemExit("download failures: " + json.dumps(errors, ensure_ascii=False))
+          PY
+
           git -C "$work/src" init -q
+          git -C "$work/src" config core.filemode true
           git -C "$work/src" add -A
           actual_tree="$(git -C "$work/src" write-tree)"
           if [[ "$actual_tree" != "$TARGET_TREE" ]]; then
-            echo "Archive extracted tree mismatch: expected ${TARGET_TREE}, got ${actual_tree}" >&2
-            exit 24
+            post_comment "NDO2_BRIDGE_TREE_MISMATCH:${GITHUB_RUN_ID}:${actual_tree}"
+            echo "Expected ${TARGET_TREE}; reconstructed ${actual_tree}" >&2
+            exit 28
           fi
 
+          archive="$work/source.tar.gz"
+          tar --exclude='./.git' -C "$work/src" -czf "$archive" .
           cipher="$GITHUB_WORKSPACE/ndo2-${TARGET_COMMIT}.tar.gz.enc"
           metadata="$GITHUB_WORKSPACE/ndo2-${TARGET_COMMIT}.metadata.txt"
           ARCHIVE_PASSWORD="$archive_password" openssl enc -aes-256-cbc -salt -pbkdf2 -iter 250000 \
-            -pass env:ARCHIVE_PASSWORD \
-            -in "$archive" \
-            -out "$cipher"
-
+            -pass env:ARCHIVE_PASSWORD -in "$archive" -out "$cipher"
           cipher_sha="$(sha256sum "$cipher" | awk '{print $1}')"
           {
             echo "target_repo=${TARGET_REPO}"
             echo "target_commit=${TARGET_COMMIT}"
             echo "target_tree=${TARGET_TREE}"
             echo "cipher_sha256=${cipher_sha}"
+            echo "blob_count=${blob_count}"
             echo "verification=git_write_tree_match"
           } > "$metadata"
-
-          jq -nc --arg body "NDO2_BRIDGE_VERIFIED:${GITHUB_RUN_ID}:${TARGET_COMMIT}:${TARGET_TREE}:${cipher_sha}" '{body:$body}' > "$work/verified.json"
-          curl -fsS \
-            -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${MAILBOX_ISSUE}/comments" \
-            --data-binary @"$work/verified.json" >/dev/null
+          post_comment "NDO2_BRIDGE_VERIFIED:${GITHUB_RUN_ID}:${TARGET_COMMIT}:${TARGET_TREE}:${cipher_sha}"
 
       - name: Upload encrypted exact-source artifact
         uses: actions/upload-artifact@v4
