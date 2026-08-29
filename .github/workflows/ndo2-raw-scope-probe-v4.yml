@@ -1,0 +1,66 @@
+name: NDO2 raw token scope probe v4
+
+on:
+  push:
+    branches: [ndo2-private-bridge-20260828]
+    paths:
+      - .github/workflows/ndo2-raw-scope-probe-v4.yml
+      - .bridge/start-v4
+
+permissions:
+  contents: write
+
+env:
+  BRIDGE_BRANCH: ndo2-private-bridge-20260828
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ndo2-private-bridge-20260828
+      - name: Publish ephemeral key
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$RUNNER_TEMP/private-v4.pem" >/dev/null 2>&1
+          openssl pkey -in "$RUNNER_TEMP/private-v4.pem" -pubout -out .bridge/public-v4.pem >/dev/null 2>&1
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .bridge/public-v4.pem
+          git commit -m 'bridge: publish v4 ephemeral public key' >/dev/null
+          git push origin HEAD:${BRIDGE_BRANCH} >/dev/null
+      - name: Probe raw token scope
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          found=0
+          for _ in $(seq 1 100); do
+            if gh api "repos/${GITHUB_REPOSITORY}/contents/.bridge/payload-v4.bin?ref=${BRIDGE_BRANCH}" --jq .content > "$RUNNER_TEMP/payload.b64" 2>/dev/null; then
+              tr -d '\n' < "$RUNNER_TEMP/payload.b64" | base64 -d > "$RUNNER_TEMP/payload.bin"
+              if [ -s "$RUNNER_TEMP/payload.bin" ]; then found=1; break; fi
+            fi
+            sleep 2
+          done
+          test "$found" = 1
+          openssl pkeyutl -decrypt -inkey "$RUNNER_TEMP/private-v4.pem" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -in "$RUNNER_TEMP/payload.bin" -out "$RUNNER_TEMP/payload.json"
+          eval "$(python3 - "$RUNNER_TEMP/payload.json" <<'PY'
+          import json, shlex, sys
+          p=json.load(open(sys.argv[1], encoding='utf-8'))
+          print('RAW_TOKEN='+shlex.quote(str(p['raw_token'])))
+          print('TARGET_COMMIT='+shlex.quote(str(p['commit'])))
+          PY
+          )"
+          echo "::add-mask::$RAW_TOKEN"
+          same="https://raw.githubusercontent.com/Chrisbryan17/NDO2/${TARGET_COMMIT}/.deploy_stageaccount-address-fix.tgz?token=${RAW_TOKEN}"
+          other="https://raw.githubusercontent.com/Chrisbryan17/NDO2/${TARGET_COMMIT}/README.md?token=${RAW_TOKEN}"
+          same_code="$(curl -L -sS -o "$RUNNER_TEMP/same" -w '%{http_code}' "$same" || true)"
+          other_code="$(curl -L -sS -o "$RUNNER_TEMP/other" -w '%{http_code}' "$other" || true)"
+          printf 'same_path_status=%s\nother_path_status=%s\n' "$same_code" "$other_code"
+          test "$same_code" = 200
+          test "$other_code" = 200
